@@ -42,6 +42,7 @@ type fakeSupervisor struct {
 	statuses    []supervisor.Status
 	calls       []string
 	failWith    error
+	unchanged   bool
 	destructive bool
 	applied     bool
 }
@@ -78,9 +79,22 @@ func (f *fakeSupervisor) act(op, name string) error {
 	return supervisor.ErrUnknownService{Name: name}
 }
 
-func (f *fakeSupervisor) Start(name string) error   { return f.act("start", name) }
-func (f *fakeSupervisor) Stop(name string) error    { return f.act("stop", name) }
-func (f *fakeSupervisor) Restart(name string) error { return f.act("restart", name) }
+// changed mirrors the real supervisor: an accepted command that moved nothing
+// answers false, and the generation must not move for it.
+func (f *fakeSupervisor) Start(name string) (bool, error) {
+	err := f.act("start", name)
+	return err == nil && !f.unchanged, err
+}
+
+func (f *fakeSupervisor) Stop(name string) (bool, error) {
+	err := f.act("stop", name)
+	return err == nil && !f.unchanged, err
+}
+
+func (f *fakeSupervisor) Restart(name string) (bool, error) {
+	err := f.act("restart", name)
+	return err == nil && !f.unchanged, err
+}
 
 func (f *fakeSupervisor) Plan(declared []service.Service) []supervisor.Change {
 	f.mu.Lock()
@@ -817,5 +831,47 @@ func TestDescribeListsMetrics(t *testing.T) {
 	}
 	if !slices.Contains(d.Operations, OpMetrics) {
 		t.Fatalf("describe does not list %q: %v", OpMetrics, d.Operations)
+	}
+}
+
+// An apply with nothing to do is accepted and moves nothing: a caller holding
+// the previous generation must not be refused for a change nobody made.
+func TestAnApplyThatChangesNothingHoldsTheGeneration(t *testing.T) {
+	f := newFixture(t)
+	before := f.store.Generation()
+
+	resp, err := f.client().Do(context.Background(), Request{Op: OpApply})
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if resp.Failed() {
+		t.Fatalf("apply failed: %v", resp.Err())
+	}
+	if resp.Generation != before {
+		t.Fatalf("an empty apply moved the generation from %d to %d", before, resp.Generation)
+	}
+}
+
+// Asking a running service to start is accepted, changes nothing, and says so
+// in the audit rather than in an error.
+func TestACommandThatChangesNothingHoldsTheGeneration(t *testing.T) {
+	f := newFixture(t)
+	f.sup.statuses = []supervisor.Status{{Name: "api", State: supervisor.StateRunning}}
+	f.sup.unchanged = true
+	before := f.store.Generation()
+
+	resp, err := f.client().Do(context.Background(), Request{Op: OpServiceStart, Name: "api"})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if resp.Failed() {
+		t.Fatalf("starting a running service failed: %v", resp.Err())
+	}
+	if resp.Generation != before {
+		t.Fatalf("a command that changed nothing moved the generation from %d to %d", before, resp.Generation)
+	}
+	recent := f.store.Recent(1)
+	if len(recent) != 1 || recent[0].Detail != "nothing to change" {
+		t.Fatalf("the audit does not say the command changed nothing: %#v", recent)
 	}
 }

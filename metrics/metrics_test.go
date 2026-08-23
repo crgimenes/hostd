@@ -238,7 +238,7 @@ func TestTickStoresWhatItCollected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Tick: %v", err)
 	}
-	series, err := store.Latest(time.Minute)
+	series, err := store.Latest(Query{}, time.Minute)
 	if err != nil {
 		t.Fatalf("Latest: %v", err)
 	}

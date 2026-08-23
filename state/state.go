@@ -128,10 +128,14 @@ func (s *Store) Check(expected uint64) error {
 
 // A refused or failed operation is audited too, at the generation it did not
 // change: what was attempted is worth as much as what happened.
-func (s *Store) Record(e Entry) uint64 {
+//
+// changed is what moves the counter, not success. An accepted operation that
+// found nothing to do leaves the host where it was, and advancing anyway would
+// refuse the next expect-generation for a change nobody made.
+func (s *Store) Record(e Entry, changed bool) uint64 {
 	s.mu.Lock()
 	e.Before = s.generation
-	if e.Result == ResultOK {
+	if e.Result == ResultOK && changed {
 		s.generation++
 	}
 	e.After = s.generation

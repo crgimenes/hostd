@@ -36,9 +36,9 @@ const (
 type Supervisor interface {
 	Status() []supervisor.Status
 	StatusOf(name string) (supervisor.Status, error)
-	Start(name string) error
-	Stop(name string) error
-	Restart(name string) error
+	Start(name string) (bool, error)
+	Stop(name string) (bool, error)
+	Restart(name string) (bool, error)
 	Plan(declared []service.Service) []supervisor.Change
 	Apply(declared []service.Service) []supervisor.Change
 }
@@ -46,7 +46,7 @@ type Supervisor interface {
 type Store interface {
 	Generation() uint64
 	Check(expected uint64) error
-	Record(e state.Entry) uint64
+	Record(e state.Entry, changed bool) uint64
 	Recent(limit int) []state.Entry
 }
 
@@ -239,21 +239,21 @@ const latestWindow = time.Minute
 // No window asked for means "what is this machine doing", which is the newest
 // value of every series rather than an empty answer.
 func (s *Server) readMetrics(req Request) Response {
+	query := metrics.Query{
+		Scope:  req.Scope,
+		Name:   req.Service,
+		Metric: req.Metric,
+		StepMS: int64(req.StepMS),
+		Limit:  req.Limit,
+	}
 	if req.FromMS <= 0 {
-		series, err := s.metrics.Latest(latestWindow)
+		series, err := s.metrics.Latest(query, latestWindow)
 		if err != nil {
 			return Response{Code: CodeFailed, Message: err.Error()}
 		}
 		return body(series)
 	}
-	query := metrics.Query{
-		Scope:  req.Scope,
-		Name:   req.Service,
-		Metric: req.Metric,
-		From:   time.UnixMilli(int64(req.FromMS)),
-		StepMS: int64(req.StepMS),
-		Limit:  req.Limit,
-	}
+	query.From = time.UnixMilli(int64(req.FromMS))
 	if req.ToMS > 0 {
 		query.To = time.UnixMilli(int64(req.ToMS))
 	}
@@ -273,7 +273,7 @@ func (s *Server) stamp(resp Response) Response {
 }
 
 // Generation check, the work, then the audit entry.
-func (s *Server) mutate(req Request, name string, fn func(string) error) Response {
+func (s *Server) mutate(req Request, name string, fn func(string) (bool, error)) Response {
 	if name == "" {
 		return s.stamp(Response{Code: CodeInvalid, Message: "this operation needs a service name"})
 	}
@@ -283,7 +283,7 @@ func (s *Server) mutate(req Request, name string, fn func(string) error) Respons
 	if err != nil {
 		return s.refuse(entry, CodeConflict, err)
 	}
-	err = fn(name)
+	changed, err := fn(name)
 	if err != nil {
 		_, unknown := errors.AsType[supervisor.ErrUnknownService](err)
 		if unknown {
@@ -291,11 +291,14 @@ func (s *Server) mutate(req Request, name string, fn func(string) error) Respons
 		}
 		entry.Result = state.ResultFailed
 		entry.Detail = err.Error()
-		generation := s.store.Record(entry)
+		generation := s.store.Record(entry, false)
 		return Response{Code: CodeFailed, Message: err.Error(), Generation: generation}
 	}
 	entry.Result = state.ResultOK
-	generation := s.store.Record(entry)
+	if !changed {
+		entry.Detail = "nothing to change"
+	}
+	generation := s.store.Record(entry, changed)
 	resp := body(s.statusList(name))
 	resp.Generation = generation
 	return resp
@@ -305,7 +308,7 @@ func (s *Server) mutate(req Request, name string, fn func(string) error) Respons
 func (s *Server) refuse(entry state.Entry, code string, cause error) Response {
 	entry.Result = state.ResultRefused
 	entry.Detail = cause.Error()
-	generation := s.store.Record(entry)
+	generation := s.store.Record(entry, false)
 	return Response{Code: code, Message: cause.Error(), Generation: generation}
 }
 
@@ -382,7 +385,7 @@ func (s *Server) apply(ctx context.Context, req Request) Response {
 		// machine converging on everything else.
 		entry.Result = state.ResultOK
 		entry.Detail = loadErr.Error()
-		generation := s.store.Record(entry)
+		generation := s.store.Record(entry, len(applied) > 0)
 		return Response{
 			Code:       CodeFailed,
 			Message:    loadErr.Error(),
@@ -392,7 +395,7 @@ func (s *Server) apply(ctx context.Context, req Request) Response {
 	}
 	entry.Result = state.ResultOK
 	entry.Detail = fmt.Sprintf("%d change(s)", len(applied))
-	generation := s.store.Record(entry)
+	generation := s.store.Record(entry, len(applied) > 0)
 	resp := body(applied)
 	resp.Generation = generation
 	return resp

@@ -23,7 +23,11 @@ import (
 	"github.com/crgimenes/hostd/version"
 )
 
+// Stamped with -X main.Version by whatever builds a release.
+var Version string
+
 func main() {
+	version.Set(Version)
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	debug := flag.Bool("debug", false, "write one key=value diagnostic line to stderr every 30s")
 	flag.Usage = func() {

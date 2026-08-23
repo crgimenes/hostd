@@ -68,47 +68,54 @@ func (s *Supervisor) statusOf(p *proc) Status {
 	return st
 }
 
-// Changes the desired state, so asking twice produces one process.
-func (s *Supervisor) Start(name string) error {
-	err := s.setDesired(name, service.StateRunning)
+// Changes the desired state, so asking twice produces one process. The bool
+// says whether this ask moved anything: starting a service that is already
+// running is accepted and changes nothing.
+func (s *Supervisor) Start(name string) (bool, error) {
+	changed, err := s.setDesired(name, service.StateRunning)
 	if err != nil {
-		return err
+		return false, err
 	}
 	s.nudge()
-	return nil
+	return changed, nil
 }
 
-func (s *Supervisor) Stop(name string) error {
-	err := s.setDesired(name, service.StateStopped)
+func (s *Supervisor) Stop(name string) (bool, error) {
+	changed, err := s.setDesired(name, service.StateStopped)
 	if err != nil {
-		return err
+		return false, err
 	}
 	s.nudge()
-	return nil
+	return changed, nil
 }
 
-func (s *Supervisor) setDesired(name, state string) error {
+func (s *Supervisor) setDesired(name, state string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	p, ok := s.procs[name]
 	if !ok {
-		return ErrUnknownService{Name: name}
+		return false, ErrUnknownService{Name: name}
 	}
+	changed := p.svc.State != state
 	p.svc.State = state
 	// An explicit start means now, not after the backoff earned by crashes.
+	// Cutting a wait short is a change even when the desired state already
+	// said running.
 	if state == service.StateRunning {
+		changed = changed || !p.nextStart.IsZero()
 		p.failures = 0
 		p.nextStart = time.Time{}
 	}
-	return nil
+	return changed, nil
 }
 
-func (s *Supervisor) Restart(name string) error {
+// Always a change: it interrupts what is running, or starts what is not.
+func (s *Supervisor) Restart(name string) (bool, error) {
 	s.mu.Lock()
 	p, ok := s.procs[name]
 	if !ok {
 		s.mu.Unlock()
-		return ErrUnknownService{Name: name}
+		return false, ErrUnknownService{Name: name}
 	}
 	p.svc.State = service.StateRunning
 	p.failures = 0
@@ -118,7 +125,7 @@ func (s *Supervisor) Restart(name string) error {
 	}
 	s.mu.Unlock()
 	s.nudge()
-	return nil
+	return true, nil
 }
 
 // Computes the same plan Plan does and carries it out. A service whose

@@ -18,6 +18,7 @@ import (
 
 	"github.com/crgimenes/hostd/api"
 	"github.com/crgimenes/hostd/config"
+	"github.com/crgimenes/hostd/version"
 )
 
 // Part of the interface: messages are for people, these are for programs.
@@ -34,7 +35,11 @@ const (
 	exitRefused = 6
 )
 
+// Stamped with -X main.Version by whatever builds a release.
+var Version string
+
 func main() {
+	version.Set(Version)
 	os.Exit(run(os.Args[1:]))
 }
 
@@ -75,6 +80,7 @@ func run(args []string) int {
 	flags.StringVar(&opt.onBehalfOf, "on-behalf-of", "", "identity this command is being run for, recorded in the audit log")
 	flags.BoolVar(&opt.dryRun, "dry-run", false, "show what apply would do, and do nothing")
 	flags.BoolVar(&opt.debug, "debug", false, "write one key=value diagnostic line per request to stderr")
+	showVersion := flags.Bool("version", false, "print the version and exit")
 	flags.StringVar(&opt.scope, "scope", "", "metrics of the host or of the services")
 	flags.StringVar(&opt.metric, "metric", "", "only this metric, e.g. cpu-percent")
 	flags.DurationVar(&opt.window, "window", 0, "how far back metrics reach; without it, the latest values")
@@ -90,6 +96,10 @@ func run(args []string) int {
 	if err != nil {
 		usage(flags, os.Stderr)
 		return exitUsage
+	}
+	if *showVersion {
+		fmt.Printf("hostctl %s (protocol %d, schema %d)\n", version.Version, version.Protocol, version.Schema)
+		return exitOK
 	}
 	if len(rest) == 0 {
 		usage(flags, os.Stderr)

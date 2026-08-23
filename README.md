@@ -87,16 +87,22 @@ files, network or processes in a configuration.
 
 ## Install on a machine
 
-Copy the binary, add a unit, start it:
+Installing is copying a binary and activating the service:
 
 ```bash
-scp hostd root@host:/usr/local/bin/hostd
-scp deploy/hostd.service root@host:/etc/systemd/system/
-ssh root@host 'systemctl daemon-reload && systemctl enable --now hostd'
+deploy/install.sh yuki.local
 ```
 
-The unit uses `KillMode=process` on purpose: stopping or restarting `hostd`
-must not take the services down with it.
+It reads the machine's architecture over ssh, cross-compiles `hostd` and
+`hostctl` for it, installs them in `/usr/local/bin` with the systemd unit,
+enables the service and asks the running daemon to describe itself — an
+answer with a different version means the restart did not take. It needs ssh
+access and either root or passwordless sudo, and installs nothing else.
+
+Running it again is the upgrade path: the daemon is replaced and restarted,
+and the services under supervision keep running. The unit uses
+`KillMode=process` for exactly that reason — the default would kill every
+process in the unit's cgroup, which is every service `hostd` supervises.
 
 ## Command line
 

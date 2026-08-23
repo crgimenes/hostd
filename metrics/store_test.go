@@ -204,7 +204,7 @@ func TestLatestReturnsTheNewestOfEachSeries(t *testing.T) {
 	appendAt(t, s, now, ScopeHost, "", MetricLoad1, 2)
 	appendAt(t, s, now, ScopeService, "api", MetricMemoryBytes, 4096)
 
-	series, err := s.Latest(time.Hour)
+	series, err := s.Latest(Query{}, time.Hour)
 	if err != nil {
 		t.Fatalf("Latest: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestLatestIgnoresWhatIsTooOldToMeanAnything(t *testing.T) {
 	s := openStore(t, Options{})
 	appendAt(t, s, time.Now().Add(-2*time.Hour), ScopeHost, "", MetricLoad1, 1)
 
-	series, err := s.Latest(time.Minute)
+	series, err := s.Latest(Query{}, time.Minute)
 	if err != nil {
 		t.Fatalf("Latest: %v", err)
 	}
@@ -256,5 +256,23 @@ func TestQueryOrdersSeriesTheSameWayEveryTime(t *testing.T) {
 	want := []string{"host/", "service/api", "service/db"}
 	if !slices.Equal(order, want) {
 		t.Fatalf("series came back as %v, expected %v", order, want)
+	}
+}
+
+// Asking about one service has to answer about that service: the no-window
+// answer narrows the same way a window does.
+func TestLatestNarrowsLikeAWindowDoes(t *testing.T) {
+	s := openStore(t, Options{})
+	now := time.Now()
+	appendAt(t, s, now, ScopeHost, "", MetricLoad1, 1)
+	appendAt(t, s, now, ScopeService, "api", MetricCPUPercent, 2)
+	appendAt(t, s, now, ScopeService, "db", MetricCPUPercent, 3)
+
+	series, err := s.Latest(Query{Scope: ScopeService, Name: "api"}, time.Hour)
+	if err != nil {
+		t.Fatalf("Latest: %v", err)
+	}
+	if len(series) != 1 || series[0].Name != "api" {
+		t.Fatalf("the filter let something else through: %#v", series)
 	}
 }

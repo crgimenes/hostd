@@ -250,9 +250,11 @@ func (q Query) step() int64 {
 	return RawStep
 }
 
-func (s *Store) Query(q Query) ([]Series, error) {
-	where := []string{"step_ms = ?"}
-	args := []any{q.step()}
+// What both answers filter on. Every predicate appends its placeholder and its
+// argument in the same step, so the two cannot fall out of step.
+func (q Query) predicates(step int64) (where []string, args []any) {
+	where = []string{"step_ms = ?"}
+	args = []any{step}
 	if q.Scope != "" {
 		where = append(where, "scope = ?")
 		args = append(args, q.Scope)
@@ -265,6 +267,11 @@ func (s *Store) Query(q Query) ([]Series, error) {
 		where = append(where, "metric = ?")
 		args = append(args, q.Metric)
 	}
+	return where, args
+}
+
+func (s *Store) Query(q Query) ([]Series, error) {
+	where, args := q.predicates(q.step())
 	if !q.From.IsZero() {
 		where = append(where, "time_ms >= ?")
 		args = append(args, q.From.UnixMilli())
@@ -347,20 +354,27 @@ func reversePoints(points []Point) {
 }
 
 // Latest is what a person asking "what is this machine doing" gets: the newest
-// value of every series, in one row each.
-func (s *Store) Latest(within time.Duration) ([]Series, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+// value of every series, in one row each. It narrows the same way a window
+// does, so asking about one service answers about that service.
+func (s *Store) Latest(q Query, within time.Duration) ([]Series, error) {
+	where, args := q.predicates(RawStep)
+	where = append(where, "time_ms >= ?")
+	args = append(args, time.Now().Add(-within).UnixMilli())
 
-	rows, err := s.db.QueryContext(ctx, `
+	// #nosec G202 -- audited: concatenates only literals, never caller input
+	query := `
 		SELECT scope, name, metric, time_ms, value FROM (
 			SELECT scope, name, metric, time_ms, value,
 			       ROW_NUMBER() OVER (PARTITION BY scope, name, metric ORDER BY time_ms DESC) AS rank
 			FROM samples
-			WHERE step_ms = ? AND time_ms >= ?
+			WHERE ` + strings.Join(where, " AND ") + `
 		) WHERE rank = 1
-		ORDER BY scope, name, metric`,
-		RawStep, time.Now().Add(-within).UnixMilli())
+		ORDER BY scope, name, metric`
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("read the latest metrics: %w", err)
 	}

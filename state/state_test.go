@@ -35,13 +35,13 @@ func TestOnlyAcceptedOperationsMoveTheGeneration(t *testing.T) {
 	s, _ := open(t)
 	start := s.Generation()
 
-	got := s.Record(Entry{Operation: "service.stop", Target: "api", Result: ResultOK})
+	got := s.Record(Entry{Operation: "service.stop", Target: "api", Result: ResultOK}, true)
 	if got != start+1 || s.Generation() != start+1 {
 		t.Fatalf("an accepted operation left the generation at %d", s.Generation())
 	}
 	for _, result := range []string{ResultRefused, ResultFailed} {
 		before := s.Generation()
-		s.Record(Entry{Operation: "service.start", Target: "api", Result: result})
+		s.Record(Entry{Operation: "service.start", Target: "api", Result: result}, true)
 		if s.Generation() != before {
 			t.Errorf("a %s operation moved the generation to %d", result, s.Generation())
 		}
@@ -79,8 +79,8 @@ func TestCheck(t *testing.T) {
 
 func TestAuditRecordsRefusalsToo(t *testing.T) {
 	s, _ := open(t)
-	s.Record(Entry{Operation: "apply", Result: ResultOK, Detail: "2 changes"})
-	s.Record(Entry{Operation: "service.stop", Target: "api", Result: ResultRefused, Detail: "stale generation"})
+	s.Record(Entry{Operation: "apply", Result: ResultOK, Detail: "2 changes"}, true)
+	s.Record(Entry{Operation: "service.stop", Target: "api", Result: ResultRefused, Detail: "stale generation"}, true)
 
 	entries := s.Recent(0)
 	if len(entries) != 2 {
@@ -105,7 +105,7 @@ func TestAuditRecordsRefusalsToo(t *testing.T) {
 func TestRecentIsBounded(t *testing.T) {
 	s, _ := open(t)
 	for range maxAuditMemory + 50 {
-		s.Record(Entry{Operation: "service.start", Target: "api", Result: ResultOK})
+		s.Record(Entry{Operation: "service.start", Target: "api", Result: ResultOK}, true)
 	}
 	// Accumulated data with no ceiling is a bug, not technical debt.
 	got := len(s.Recent(0))
@@ -123,7 +123,7 @@ func TestRecentIsBounded(t *testing.T) {
 func TestGenerationSurvivesReopen(t *testing.T) {
 	s, dir := open(t)
 	for range 3 {
-		s.Record(Entry{Operation: "apply", Result: ResultOK})
+		s.Record(Entry{Operation: "apply", Result: ResultOK}, true)
 	}
 	want := s.Generation()
 
@@ -136,7 +136,7 @@ func TestGenerationSurvivesReopen(t *testing.T) {
 	}
 	// The audit sequence continues rather than restarting, so two entries
 	// never share a number.
-	reopened.Record(Entry{Operation: "apply", Result: ResultOK})
+	reopened.Record(Entry{Operation: "apply", Result: ResultOK}, true)
 	entries := reopened.Recent(1)
 	if len(entries) != 1 || entries[0].Seq <= 3 {
 		t.Fatalf("audit sequence restarted: %+v", entries)
@@ -164,7 +164,7 @@ func TestAuditFileRotatesAtItsCeiling(t *testing.T) {
 	s, dir := open(t)
 	detail := strings.Repeat("x", 4096)
 	for range (maxAuditBytes / 4096) + 10 {
-		s.Record(Entry{Operation: "apply", Result: ResultOK, Detail: detail})
+		s.Record(Entry{Operation: "apply", Result: ResultOK, Detail: detail}, true)
 	}
 	info, err := os.Stat(filepath.Join(dir, "audit.filo"))
 	if err != nil {
@@ -191,7 +191,7 @@ func TestConcurrentRecordsKeepDistinctGenerations(t *testing.T) {
 	for range writers {
 		wg.Go(func() {
 			for range each {
-				g := s.Record(Entry{Operation: "service.start", Target: "api", Result: ResultOK})
+				g := s.Record(Entry{Operation: "service.start", Target: "api", Result: ResultOK}, true)
 				mu.Lock()
 				seen = append(seen, g)
 				mu.Unlock()
@@ -209,5 +209,23 @@ func TestConcurrentRecordsKeepDistinctGenerations(t *testing.T) {
 	}
 	if s.Generation() != FirstGeneration+writers*each {
 		t.Fatalf("generation = %d, want %d", s.Generation(), FirstGeneration+writers*each)
+	}
+}
+
+// The counter follows the state, not the attempt. An accepted operation that
+// found nothing to do leaves the host where it was, and moving anyway would
+// refuse somebody's next expect-generation for a change nobody made.
+func TestAnAcceptedOperationThatChangedNothingHoldsTheGeneration(t *testing.T) {
+	s, _ := open(t)
+	start := s.Generation()
+
+	got := s.Record(Entry{Operation: "service.start", Target: "api", Result: ResultOK}, false)
+	if got != start || s.Generation() != start {
+		t.Fatalf("an operation that changed nothing moved the generation to %d", s.Generation())
+	}
+	// Still audited: what was attempted is worth as much as what happened.
+	recent := s.Recent(1)
+	if len(recent) != 1 || recent[0].Before != start || recent[0].After != start {
+		t.Fatalf("the attempt was not audited at the generation it did not change: %#v", recent)
 	}
 }

@@ -276,7 +276,7 @@ func TestStopIsIdempotent(t *testing.T) {
 
 	h.waitFor("running", func() bool { return h.status("api").State == StateRunning })
 	for range 3 {
-		err := h.sup.Stop("api")
+		_, err := h.sup.Stop("api")
 		if err != nil {
 			t.Fatalf("Stop: %v", err)
 		}
@@ -298,7 +298,7 @@ func TestKillsWhatWillNotStop(t *testing.T) {
 	defer h.stop()
 
 	h.waitFor("running", func() bool { return h.status("stubborn").State == StateRunning })
-	err := h.sup.Stop("stubborn")
+	_, err := h.sup.Stop("stubborn")
 	if err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
@@ -324,7 +324,7 @@ func TestStartStopAreDeclarative(t *testing.T) {
 		t.Fatalf("a service declared stopped was started: %+v", st)
 	}
 
-	err := h.sup.Start("api")
+	_, err := h.sup.Start("api")
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -335,7 +335,7 @@ func TestStartStopAreDeclarative(t *testing.T) {
 
 	// Asking again changes nothing: ten requests, one process.
 	for range 10 {
-		_ = h.sup.Start("api")
+		_, _ = h.sup.Start("api")
 	}
 	time.Sleep(300 * time.Millisecond)
 	again := h.status("api").PID
@@ -349,7 +349,7 @@ func TestUnknownServiceSaysHowToLookItUp(t *testing.T) {
 	h.start()
 	defer h.stop()
 
-	err := h.sup.Start("ghost")
+	_, err := h.sup.Start("ghost")
 	if err == nil {
 		t.Fatal("an undeclared service was started")
 	}
@@ -386,7 +386,7 @@ func TestServicesSurviveSupervisorRestartAndAreAdopted(t *testing.T) {
 
 	// Killing it now must still be noticed, so an adopted process is really
 	// supervised and not merely counted.
-	err := h.sup.Stop("api")
+	_, err := h.sup.Stop("api")
 	if err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
@@ -582,7 +582,7 @@ func TestStateFileIsRemovedWhenServiceStops(t *testing.T) {
 	if err != nil {
 		t.Fatalf("no supervision record for a running service: %v", err)
 	}
-	err = h.sup.Stop("api")
+	_, err = h.sup.Stop("api")
 	if err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
@@ -844,5 +844,47 @@ func TestStatsKeepsABoundedWindow(t *testing.T) {
 	}
 	if sup.sampled != tickSamples {
 		t.Fatalf("the window holds %d samples, past its ceiling of %d", sup.sampled, tickSamples)
+	}
+}
+
+// The supervisor is the only one who knows whether a command moved anything,
+// so it has to answer honestly: the generation counter is built on this.
+func TestCommandsReportWhetherTheyChangedAnything(t *testing.T) {
+	h := newHarness(t)
+	h.start(shell("api", "sleep 30"))
+	defer h.stop()
+	h.waitFor("running", func() bool { return h.status("api").State == StateRunning })
+
+	changed, err := h.sup.Start("api")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if changed {
+		t.Fatal("starting a running service reported a change")
+	}
+
+	changed, err = h.sup.Stop("api")
+	if err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if !changed {
+		t.Fatal("stopping a running service reported no change")
+	}
+	changed, err = h.sup.Stop("api")
+	if err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if changed {
+		t.Fatal("stopping an already stopped service reported a change")
+	}
+
+	// A restart interrupts what runs or starts what does not; either way the
+	// host is not where it was.
+	changed, err = h.sup.Restart("api")
+	if err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	if !changed {
+		t.Fatal("a restart reported no change")
 	}
 }
