@@ -10,16 +10,17 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
-	"github.com/crgimenes/hostd/internal/api"
-	"github.com/crgimenes/hostd/internal/config"
+	"github.com/crgimenes/hostd/api"
+	"github.com/crgimenes/hostd/config"
 )
 
-// Exit codes are part of the interface. Messages are for people; these are for
-// programs, and they do not change.
+// Part of the interface: messages are for people, these are for programs.
 const (
 	exitOK      = 0
 	exitFailed  = 1
@@ -27,11 +28,9 @@ const (
 	exitComms   = 3
 	exitAuth    = 4
 	exitPartial = 5
-	// exitRefused means nothing was changed and the caller has to look before
-	// trying again: the host moved to another generation, or the operation
-	// would have taken a running service away. An agent that cannot tell this
-	// from a failure either retries something it should not, or gives up on
-	// something it only had to re-read first.
+	// Nothing changed and the caller must look before retrying. An agent that
+	// cannot tell this from a failure either retries what it should not, or
+	// gives up on what it only had to re-read.
 	exitRefused = 6
 )
 
@@ -52,6 +51,11 @@ type options struct {
 	allowDestr bool
 	onBehalfOf string
 	dryRun     bool
+	debug      bool
+	scope      string
+	metric     string
+	window     time.Duration
+	step       time.Duration
 }
 
 func run(args []string) int {
@@ -70,42 +74,44 @@ func run(args []string) int {
 	flags.BoolVar(&opt.allowDestr, "allow-destructive", false, "authorise changes that take a running service away")
 	flags.StringVar(&opt.onBehalfOf, "on-behalf-of", "", "identity this command is being run for, recorded in the audit log")
 	flags.BoolVar(&opt.dryRun, "dry-run", false, "show what apply would do, and do nothing")
-	flags.Usage = func() { usage(flags) }
+	flags.BoolVar(&opt.debug, "debug", false, "write one key=value diagnostic line per request to stderr")
+	flags.StringVar(&opt.scope, "scope", "", "metrics of the host or of the services")
+	flags.StringVar(&opt.metric, "metric", "", "only this metric, e.g. cpu-percent")
+	flags.DurationVar(&opt.window, "window", 0, "how far back metrics reach; without it, the latest values")
+	flags.DurationVar(&opt.step, "step", 0, "seconds per metric point; without it, the finest the window still has")
+	// Asking for help is legitimate use, so it goes to stdout and succeeds.
+	flags.SetOutput(os.Stdout)
+	flags.Usage = func() { usage(flags, os.Stdout) }
 
 	rest, err := parseAnywhere(flags, args)
+	if errors.Is(err, flag.ErrHelp) {
+		return exitOK
+	}
 	if err != nil {
+		usage(flags, os.Stderr)
 		return exitUsage
 	}
 	if len(rest) == 0 {
-		usage(flags)
+		usage(flags, os.Stderr)
 		return exitUsage
 	}
 	if opt.socket == "" {
 		opt.socket = config.Locate().Socket()
 	}
 
-	// A signal cancels the work in progress rather than announcing itself and
-	// carrying on.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	code, err := dispatch(ctx, opt, rest)
 	if err != nil {
-		// Diagnostics go to stderr, so a caller reading stdout gets the result
-		// and nothing else.
 		fmt.Fprintf(os.Stderr, "hostctl: %v\n", err)
 	}
 	return code
 }
 
-// parseAnywhere accepts flags before, between and after the command words, and
-// returns the words.
-//
-// The flag package stops parsing at the first argument that is not a flag, so
-// `hostctl log --follow` would leave --follow as a positional and it would be
-// read as a search pattern: the command would quietly do the wrong thing
-// instead of failing. Silence is the worst outcome available here, so the
-// order is not something an operator has to remember.
+// The flag package stops at the first positional, which would leave
+// `hostctl log -follow` reading -follow as a search pattern: the command
+// would quietly do the wrong thing instead of failing.
 func parseAnywhere(flags *flag.FlagSet, args []string) ([]string, error) {
 	var words []string
 	for {
@@ -122,8 +128,9 @@ func parseAnywhere(flags *flag.FlagSet, args []string) ([]string, error) {
 	}
 }
 
-func usage(flags *flag.FlagSet) {
-	fmt.Fprint(os.Stderr, `hostctl operates hostd.
+func usage(flags *flag.FlagSet, w io.Writer) {
+	flags.SetOutput(w)
+	_, _ = fmt.Fprint(w, `hostctl operates hostd.
 
 usage:
   hostctl status                       what every service is doing
@@ -136,11 +143,26 @@ usage:
   hostctl apply                        re-read the services directory and converge
   hostctl audit                        who changed what, and when
   hostctl log [pattern]                what the services wrote
-  hostctl log --follow                 keep watching
+  hostctl log -follow                  keep watching
+  hostctl metrics                      what the host and its services are using
+  hostctl metrics -window 1h           the same, over a window
 
 flags:
 `)
 	flags.PrintDefaults()
+	_, _ = fmt.Fprint(w, `
+output:
+  the requested result goes to stdout, diagnostics to stderr.
+  -filo makes stdout a Filo expression and nothing else.
+
+exit status:
+  0 success   1 failed   2 bad arguments   3 no connection
+  4 not authorised   5 partial success   6 refused, nothing changed
+
+example:
+  hostctl log -service api -follow
+  hostctl metrics -service api -metric cpu-percent -window 30m
+`)
 }
 
 func dispatch(ctx context.Context, opt options, args []string) (int, error) {
@@ -149,6 +171,9 @@ func dispatch(ctx context.Context, opt options, args []string) (int, error) {
 		return exitComms, err
 	}
 	defer func() { _ = client.Close() }()
+	if opt.debug {
+		client.Debug = os.Stderr
+	}
 
 	switch args[0] {
 	case "status":
@@ -165,6 +190,8 @@ func dispatch(ctx context.Context, opt options, args []string) (int, error) {
 		return runAudit(ctx, client, opt)
 	case "log", "logs":
 		return runLog(ctx, client, opt, args[1:])
+	case "metrics":
+		return runMetrics(ctx, client, opt)
 	default:
 		return exitUsage, fmt.Errorf("unknown command %q; run hostctl with no arguments to see what exists", args[0])
 	}

@@ -7,7 +7,7 @@ import (
 )
 
 // The flag package stops at the first positional argument, which would turn
-// `hostctl log --follow` into a search for the text "--follow". A command that
+// `hostctl log -follow` into a search for the text "-follow". A command that
 // quietly does something else is worse than one that fails.
 func TestFlagsAreAcceptedAnywhere(t *testing.T) {
 	cases := []struct {
@@ -17,12 +17,12 @@ func TestFlagsAreAcceptedAnywhere(t *testing.T) {
 		wantFollw bool
 	}{
 		{[]string{"log"}, []string{"log"}, 200, false},
-		{[]string{"--limit", "5", "log"}, []string{"log"}, 5, false},
-		{[]string{"log", "--limit", "5"}, []string{"log"}, 5, false},
-		{[]string{"log", "--follow"}, []string{"log"}, 200, true},
-		{[]string{"log", "--limit", "5", "timeout"}, []string{"log", "timeout"}, 5, false},
+		{[]string{"-limit", "5", "log"}, []string{"log"}, 5, false},
+		{[]string{"log", "-limit", "5"}, []string{"log"}, 5, false},
+		{[]string{"log", "-follow"}, []string{"log"}, 200, true},
+		{[]string{"log", "-limit", "5", "timeout"}, []string{"log", "timeout"}, 5, false},
 		{[]string{"service", "restart", "api"}, []string{"service", "restart", "api"}, 200, false},
-		{[]string{"service", "--filo", "list"}, []string{"service", "list"}, 200, false},
+		{[]string{"service", "-filo", "list"}, []string{"service", "list"}, 200, false},
 	}
 	for _, c := range cases {
 		var limit int
@@ -53,7 +53,7 @@ func TestFlagsAreAcceptedAnywhere(t *testing.T) {
 func TestUnknownFlagIsRejected(t *testing.T) {
 	flags := flag.NewFlagSet("hostctl", flag.ContinueOnError)
 	flags.SetOutput(&strings.Builder{})
-	_, err := parseAnywhere(flags, []string{"log", "--nonsense"})
+	_, err := parseAnywhere(flags, []string{"log", "-nonsense"})
 	if err == nil {
 		t.Fatal("an unknown flag was accepted")
 	}

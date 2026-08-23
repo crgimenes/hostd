@@ -4,18 +4,19 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 	"text/tabwriter"
 	"time"
 
-	"github.com/crgimenes/hostd/internal/api"
-	"github.com/crgimenes/hostd/internal/state"
-	"github.com/crgimenes/hostd/internal/supervisor"
+	"github.com/crgimenes/hostd/api"
+	"github.com/crgimenes/hostd/filoconf"
+	"github.com/crgimenes/hostd/state"
+	"github.com/crgimenes/hostd/supervisor"
 )
 
-// emit writes a result. With --filo, stdout carries a Filo expression and
-// nothing else, because a caller parsing it must not have to skip a heading.
+// With -filo, stdout carries a Filo expression and nothing else: a caller
+// parsing it must not have to skip a heading.
 func emit(opt options, filoBody string, human func()) {
 	if opt.filoOut {
 		fmt.Println(strings.TrimRight(filoBody, "\n"))
@@ -96,15 +97,12 @@ func showStatus(ctx context.Context, client *api.Client, opt options, req api.Re
 }
 
 func printStatuses(target string, generation uint64, statuses []supervisor.Status) {
-	// The host a command landed on is printed with the result, and so is the
-	// generation it is at. "Which machine did I just do that to?" is a
-	// question that costs a machine in a fleet.
 	fmt.Printf("host %s, generation %d\n", target, generation)
 	if len(statuses) == 0 {
 		fmt.Println("no services are declared")
 		return
 	}
-	sort.Slice(statuses, func(i, j int) bool { return statuses[i].Name < statuses[j].Name })
+	slices.SortFunc(statuses, func(a, b supervisor.Status) int { return strings.Compare(a.Name, b.Name) })
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(w, "SERVICE\tSTATE\tPID\tUPTIME\tRESTARTS\tDETAIL")
 	for _, s := range statuses {
@@ -136,8 +134,6 @@ func uptime(s supervisor.Status) string {
 	return d.String()
 }
 
-// runPlan shows the transition without performing it. It is the same plan
-// apply carries out, so reviewing it means something.
 func runPlan(ctx context.Context, client *api.Client, opt options) (int, error) {
 	return showPlan(ctx, client, opt, api.Request{Op: api.OpPlan}, "nothing to change")
 }
@@ -179,8 +175,6 @@ func showPlan(ctx context.Context, client *api.Client, opt options, req api.Requ
 		return exitOK, nil
 	}
 	if resp.Code == api.CodeFailed {
-		// Some files applied and some did not: the valid part took effect and
-		// the refused part is reported, rather than the whole call failing.
 		return exitPartial, resp.Err()
 	}
 	return codeFor(resp.Err()), resp.Err()
@@ -190,8 +184,6 @@ func printChanges(changes []supervisor.Change) {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(w, "SERVICE\tACTION\tIMPACT\tDETAIL")
 	for _, c := range changes {
-		// The impact is stated for every line, so a plan can be read for what
-		// it costs and not only for what it does.
 		impact := "safe"
 		switch {
 		case c.Destructive:
@@ -252,8 +244,7 @@ func runLog(ctx context.Context, client *api.Client, opt options, args []string)
 	}
 	if opt.follow {
 		err := client.Follow(ctx, req, func(l api.LogLine) error {
-			printLine(opt, l)
-			return nil
+			return printLine(opt, l)
 		})
 		if err != nil {
 			return exitComms, err
@@ -279,23 +270,26 @@ func runLog(ctx context.Context, client *api.Client, opt options, args []string)
 		return exitOK, nil
 	}
 	for _, l := range lines {
-		printLine(opt, l)
+		err = printLine(opt, l)
+		if err != nil {
+			return exitFailed, err
+		}
 	}
 	return exitOK, nil
 }
 
-func printLine(opt options, l api.LogLine) {
-	if opt.filoOut {
-		// Following in Filo emits one expression per line, so a program can
-		// read a stream without waiting for it to end.
-		out, err := marshal(l)
-		if err == nil {
-			fmt.Println(out)
-		}
-		return
+func printLine(opt options, l api.LogLine) error {
+	if !opt.filoOut {
+		fmt.Printf("%s %s %s %s\n",
+			l.At().Format("2006-01-02 15:04:05"), l.Service, streamMark(l.Stream), l.Text)
+		return nil
 	}
-	fmt.Printf("%s %s %s %s\n",
-		l.At().Format("2006-01-02 15:04:05"), l.Service, streamMark(l.Stream), l.Text)
+	out, err := filoconf.Marshal(l)
+	if err != nil {
+		return fmt.Errorf("cannot render log line %d: %w", l.Seq, err)
+	}
+	fmt.Println(out)
+	return nil
 }
 
 func streamMark(stream string) string {

@@ -1,7 +1,7 @@
 // Command hostd supervises the services declared on this machine.
 //
-// It is headless: it has no interface of its own. Everything a person or an
-// agent does with it arrives over the control API, which hostctl speaks.
+// It is headless: everything a person or an agent does with it arrives over
+// the control API, which hostctl speaks.
 package main
 
 import (
@@ -11,18 +11,36 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
-	"github.com/crgimenes/hostd/internal/api"
-	"github.com/crgimenes/hostd/internal/config"
-	"github.com/crgimenes/hostd/internal/logs"
-	"github.com/crgimenes/hostd/internal/service"
-	"github.com/crgimenes/hostd/internal/state"
-	"github.com/crgimenes/hostd/internal/supervisor"
-	"github.com/crgimenes/hostd/internal/version"
+	"github.com/crgimenes/hostd/api"
+	"github.com/crgimenes/hostd/config"
+	"github.com/crgimenes/hostd/logs"
+	"github.com/crgimenes/hostd/metrics"
+	"github.com/crgimenes/hostd/service"
+	"github.com/crgimenes/hostd/state"
+	"github.com/crgimenes/hostd/supervisor"
+	"github.com/crgimenes/hostd/version"
 )
 
 func main() {
 	showVersion := flag.Bool("version", false, "print the version and exit")
+	debug := flag.Bool("debug", false, "write one key=value diagnostic line to stderr every 30s")
+	flag.Usage = func() {
+		_, _ = fmt.Print(`hostd supervises the services declared on this machine.
+
+usage:
+  hostd [flags]
+
+It has no interface of its own: operate it with hostctl.
+Paths default to /etc/hostd, /var/lib/hostd and /run/hostd, and HOSTD_ROOT
+redirects all of them.
+
+flags:
+`)
+		flag.CommandLine.SetOutput(os.Stdout)
+		flag.PrintDefaults()
+	}
 	flag.Parse()
 
 	if *showVersion {
@@ -30,17 +48,14 @@ func main() {
 		return
 	}
 
-	err := run()
+	err := run(*debug)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "hostd: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
-	// A signal cancels the context, and cancelling is what actually stops the
-	// work. A handler that only prints a message is a handler that cancels
-	// nothing.
+func run(debug bool) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -54,14 +69,35 @@ func run() error {
 		return err
 	}
 
-	buffer := logs.NewBuffer(cfg.LogBuffer)
+	logStore, err := logs.Open(ctx, paths.LogDatabase(), logs.Options{
+		Retention: cfg.LogRetention(),
+		MaxRows:   cfg.LogMaxRows,
+	})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = logStore.Close() }()
+
+	metricStore, err := metrics.Open(ctx, paths.MetricsDatabase(), metrics.Options{
+		Retention: cfg.MetricsRetention(),
+		MaxRows:   cfg.MetricsMaxRows,
+	})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = metricStore.Close() }()
+
 	declared, loadErr := service.LoadDir(ctx, paths.ServicesDir())
 	if loadErr != nil {
-		// Broken files must not stop the machine: the services that are
-		// readable still run, and the problem is reported where an operator
-		// will see it.
+		// Broken files must not stop the machine: the readable services still
+		// run and the problem is reported where an operator sees it.
 		fmt.Fprintf(os.Stderr, "hostd: %v\n", loadErr)
-		buffer.Append(logs.Record{Service: "hostd", Stream: logs.StreamEvent, Text: loadErr.Error()})
+		logStore.Append(logs.Record{
+			Service: "hostd",
+			Stream:  logs.StreamEvent,
+			Kind:    logs.EventProblem,
+			Text:    loadErr.Error(),
+		})
 	}
 
 	store, err := state.Open(ctx, paths.StateDir())
@@ -72,15 +108,37 @@ func run() error {
 	sup := supervisor.New(supervisor.Dirs{
 		State: paths.SupervisionDir(),
 		Spool: paths.SpoolDir(),
-	}, buffer)
+	}, logStore)
 
-	// Adoption comes before anything else: the processes a previous hostd left
-	// running are found and taken back over, rather than duplicated.
 	adoptErr := sup.Adopt(ctx, declared)
 	if adoptErr != nil {
 		fmt.Fprintf(os.Stderr, "hostd: %v\n", adoptErr)
-		buffer.Append(logs.Record{Service: "hostd", Stream: logs.StreamEvent, Text: adoptErr.Error()})
+		logStore.Append(logs.Record{
+			Service: "hostd",
+			Stream:  logs.StreamEvent,
+			Kind:    logs.EventProblem,
+			Text:    adoptErr.Error(),
+		})
 	}
+
+	go metrics.NewSampler(metricStore, func() []metrics.Process {
+		// Asked at every tick, so a service that started a second ago is
+		// sampled without anyone registering it anywhere.
+		var live []metrics.Process
+		for _, st := range sup.Status() {
+			if st.PID != 0 {
+				live = append(live, metrics.Process{Name: st.Name, PID: st.PID})
+			}
+		}
+		return live
+	}, func(err error) {
+		logStore.Append(logs.Record{
+			Service: "hostd",
+			Stream:  logs.StreamEvent,
+			Kind:    logs.EventProblem,
+			Text:    err.Error(),
+		})
+	}).Run(ctx)
 
 	listener, err := api.ListenUnix(paths.Socket())
 	if err != nil {
@@ -88,20 +146,49 @@ func run() error {
 	}
 	defer func() { _ = listener.Close() }()
 
-	server := api.NewServer(sup, store, buffer, paths.ServicesDir())
+	if debug {
+		go reportDiagnostics(ctx, sup, logStore)
+	}
+
+	server := api.NewServer(sup, store, logStore, metricStore, paths.ServicesDir())
 	serverErr := make(chan error, 1)
 	go func() { serverErr <- server.Serve(ctx, listener) }()
 
-	buffer.Append(logs.Record{
+	logStore.Append(logs.Record{
 		Service: "hostd",
 		Stream:  logs.StreamEvent,
+		Kind:    logs.EventDaemon,
 		Text:    fmt.Sprintf("hostd %s listening on %s", version.Version, paths.Socket()),
 	})
 	fmt.Fprintf(os.Stderr, "hostd %s listening on %s\n", version.Version, paths.Socket())
 
 	sup.Run(ctx)
 
-	// Leaving does not stop the services: they keep running and the next hostd
-	// adopts them. That is what makes updating the daemon safe.
+	// Leaving does not stop the services: the next hostd adopts them.
 	return <-serverErr
 }
+
+const debugInterval = 30 * time.Second
+
+// One key=value line an agent greps: percentiles rather than an average,
+// because the tick that ran long is the one worth seeing.
+func reportDiagnostics(ctx context.Context, sup *supervisor.Supervisor, logStore *logs.Store) {
+	ticker := time.NewTicker(debugInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		tick := sup.Stats()
+		stored := logStore.Stats()
+		fmt.Fprintf(os.Stderr,
+			"hostd: debug services=%d running=%d ticks=%d tick-p50-ms=%.2f tick-p95-ms=%.2f tick-max-ms=%.2f log-queued=%d log-dropped=%d\n",
+			tick.Services, tick.Running, tick.Ticks,
+			milliseconds(tick.TickP50), milliseconds(tick.TickP95), milliseconds(tick.TickMax),
+			stored.Queued, stored.Dropped)
+	}
+}
+
+func milliseconds(d time.Duration) float64 { return float64(d.Microseconds()) / 1000 }
