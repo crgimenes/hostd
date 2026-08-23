@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/crgimenes/hostd/internal/api"
+	"github.com/crgimenes/hostd/internal/state"
 	"github.com/crgimenes/hostd/internal/supervisor"
 )
 
@@ -66,7 +67,12 @@ func runService(ctx context.Context, client *api.Client, opt options, args []str
 			"stop":    api.OpServiceStop,
 			"restart": api.OpServiceRestrt,
 		}[args[0]]
-		return showStatus(ctx, client, opt, api.Request{Op: op, Name: args[1]})
+		return showStatus(ctx, client, opt, api.Request{
+			Op:               op,
+			Name:             args[1],
+			ExpectGeneration: opt.expectGen,
+			OnBehalfOf:       opt.onBehalfOf,
+		})
 	default:
 		return exitUsage, fmt.Errorf("unknown service subcommand %q; expected list, start, stop or restart", args[0])
 	}
@@ -85,14 +91,15 @@ func showStatus(ctx context.Context, client *api.Client, opt options, req api.Re
 	if err != nil {
 		return exitFailed, err
 	}
-	emit(opt, resp.Body, func() { printStatuses(client.Target(), statuses) })
+	emit(opt, resp.Body, func() { printStatuses(client.Target(), resp.Generation, statuses) })
 	return exitOK, nil
 }
 
-func printStatuses(target string, statuses []supervisor.Status) {
-	// The host a command landed on is printed with the result. "Which machine
-	// did I just do that to?" is a question that costs a machine in a fleet.
-	fmt.Printf("host %s\n", target)
+func printStatuses(target string, generation uint64, statuses []supervisor.Status) {
+	// The host a command landed on is printed with the result, and so is the
+	// generation it is at. "Which machine did I just do that to?" is a
+	// question that costs a machine in a fleet.
+	fmt.Printf("host %s, generation %d\n", target, generation)
 	if len(statuses) == 0 {
 		fmt.Println("no services are declared")
 		return
@@ -129,12 +136,31 @@ func uptime(s supervisor.Status) string {
 	return d.String()
 }
 
+// runPlan shows the transition without performing it. It is the same plan
+// apply carries out, so reviewing it means something.
+func runPlan(ctx context.Context, client *api.Client, opt options) (int, error) {
+	return showPlan(ctx, client, opt, api.Request{Op: api.OpPlan}, "nothing to change")
+}
+
 func runApply(ctx context.Context, client *api.Client, opt options) (int, error) {
-	resp, err := client.Do(ctx, api.Request{Op: api.OpApply})
+	if opt.dryRun {
+		return runPlan(ctx, client, opt)
+	}
+	req := api.Request{
+		Op:               api.OpApply,
+		ExpectGeneration: opt.expectGen,
+		AllowDestructive: opt.allowDestr,
+		OnBehalfOf:       opt.onBehalfOf,
+	}
+	return showPlan(ctx, client, opt, req, "nothing to change")
+}
+
+func showPlan(ctx context.Context, client *api.Client, opt options, req api.Request, empty string) (int, error) {
+	resp, err := client.Do(ctx, req)
 	if err != nil {
 		return exitComms, err
 	}
-	var changes []string
+	var changes []supervisor.Change
 	if resp.Body != "" {
 		err = decode(ctx, resp.Body, &changes)
 		if err != nil {
@@ -142,20 +168,74 @@ func runApply(ctx context.Context, client *api.Client, opt options) (int, error)
 		}
 	}
 	emit(opt, resp.Body, func() {
-		fmt.Printf("host %s\n", client.Target())
+		fmt.Printf("host %s, generation %d\n", client.Target(), resp.Generation)
 		if len(changes) == 0 {
-			fmt.Println("nothing to change")
+			fmt.Println(empty)
 			return
 		}
-		for _, c := range changes {
-			fmt.Println(c)
-		}
+		printChanges(changes)
 	})
-	if resp.Failed() {
+	if !resp.Failed() {
+		return exitOK, nil
+	}
+	if resp.Code == api.CodeFailed {
 		// Some files applied and some did not: the valid part took effect and
 		// the refused part is reported, rather than the whole call failing.
 		return exitPartial, resp.Err()
 	}
+	return codeFor(resp.Err()), resp.Err()
+}
+
+func printChanges(changes []supervisor.Change) {
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(w, "SERVICE\tACTION\tIMPACT\tDETAIL")
+	for _, c := range changes {
+		// The impact is stated for every line, so a plan can be read for what
+		// it costs and not only for what it does.
+		impact := "safe"
+		switch {
+		case c.Destructive:
+			impact = "STOPS SERVICE"
+		case c.Disruptive:
+			impact = "interrupts"
+		}
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", c.Service, c.Action, impact, c.Detail)
+	}
+	_ = w.Flush()
+}
+
+func runAudit(ctx context.Context, client *api.Client, opt options) (int, error) {
+	resp, err := client.Do(ctx, api.Request{Op: api.OpAudit, Limit: opt.limit})
+	if err != nil {
+		return exitComms, err
+	}
+	if resp.Failed() {
+		return codeFor(resp.Err()), resp.Err()
+	}
+	var entries []state.Entry
+	err = decode(ctx, resp.Body, &entries)
+	if err != nil {
+		return exitFailed, err
+	}
+	emit(opt, resp.Body, func() {
+		fmt.Printf("host %s, generation %d\n", client.Target(), resp.Generation)
+		if len(entries) == 0 {
+			fmt.Println("nothing has changed this host yet")
+			return
+		}
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(w, "WHEN\tACTOR\tOPERATION\tTARGET\tGEN\tRESULT\tDETAIL")
+		for _, e := range entries {
+			actor := e.Actor
+			if e.OnBehalfOf != "" {
+				actor += " for " + e.OnBehalfOf
+			}
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d->%d\t%s\t%s\n",
+				time.UnixMilli(int64(e.TimeMS)).Format("2006-01-02 15:04:05"),
+				actor, e.Operation, e.Target, e.Before, e.After, e.Result, e.Detail)
+		}
+		_ = w.Flush()
+	})
 	return exitOK, nil
 }
 
@@ -163,6 +243,7 @@ func runLog(ctx context.Context, client *api.Client, opt options, args []string)
 	req := api.Request{
 		Service: opt.service,
 		Stream:  opt.stream,
+		Kind:    opt.kind,
 		Limit:   opt.limit,
 		Since:   opt.sinceSeq,
 	}

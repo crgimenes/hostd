@@ -85,15 +85,19 @@ type proc struct {
 	// parent, so it cannot wait on it or read its exit code.
 	cmd *exec.Cmd
 
-	running   bool
-	stopping  bool
-	killed    bool
-	deadline  time.Time
-	restarts  int
-	failures  int
-	nextStart time.Time
-	lastExit  int
-	lastError string
+	running  bool
+	stopping bool
+	killed   bool
+	// removeWhenStopped drops the service from view once its process is
+	// really gone, so an undeclared service is never forgotten while it is
+	// still running.
+	removeWhenStopped bool
+	deadline          time.Time
+	restarts          int
+	failures          int
+	nextStart         time.Time
+	lastExit          int
+	lastError         string
 
 	outTail *logs.Tailer
 	errTail *logs.Tailer
@@ -157,7 +161,7 @@ func (s *Supervisor) Adopt(ctx context.Context, declared []service.Service) erro
 			// A process whose service file is gone is an orphan. Reporting it
 			// is the point: pretending it does not exist is how a machine ends
 			// up with a process nobody owns.
-			s.event(name, fmt.Sprintf("orphan process %d is running but no service declares it; stop it with hostctl service stop %s", st.PID, name))
+			s.event(logs.EventOrphan, name, fmt.Sprintf("orphan process %d is running but no service declares it; stop it with hostctl service stop %s", st.PID, name))
 			p := &proc{
 				svc:     service.Service{Name: name, Kind: service.KindExec, State: service.StateStopped},
 				pid:     st.PID,
@@ -178,14 +182,14 @@ func (s *Supervisor) Adopt(ctx context.Context, declared []service.Service) erro
 			p.adopted = true
 			p.running = true
 			s.attachTails(p, st)
-			s.event(name, fmt.Sprintf("adopted running process %d after hostd restart", st.PID))
+			s.event(logs.EventAdopted, name, fmt.Sprintf("adopted running process %d after hostd restart", st.PID))
 		default:
 			// The service died while hostd was away. It is noticed now, and
 			// the record says so rather than pretending it was seen happen.
 			p := s.procs[name]
 			s.attachTails(p, st)
 			p.lastError = "exited while hostd was not running"
-			s.event(name, "service was not running when hostd came back; restarting it if its policy asks for that")
+			s.event(logs.EventMissed, name, "service was not running when hostd came back; restarting it if its policy asks for that")
 			err = errors.Join(err, removeState(s.dirs.State, name))
 		}
 	}

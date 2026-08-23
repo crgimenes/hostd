@@ -8,11 +8,13 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/crgimenes/hostd/internal/logs"
 	"github.com/crgimenes/hostd/internal/service"
+	"github.com/crgimenes/hostd/internal/state"
 	"github.com/crgimenes/hostd/internal/supervisor"
 	"github.com/crgimenes/hostd/internal/version"
 )
@@ -41,12 +43,22 @@ type Supervisor interface {
 	Start(name string) error
 	Stop(name string) error
 	Restart(name string) error
-	Apply(declared []service.Service) []string
+	Plan(declared []service.Service) []supervisor.Change
+	Apply(declared []service.Service) []supervisor.Change
+}
+
+// Store is the generation and audit side of the daemon.
+type Store interface {
+	Generation() uint64
+	Check(expected uint64) error
+	Record(e state.Entry) uint64
+	Recent(limit int) []state.Entry
 }
 
 // Server answers operations over a listener.
 type Server struct {
 	sup      Supervisor
+	store    Store
 	log      *logs.Buffer
 	services string
 
@@ -55,9 +67,10 @@ type Server struct {
 }
 
 // NewServer builds a server. servicesDir is where an apply reads from.
-func NewServer(sup Supervisor, buffer *logs.Buffer, servicesDir string) *Server {
+func NewServer(sup Supervisor, store Store, buffer *logs.Buffer, servicesDir string) *Server {
 	return &Server{
 		sup:      sup,
+		store:    store,
 		log:      buffer,
 		services: servicesDir,
 		sem:      make(chan struct{}, maxClients),
@@ -184,34 +197,89 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 }
 
 // dispatch runs one operation.
+//
+// Reads answer straight away. Mutations go through the generation check first,
+// and every one of them is audited, whether it was carried out or refused.
 func (s *Server) dispatch(ctx context.Context, req Request) Response {
 	switch req.Op {
 	case OpDescribe:
-		return s.describe()
+		return s.stamp(s.describe())
 	case OpStatus, OpServiceList:
-		return body(s.sup.Status())
-	case OpServiceStart:
-		return s.act(req.Name, s.sup.Start)
-	case OpServiceStop:
-		return s.act(req.Name, s.sup.Stop)
-	case OpServiceRestrt:
-		return s.act(req.Name, s.sup.Restart)
-	case OpApply:
-		return s.apply(ctx)
+		return s.stamp(body(s.sup.Status()))
+	case OpPlan:
+		return s.stamp(s.planOnly(ctx))
+	case OpAudit:
+		return s.stamp(body(s.store.Recent(req.Limit)))
 	case OpLogSearch:
-		return body(toLines(s.log.Search(logs.Query{
+		return s.stamp(body(toLines(s.log.Search(logs.Query{
 			Service: req.Service,
 			Stream:  req.Stream,
+			Kind:    req.Kind,
 			Match:   req.Match,
 			Limit:   req.Limit,
 			Since:   req.Since,
-		})))
+		}))))
+	case OpServiceStart:
+		return s.mutate(req, req.Name, s.sup.Start)
+	case OpServiceStop:
+		return s.mutate(req, req.Name, s.sup.Stop)
+	case OpServiceRestrt:
+		return s.mutate(req, req.Name, s.sup.Restart)
+	case OpApply:
+		return s.apply(ctx, req)
 	default:
 		return Response{
 			Code:    CodeUnknownOp,
 			Message: fmt.Sprintf("this hostd does not implement %q; ask it what it supports with hostctl describe", req.Op),
 		}
 	}
+}
+
+// stamp puts the current generation on an answer, so a caller always knows
+// what to claim on its next mutation.
+func (s *Server) stamp(resp Response) Response {
+	if resp.Generation == 0 {
+		resp.Generation = s.store.Generation()
+	}
+	return resp
+}
+
+// mutate runs an operation that changes the host: generation check, the work
+// itself, then the audit entry.
+func (s *Server) mutate(req Request, name string, fn func(string) error) Response {
+	if name == "" {
+		return s.stamp(Response{Code: CodeInvalid, Message: "this operation needs a service name"})
+	}
+	entry := state.Entry{Operation: req.Op, Target: name, OnBehalfOf: req.OnBehalfOf}
+
+	err := s.store.Check(req.ExpectGeneration)
+	if err != nil {
+		return s.refuse(entry, CodeConflict, err)
+	}
+	err = fn(name)
+	if err != nil {
+		if _, ok := errors.AsType[supervisor.ErrUnknownService](err); ok {
+			return s.refuse(entry, CodeNotFound, err)
+		}
+		entry.Result = state.ResultFailed
+		entry.Detail = err.Error()
+		generation := s.store.Record(entry)
+		return Response{Code: CodeFailed, Message: err.Error(), Generation: generation}
+	}
+	entry.Result = state.ResultOK
+	generation := s.store.Record(entry)
+	resp := body(s.statusList(name))
+	resp.Generation = generation
+	return resp
+}
+
+// refuse audits an operation that was not carried out. A record of what was
+// attempted is worth as much as a record of what happened.
+func (s *Server) refuse(entry state.Entry, code string, cause error) Response {
+	entry.Result = state.ResultRefused
+	entry.Detail = cause.Error()
+	generation := s.store.Record(entry)
+	return Response{Code: code, Message: cause.Error(), Generation: generation}
 }
 
 // Description is what a client needs to know before it trusts an answer.
@@ -230,23 +298,9 @@ func (s *Server) describe() Response {
 		Operations: []string{
 			OpDescribe, OpStatus, OpServiceList,
 			OpServiceStart, OpServiceStop, OpServiceRestrt,
-			OpApply, OpLogSearch, OpLogFollow,
+			OpPlan, OpApply, OpAudit, OpLogSearch, OpLogFollow,
 		},
 	})
-}
-
-func (s *Server) act(name string, fn func(string) error) Response {
-	if name == "" {
-		return Response{Code: CodeInvalid, Message: "this operation needs a service name"}
-	}
-	err := fn(name)
-	if err != nil {
-		if _, ok := errors.AsType[supervisor.ErrUnknownService](err); ok {
-			return Response{Code: CodeNotFound, Message: err.Error()}
-		}
-		return Response{Code: CodeFailed, Message: err.Error()}
-	}
-	return body(s.statusList(name))
 }
 
 func (s *Server) statusList(name string) []supervisor.Status {
@@ -257,20 +311,68 @@ func (s *Server) statusList(name string) []supervisor.Status {
 	return []supervisor.Status{st}
 }
 
-// apply re-reads the services directory and converges on it.
-func (s *Server) apply(ctx context.Context) Response {
+// planOnly reports what an apply would do, without doing any of it. dry-run is
+// a property of the design, not a convenience of the command line: the same
+// plan serves a person reviewing it, an automation and an agent.
+func (s *Server) planOnly(ctx context.Context) Response {
 	declared, err := service.LoadDir(ctx, s.services)
+	changes := s.sup.Plan(declared)
 	if err != nil {
-		// The valid files still load, so the answer says what was applied and
-		// what was refused instead of failing the whole operation.
-		changes := s.sup.Apply(declared)
+		return Response{Code: CodeFailed, Message: err.Error(), Body: mustMarshal(changes)}
+	}
+	return body(changes)
+}
+
+// apply re-reads the services directory and converges on it.
+func (s *Server) apply(ctx context.Context, req Request) Response {
+	entry := state.Entry{Operation: OpApply, Target: s.services, OnBehalfOf: req.OnBehalfOf}
+
+	err := s.store.Check(req.ExpectGeneration)
+	if err != nil {
+		return s.refuse(entry, CodeConflict, err)
+	}
+
+	declared, loadErr := service.LoadDir(ctx, s.services)
+	changes := s.sup.Plan(declared)
+
+	// A change that takes a running service away is never inferred from an
+	// ordinary apply: an accidentally deleted file must not quietly take
+	// production down. The refusal names exactly what would go.
+	if supervisor.HasDestructive(changes) && !req.AllowDestructive {
+		gone := supervisor.Destructive(changes)
+		names := make([]string, 0, len(gone))
+		for _, c := range gone {
+			names = append(names, c.Service)
+		}
+		cause := fmt.Errorf(
+			"this would stop %s, which no file declares any more; review it with hostctl plan, then run hostctl apply --allow-destructive to go ahead",
+			strings.Join(names, ", "))
+		resp := s.refuse(entry, CodeDestructive, cause)
+		resp.Body = mustMarshal(changes)
+		return resp
+	}
+
+	applied := s.sup.Apply(declared)
+	if loadErr != nil {
+		// The readable files still applied, so the answer carries what was
+		// done alongside what was refused: one typo must not stop the machine
+		// from converging on everything else.
+		entry.Result = state.ResultOK
+		entry.Detail = loadErr.Error()
+		generation := s.store.Record(entry)
 		return Response{
-			Code:    CodeFailed,
-			Message: err.Error(),
-			Body:    mustMarshal(changes),
+			Code:       CodeFailed,
+			Message:    loadErr.Error(),
+			Generation: generation,
+			Body:       mustMarshal(applied),
 		}
 	}
-	return body(s.sup.Apply(declared))
+	entry.Result = state.ResultOK
+	entry.Detail = fmt.Sprintf("%d change(s)", len(applied))
+	generation := s.store.Record(entry)
+	resp := body(applied)
+	resp.Generation = generation
+	return resp
 }
 
 // follow streams records to a client until it goes away.

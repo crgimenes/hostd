@@ -13,6 +13,7 @@ import (
 
 	"github.com/crgimenes/hostd/internal/logs"
 	"github.com/crgimenes/hostd/internal/service"
+	"github.com/crgimenes/hostd/internal/state"
 	"github.com/crgimenes/hostd/internal/supervisor"
 )
 
@@ -20,10 +21,12 @@ import (
 // fake that always succeeds makes the error path impossible to exercise, and
 // the error path is the one that matters when something is wrong at 3am.
 type fakeSupervisor struct {
-	mu       sync.Mutex
-	statuses []supervisor.Status
-	calls    []string
-	failWith error
+	mu          sync.Mutex
+	statuses    []supervisor.Status
+	calls       []string
+	failWith    error
+	destructive bool
+	applied     bool
 }
 
 func (f *fakeSupervisor) Status() []supervisor.Status {
@@ -62,19 +65,37 @@ func (f *fakeSupervisor) Start(name string) error   { return f.act("start", name
 func (f *fakeSupervisor) Stop(name string) error    { return f.act("stop", name) }
 func (f *fakeSupervisor) Restart(name string) error { return f.act("restart", name) }
 
-func (f *fakeSupervisor) Apply(declared []service.Service) []string {
+func (f *fakeSupervisor) Plan(declared []service.Service) []supervisor.Change {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := make([]string, 0, len(declared))
+	out := make([]supervisor.Change, 0, len(declared))
 	for _, s := range declared {
-		out = append(out, s.Name+": applied")
+		out = append(out, supervisor.Change{
+			Service:     s.Name,
+			Action:      supervisor.ActionAdd,
+			Destructive: f.destructive,
+		})
 	}
 	return out
+}
+
+func (f *fakeSupervisor) Apply(declared []service.Service) []supervisor.Change {
+	f.mu.Lock()
+	f.applied = true
+	f.mu.Unlock()
+	return f.Plan(declared)
+}
+
+func (f *fakeSupervisor) didApply() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.applied
 }
 
 type fixture struct {
 	t      *testing.T
 	sup    *fakeSupervisor
+	store  *state.Store
 	buffer *logs.Buffer
 	socket string
 	dir    string
@@ -92,9 +113,14 @@ func newFixture(t *testing.T) *fixture {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 
+	store, err := state.Open(context.Background(), filepath.Join(dir, "state"))
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
 	f := &fixture{
 		t:      t,
 		sup:    &fakeSupervisor{},
+		store:  store,
 		buffer: logs.NewBuffer(100),
 		socket: filepath.Join(dir, "s"),
 		dir:    dir,
@@ -109,7 +135,7 @@ func newFixture(t *testing.T) *fixture {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	f.cancel = cancel
-	server := NewServer(f.sup, f.buffer, filepath.Join(dir, "services"))
+	server := NewServer(f.sup, f.store, f.buffer, filepath.Join(dir, "services"))
 	go func() { f.served <- server.Serve(ctx, listener) }()
 	t.Cleanup(func() {
 		cancel()
@@ -465,5 +491,249 @@ func TestSocketPathTooLongExplainsTheFix(t *testing.T) {
 	// "invalid argument" is what the kernel says. It teaches nobody anything.
 	if !strings.Contains(err.Error(), "HOSTD_ROOT") {
 		t.Fatalf("the error does not say how to fix it: %v", err)
+	}
+}
+
+// Every answer carries the generation, so a caller always knows what to claim
+// on its next mutation without asking again.
+func TestEveryAnswerCarriesTheGeneration(t *testing.T) {
+	f := newFixture(t)
+	f.sup.statuses = []supervisor.Status{{Name: "api"}}
+	client := f.client()
+
+	resp, err := client.Do(context.Background(), Request{Op: OpStatus})
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	before := resp.Generation
+
+	resp, err = client.Do(context.Background(), Request{Op: OpServiceStart, Name: "api"})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if resp.Generation != before+1 {
+		t.Fatalf("a mutation moved the generation from %d to %d, want %d", before, resp.Generation, before+1)
+	}
+
+	// A read does not move it: only changes count.
+	resp, err = client.Do(context.Background(), Request{Op: OpStatus})
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if resp.Generation != before+1 {
+		t.Fatalf("a read moved the generation to %d", resp.Generation)
+	}
+}
+
+// Two operators, or an operator and an agent, must not overwrite each other.
+func TestStaleGenerationIsRefused(t *testing.T) {
+	f := newFixture(t)
+	f.sup.statuses = []supervisor.Status{{Name: "api"}}
+	client := f.client()
+
+	first, err := client.Do(context.Background(), Request{Op: OpServiceStart, Name: "api"})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	stale := first.Generation - 1
+
+	resp, err := client.Do(context.Background(), Request{
+		Op: OpServiceStop, Name: "api", ExpectGeneration: stale,
+	})
+	if err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if resp.Code != CodeConflict {
+		t.Fatalf("code = %q, want %q", resp.Code, CodeConflict)
+	}
+	// The refusal carries the current generation, so the caller can re-read
+	// and retry without a second round trip to find out where it is.
+	if resp.Generation != first.Generation {
+		t.Fatalf("the refusal reports generation %d, want %d", resp.Generation, first.Generation)
+	}
+	if !strings.Contains(resp.Message, "hostctl status") {
+		t.Fatalf("the message does not say what to do: %q", resp.Message)
+	}
+}
+
+func TestMatchingGenerationIsAccepted(t *testing.T) {
+	f := newFixture(t)
+	f.sup.statuses = []supervisor.Status{{Name: "api"}}
+	client := f.client()
+
+	current, err := client.Do(context.Background(), Request{Op: OpStatus})
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	resp, err := client.Do(context.Background(), Request{
+		Op: OpServiceStop, Name: "api", ExpectGeneration: current.Generation,
+	})
+	if err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if resp.Failed() {
+		t.Fatalf("a matching generation was refused: %+v", resp)
+	}
+}
+
+// Claiming no generation is allowed: optimistic control is a tool, not a toll.
+func TestNoClaimIsAllowed(t *testing.T) {
+	f := newFixture(t)
+	f.sup.statuses = []supervisor.Status{{Name: "api"}}
+	resp, err := f.client().Do(context.Background(), Request{Op: OpServiceStop, Name: "api"})
+	if err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if resp.Failed() {
+		t.Fatalf("a call with no claim was refused: %+v", resp)
+	}
+}
+
+// An accidentally deleted service file must not quietly take production down.
+func TestDestructiveApplyIsRefusedWithoutAuthorisation(t *testing.T) {
+	f := newFixture(t)
+	f.sup.destructive = true
+	err := os.MkdirAll(filepath.Join(f.dir, "services"), 0o700)
+	if err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	err = os.WriteFile(filepath.Join(f.dir, "services", "api.filo"),
+		[]byte(`(service (tuple "name" "api") (tuple "command" "/bin/true"))`), 0o600)
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	resp, err := f.client().Do(context.Background(), Request{Op: OpApply})
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if resp.Code != CodeDestructive {
+		t.Fatalf("code = %q, want %q", resp.Code, CodeDestructive)
+	}
+	if f.sup.didApply() {
+		t.Fatal("a refused apply changed the host anyway")
+	}
+	// The refusal has to name what would go and say how to go ahead.
+	if !strings.Contains(resp.Message, "api") || !strings.Contains(resp.Message, "--allow-destructive") {
+		t.Fatalf("the refusal does not say what or how: %q", resp.Message)
+	}
+	// It still carries the plan, so the operator can review before deciding.
+	if !strings.Contains(resp.Body, "api") {
+		t.Fatalf("the refusal does not carry the plan: %q", resp.Body)
+	}
+
+	resp, err = f.client().Do(context.Background(), Request{Op: OpApply, AllowDestructive: true})
+	if err != nil {
+		t.Fatalf("authorised apply: %v", err)
+	}
+	if resp.Failed() {
+		t.Fatalf("an authorised destructive apply was refused: %+v", resp)
+	}
+	if !f.sup.didApply() {
+		t.Fatal("the authorised apply did not run")
+	}
+}
+
+// A plan changes nothing. dry-run is a property of the design, not a courtesy
+// of the command line.
+func TestPlanChangesNothing(t *testing.T) {
+	f := newFixture(t)
+	err := os.MkdirAll(filepath.Join(f.dir, "services"), 0o700)
+	if err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	err = os.WriteFile(filepath.Join(f.dir, "services", "api.filo"),
+		[]byte(`(service (tuple "name" "api") (tuple "command" "/bin/true"))`), 0o600)
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	before, err := f.client().Do(context.Background(), Request{Op: OpStatus})
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	var changes []supervisor.Change
+	err = f.client().Call(context.Background(), Request{Op: OpPlan}, &changes)
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if len(changes) != 1 || changes[0].Service != "api" {
+		t.Fatalf("plan = %#v", changes)
+	}
+	if f.sup.didApply() {
+		t.Fatal("a plan applied something")
+	}
+	after, err := f.client().Do(context.Background(), Request{Op: OpStatus})
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if after.Generation != before.Generation {
+		t.Fatalf("a plan moved the generation from %d to %d", before.Generation, after.Generation)
+	}
+}
+
+// "Who stopped the service at three in the morning" has to have an answer,
+// including when the answer is that it was refused.
+func TestAuditRecordsWhatHappenedAndWhatWasRefused(t *testing.T) {
+	f := newFixture(t)
+	f.sup.statuses = []supervisor.Status{{Name: "api"}}
+	client := f.client()
+
+	done, err := client.Do(context.Background(), Request{
+		Op: OpServiceStop, Name: "api", OnBehalfOf: "crg",
+	})
+	if err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	_, err = client.Do(context.Background(), Request{
+		Op: OpServiceStart, Name: "api", ExpectGeneration: done.Generation + 99,
+	})
+	if err != nil {
+		t.Fatalf("stale start: %v", err)
+	}
+
+	var entries []state.Entry
+	err = client.Call(context.Background(), Request{Op: OpAudit}, &entries)
+	if err != nil {
+		t.Fatalf("audit: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("audit has %d entries, want 2", len(entries))
+	}
+	ok, refused := entries[0], entries[1]
+	if ok.Operation != OpServiceStop || ok.Result != state.ResultOK || ok.Target != "api" {
+		t.Fatalf("the accepted operation was not audited properly: %+v", ok)
+	}
+	// Delegation is recorded rather than flattened: an agent acting for a
+	// person is not the same as the person acting.
+	if ok.OnBehalfOf != "crg" {
+		t.Fatalf("delegation was not recorded: %+v", ok)
+	}
+	if ok.After != ok.Before+1 {
+		t.Fatalf("the accepted operation did not move the generation: %+v", ok)
+	}
+	if refused.Result != state.ResultRefused {
+		t.Fatalf("the refused operation was not audited as refused: %+v", refused)
+	}
+	if refused.After != refused.Before {
+		t.Fatalf("a refused operation moved the generation: %+v", refused)
+	}
+}
+
+// Events carry a stable code, so a program can watch for a service that keeps
+// dying without matching on a sentence that may be rewritten.
+func TestLogFiltersByEventKind(t *testing.T) {
+	f := newFixture(t)
+	f.buffer.Append(logs.Record{Service: "api", Stream: logs.StreamEvent, Kind: logs.EventStarted, Text: "started process 1"})
+	f.buffer.Append(logs.Record{Service: "api", Stream: logs.StreamEvent, Kind: logs.EventExited, Text: "exited with code 3"})
+	f.buffer.Append(logs.Record{Service: "api", Stream: logs.StreamOut, Text: "hello"})
+
+	var lines []LogLine
+	err := f.client().Call(context.Background(), Request{Op: OpLogSearch, Kind: logs.EventExited}, &lines)
+	if err != nil {
+		t.Fatalf("log search: %v", err)
+	}
+	if len(lines) != 1 || lines[0].Kind != logs.EventExited {
+		t.Fatalf("kind filter returned %#v", lines)
 	}
 }

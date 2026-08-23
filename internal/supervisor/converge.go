@@ -46,7 +46,7 @@ func (s *Supervisor) observe(p *proc, now time.Time) {
 	p.running = false
 	p.pid = 0
 	p.lastError = "exited (adopted process, exit code unknown)"
-	s.event(p.svc.Name, "adopted process is gone; exit code is unknown because hostd was not its parent")
+	s.event(logs.EventGone, p.svc.Name, "adopted process is gone; exit code is unknown because hostd was not its parent")
 	s.afterExit(p, now, -1)
 }
 
@@ -62,7 +62,7 @@ func (s *Supervisor) maybeStart(p *proc, now time.Time) {
 	p.lastError = err.Error()
 	p.failures++
 	p.nextStart = now.Add(backoff(p.failures))
-	s.event(p.svc.Name, fmt.Sprintf("start failed: %v; next attempt in %s", err, backoff(p.failures)))
+	s.event(logs.EventStartFailed, p.svc.Name, fmt.Sprintf("start failed: %v; next attempt in %s", err, backoff(p.failures)))
 }
 
 // start launches the process and records enough to find it again.
@@ -121,9 +121,9 @@ func (s *Supervisor) start(p *proc, now time.Time) error {
 		ErrOffset: p.errTail.Offset(),
 	})
 	if err != nil {
-		s.event(p.svc.Name, fmt.Sprintf("started process %d but could not record its identity: %v; a hostd restart will not be able to adopt it", p.pid, err))
+		s.event(logs.EventProblem, p.svc.Name, fmt.Sprintf("started process %d but could not record its identity: %v; a hostd restart will not be able to adopt it", p.pid, err))
 	}
-	s.event(p.svc.Name, fmt.Sprintf("started process %d", p.pid))
+	s.event(logs.EventStarted, p.svc.Name, fmt.Sprintf("started process %d", p.pid))
 	go s.wait(p.svc.Name, cmd)
 	return nil
 }
@@ -172,11 +172,11 @@ func (s *Supervisor) wait(name string, cmd *exec.Cmd) {
 	}
 	switch {
 	case p.stopping:
-		s.event(name, fmt.Sprintf("stopped (exit %d)", code))
+		s.event(logs.EventStopped, name, fmt.Sprintf("stopped (exit %d)", code))
 	case code == 0:
-		s.event(name, "exited normally (exit 0)")
+		s.event(logs.EventExited, name, "exited normally (exit 0)")
 	default:
-		s.event(name, fmt.Sprintf("exited with code %d", code))
+		s.event(logs.EventExited, name, fmt.Sprintf("exited with code %d", code))
 	}
 	s.afterExit(p, now, code)
 	s.mu.Unlock()
@@ -189,6 +189,12 @@ func (s *Supervisor) afterExit(p *proc, now time.Time, code int) {
 	wasStopping := p.stopping
 	p.stopping = false
 	p.killed = false
+	if p.removeWhenStopped {
+		// An apply took this service away and waited for its process to be
+		// really gone before forgetting it.
+		delete(s.procs, p.svc.Name)
+		return
+	}
 	if wasStopping {
 		p.failures = 0
 		p.nextStart = time.Time{}
@@ -223,10 +229,10 @@ func (s *Supervisor) beginStop(p *proc, now time.Time) {
 	p.deadline = now.Add(p.svc.StopGrace())
 	err := signal(p.pid, syscall.SIGTERM)
 	if err != nil {
-		s.event(p.svc.Name, fmt.Sprintf("could not signal process %d: %v", p.pid, err))
+		s.event(logs.EventProblem, p.svc.Name, fmt.Sprintf("could not signal process %d: %v", p.pid, err))
 		return
 	}
-	s.event(p.svc.Name, fmt.Sprintf("asked process %d to stop", p.pid))
+	s.event(logs.EventStopped, p.svc.Name, fmt.Sprintf("asked process %d to stop", p.pid))
 }
 
 // enforceStop escalates a stop that is taking too long.
@@ -242,7 +248,7 @@ func (s *Supervisor) enforceStop(p *proc, now time.Time) {
 		p.killed = true
 		p.deadline = now.Add(killGrace)
 		_ = signal(p.pid, syscall.SIGKILL)
-		s.event(p.svc.Name, fmt.Sprintf("process %d did not stop within %s; killed", p.pid, p.svc.StopGrace()))
+		s.event(logs.EventKilled, p.svc.Name, fmt.Sprintf("process %d did not stop within %s; killed", p.pid, p.svc.StopGrace()))
 		return
 	}
 	// Killed and still there: only an adopted process can reach here, since a
@@ -253,7 +259,7 @@ func (s *Supervisor) enforceStop(p *proc, now time.Time) {
 		p.stopping = false
 		return
 	}
-	s.event(p.svc.Name, fmt.Sprintf("process %d survived SIGKILL; it is no longer being supervised", p.pid))
+	s.event(logs.EventProblem, p.svc.Name, fmt.Sprintf("process %d survived SIGKILL; it is no longer being supervised", p.pid))
 	p.lastError = fmt.Sprintf("process %d survived SIGKILL", p.pid)
 	p.running = false
 	p.stopping = false
@@ -343,7 +349,7 @@ func (s *Supervisor) read(tails []namedTail, recycle bool) {
 		for {
 			records, err := t.tail.Read(now)
 			if err != nil {
-				s.event(t.name, fmt.Sprintf("could not read captured output: %v", err))
+				s.event(logs.EventProblem, t.name, fmt.Sprintf("could not read captured output: %v", err))
 				break
 			}
 			for _, r := range records {
@@ -358,13 +364,13 @@ func (s *Supervisor) read(tails []namedTail, recycle bool) {
 		}
 		lost, err := t.tail.Recycle()
 		if err != nil {
-			s.event(t.name, fmt.Sprintf("could not recycle the output spool: %v", err))
+			s.event(logs.EventProblem, t.name, fmt.Sprintf("could not recycle the output spool: %v", err))
 			continue
 		}
 		if lost > 0 {
 			// Losing output is acceptable when a service outruns the ceiling.
 			// Losing it silently is not.
-			s.event(t.name, fmt.Sprintf("output spool exceeded its ceiling; %d bytes were discarded", lost))
+			s.event(logs.EventSpoolLost, t.name, fmt.Sprintf("output spool exceeded its ceiling; %d bytes were discarded", lost))
 		}
 	}
 }
@@ -416,11 +422,15 @@ func (s *Supervisor) savePositions(minInterval time.Duration) {
 
 // event records a fact about a service in the same timeline as its output, so
 // that a death and the last lines before it are read together.
-func (s *Supervisor) event(name, text string) {
+// The kind is a stable code and the text is for a person: a program watching
+// for a service that keeps dying matches on the code, while the sentence may
+// be rewritten whenever it reads badly.
+func (s *Supervisor) event(kind, name, text string) {
 	s.log.Append(logs.Record{
 		Time:    s.now(),
 		Service: name,
 		Stream:  logs.StreamEvent,
+		Kind:    kind,
 		Text:    text,
 	})
 }

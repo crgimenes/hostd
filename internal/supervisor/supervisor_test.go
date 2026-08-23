@@ -495,9 +495,8 @@ func TestApplyRestartsChangedAndAddsAndRemoves(t *testing.T) {
 	changed := shell("api", `sleep 60`)
 	added := shell("web", `sleep 30`)
 	changes := h.sup.Apply([]service.Service{changed, added})
-	joined := strings.Join(changes, "\n")
-	if !strings.Contains(joined, "api: definition changed") || !strings.Contains(joined, "web: added") {
-		t.Fatalf("apply did not report what it did: %v", changes)
+	if !hasChange(changes, "api", ActionUpdate) || !hasChange(changes, "web", ActionAdd) {
+		t.Fatalf("apply did not report what it did: %#v", changes)
 	}
 	h.waitFor("the changed service to be replaced", func() bool {
 		st := h.status("api")
@@ -508,8 +507,8 @@ func TestApplyRestartsChangedAndAddsAndRemoves(t *testing.T) {
 	})
 
 	changes = h.sup.Apply([]service.Service{changed})
-	if !strings.Contains(strings.Join(changes, "\n"), "web: no longer declared") {
-		t.Fatalf("removal was not reported: %v", changes)
+	if !hasChange(changes, "web", ActionRemove) {
+		t.Fatalf("removal was not reported: %#v", changes)
 	}
 	h.waitFor("the removed service to stop", func() bool {
 		st, err := h.sup.StatusOf("web")
@@ -589,4 +588,185 @@ func mustToken(t *testing.T, pid int) string {
 		t.Fatalf("Token(%d): %v", pid, err)
 	}
 	return token
+}
+
+func hasChange(changes []Change, service, action string) bool {
+	for _, c := range changes {
+		if c.Service == service && c.Action == action {
+			return true
+		}
+	}
+	return false
+}
+
+// The plan and the apply are the same computation, so reviewing a plan means
+// something. If they could drift apart, dry-run would be decoration.
+func TestPlanMatchesWhatApplyDoes(t *testing.T) {
+	h := newHarness(t)
+	h.start(shell("api", `sleep 30`))
+	defer h.stop()
+	h.waitFor("running", func() bool { return h.status("api").State == StateRunning })
+
+	declared := []service.Service{shell("api", `sleep 60`), shell("web", `sleep 30`)}
+	planned := h.sup.Plan(declared)
+	applied := h.sup.Apply(declared)
+
+	if len(planned) != len(applied) {
+		t.Fatalf("plan has %d changes and apply reported %d", len(planned), len(applied))
+	}
+	for i := range planned {
+		if planned[i] != applied[i] {
+			t.Fatalf("change %d differs:\n plan  %+v\n apply %+v", i, planned[i], applied[i])
+		}
+	}
+}
+
+// A plan must not touch anything, or a dry run would be a change.
+func TestPlanChangesNothing(t *testing.T) {
+	h := newHarness(t)
+	h.start(shell("api", `sleep 30`))
+	defer h.stop()
+	h.waitFor("running", func() bool { return h.status("api").State == StateRunning })
+	before := h.status("api").PID
+
+	h.sup.Plan([]service.Service{shell("web", `sleep 30`)})
+	time.Sleep(300 * time.Millisecond)
+
+	if after := h.status("api").PID; after != before {
+		t.Fatalf("a plan replaced a process: %d then %d", before, after)
+	}
+	_, err := h.sup.StatusOf("web")
+	if err == nil {
+		t.Fatal("a plan added a service")
+	}
+}
+
+// The impact of each change is stated: taking a service away and interrupting
+// one are not the same thing, and marking them the same way would either wave
+// removals through or make every ordinary change ask for permission.
+func TestPlanMarksImpact(t *testing.T) {
+	h := newHarness(t)
+	h.start(shell("api", `sleep 30`), shell("gone", `sleep 30`))
+	defer h.stop()
+	h.waitFor("both running", func() bool {
+		return h.status("api").State == StateRunning && h.status("gone").State == StateRunning
+	})
+
+	changes := h.sup.Plan([]service.Service{shell("api", `sleep 60`), shell("new", `sleep 30`)})
+	byService := make(map[string]Change, len(changes))
+	for _, c := range changes {
+		byService[c.Service] = c
+	}
+
+	removed := byService["gone"]
+	if removed.Action != ActionRemove || !removed.Destructive {
+		t.Errorf("removing a running service is not marked destructive: %+v", removed)
+	}
+	updated := byService["api"]
+	if updated.Action != ActionUpdate || updated.Destructive || !updated.Disruptive {
+		t.Errorf("a restart should interrupt, not destroy: %+v", updated)
+	}
+	added := byService["new"]
+	if added.Action != ActionAdd || added.Destructive || added.Disruptive {
+		t.Errorf("adding a service costs nothing: %+v", added)
+	}
+	if !HasDestructive(changes) {
+		t.Error("HasDestructive did not see the removal")
+	}
+	if got := Destructive(changes); len(got) != 1 || got[0].Service != "gone" {
+		t.Errorf("Destructive returned %#v", got)
+	}
+}
+
+// Removing a service that is not running costs nothing, so it is not marked
+// as taking a service away.
+func TestRemovingAStoppedServiceIsNotDestructive(t *testing.T) {
+	h := newHarness(t)
+	svc := shell("idle", `sleep 30`)
+	svc.State = service.StateStopped
+	h.start(svc)
+	defer h.stop()
+
+	changes := h.sup.Plan(nil)
+	if len(changes) != 1 || changes[0].Action != ActionRemove {
+		t.Fatalf("unexpected plan: %#v", changes)
+	}
+	if changes[0].Destructive {
+		t.Fatalf("removing a stopped service was marked destructive: %+v", changes[0])
+	}
+}
+
+// A plan says what changed, so it can be reviewed without diffing two files
+// by eye.
+func TestPlanSaysWhatChanged(t *testing.T) {
+	h := newHarness(t)
+	h.start(shell("api", `sleep 30`))
+	defer h.stop()
+
+	updated := shell("api", `sleep 30`)
+	updated.Command = "/bin/dash"
+	changes := h.sup.Plan([]service.Service{updated})
+	if len(changes) != 1 {
+		t.Fatalf("unexpected plan: %#v", changes)
+	}
+	if !strings.Contains(changes[0].Detail, "/bin/sh") || !strings.Contains(changes[0].Detail, "/bin/dash") {
+		t.Fatalf("the plan does not say what changed: %q", changes[0].Detail)
+	}
+}
+
+// The same declarations against the same observed state must always produce
+// the same plan: a plan a person reviews and a plan an agent compares have to
+// be one thing.
+//
+// The plan does depend on what is observed — an update to a service that is
+// running interrupts it, and to one that is stopped does not — so the state
+// has to settle before the comparison means anything.
+func TestPlanIsDeterministic(t *testing.T) {
+	h := newHarness(t)
+	h.start(shell("b", `sleep 30`), shell("a", `sleep 30`), shell("c", `sleep 30`))
+	defer h.stop()
+	h.waitFor("every service to be running", func() bool {
+		for _, name := range []string{"a", "b", "c"} {
+			if h.status(name).State != StateRunning {
+				return false
+			}
+		}
+		return true
+	})
+
+	declared := []service.Service{shell("a", `sleep 60`), shell("d", `sleep 30`)}
+	first := h.sup.Plan(declared)
+	for range 20 {
+		again := h.sup.Plan(declared)
+		if len(again) != len(first) {
+			t.Fatalf("plan length changed between runs: %d then %d", len(first), len(again))
+		}
+		for i := range first {
+			if first[i] != again[i] {
+				t.Fatalf("plan is not stable at %d:\n %+v\n %+v", i, first[i], again[i])
+			}
+		}
+	}
+}
+
+// An undeclared service is forgotten only once its process is really gone,
+// never while it is still running.
+func TestRemovedServiceIsKeptUntilItStops(t *testing.T) {
+	h := newHarness(t)
+	h.start(shell("api", `sleep 30`))
+	defer h.stop()
+	h.waitFor("running", func() bool { return h.status("api").State == StateRunning })
+
+	h.sup.Apply(nil)
+	st, err := h.sup.StatusOf("api")
+	if err != nil {
+		t.Fatalf("the service disappeared while its process was alive: %v", err)
+	}
+	if st.PID == 0 {
+		t.Fatal("the service lost its PID while still running")
+	}
+	h.waitFor("the service to be forgotten once it stopped", func() bool {
+		_, statusErr := h.sup.StatusOf("api")
+		return statusErr != nil
+	})
 }

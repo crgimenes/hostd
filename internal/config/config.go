@@ -73,6 +73,9 @@ func (p Paths) SupervisionDir() string { return filepath.Join(p.DataDir, "superv
 // SpoolDir holds what services write to stdout and stderr.
 func (p Paths) SpoolDir() string { return filepath.Join(p.DataDir, "spool") }
 
+// StateDir holds the generation counter and the audit log.
+func (p Paths) StateDir() string { return filepath.Join(p.DataDir, "state") }
+
 // Socket is the local control socket.
 func (p Paths) Socket() string { return filepath.Join(p.RunDir, "hostd.sock") }
 
@@ -99,7 +102,7 @@ func Load(ctx context.Context, path string) (Config, error) {
 
 // EnsureDirs creates the directories hostd owns.
 func (p Paths) EnsureDirs() error {
-	for _, dir := range []string{p.ConfigDir, p.ServicesDir(), p.SupervisionDir(), p.SpoolDir(), p.RunDir} {
+	for _, dir := range []string{p.ConfigDir, p.ServicesDir(), p.SupervisionDir(), p.SpoolDir(), p.StateDir(), p.RunDir} {
 		err := os.MkdirAll(dir, 0o700)
 		if err != nil {
 			return err

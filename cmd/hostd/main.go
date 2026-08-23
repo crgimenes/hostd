@@ -16,6 +16,7 @@ import (
 	"github.com/crgimenes/hostd/internal/config"
 	"github.com/crgimenes/hostd/internal/logs"
 	"github.com/crgimenes/hostd/internal/service"
+	"github.com/crgimenes/hostd/internal/state"
 	"github.com/crgimenes/hostd/internal/supervisor"
 	"github.com/crgimenes/hostd/internal/version"
 )
@@ -63,6 +64,11 @@ func run() error {
 		buffer.Append(logs.Record{Service: "hostd", Stream: logs.StreamEvent, Text: loadErr.Error()})
 	}
 
+	store, err := state.Open(ctx, paths.StateDir())
+	if err != nil {
+		return err
+	}
+
 	sup := supervisor.New(supervisor.Dirs{
 		State: paths.SupervisionDir(),
 		Spool: paths.SpoolDir(),
@@ -82,7 +88,7 @@ func run() error {
 	}
 	defer func() { _ = listener.Close() }()
 
-	server := api.NewServer(sup, buffer, paths.ServicesDir())
+	server := api.NewServer(sup, store, buffer, paths.ServicesDir())
 	serverErr := make(chan error, 1)
 	go func() { serverErr <- server.Serve(ctx, listener) }()
 

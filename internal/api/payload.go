@@ -21,7 +21,9 @@ type LogLine struct {
 	Time    float64 `filo:"time-ms"`
 	Service string  `filo:"service"`
 	Stream  string  `filo:"stream"`
-	Text    string  `filo:"text"`
+	// Kind is the stable code of an event, empty for captured output.
+	Kind string `filo:"kind"`
+	Text string `filo:"text"`
 }
 
 // At returns the wall time of the line.
@@ -35,6 +37,7 @@ func toLine(r logs.Record) LogLine {
 		Time:    float64(r.Time.UnixMilli()),
 		Service: r.Service,
 		Stream:  r.Stream,
+		Kind:    r.Kind,
 		Text:    r.Text,
 	}
 }

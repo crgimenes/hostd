@@ -27,6 +27,12 @@ const (
 	exitComms   = 3
 	exitAuth    = 4
 	exitPartial = 5
+	// exitRefused means nothing was changed and the caller has to look before
+	// trying again: the host moved to another generation, or the operation
+	// would have taken a running service away. An agent that cannot tell this
+	// from a failure either retries something it should not, or gives up on
+	// something it only had to re-read first.
+	exitRefused = 6
 )
 
 func main() {
@@ -34,13 +40,18 @@ func main() {
 }
 
 type options struct {
-	socket   string
-	filoOut  bool
-	limit    int
-	stream   string
-	service  string
-	follow   bool
-	sinceSeq uint64
+	socket     string
+	filoOut    bool
+	limit      int
+	stream     string
+	kind       string
+	service    string
+	follow     bool
+	sinceSeq   uint64
+	expectGen  uint64
+	allowDestr bool
+	onBehalfOf string
+	dryRun     bool
 }
 
 func run(args []string) int {
@@ -52,8 +63,13 @@ func run(args []string) int {
 	flags.IntVar(&opt.limit, "limit", 200, "maximum number of log lines")
 	flags.StringVar(&opt.stream, "stream", "", "only stdout, stderr or event")
 	flags.StringVar(&opt.service, "service", "", "only this service")
+	flags.StringVar(&opt.kind, "kind", "", "only events of this kind, e.g. service.exited")
 	flags.BoolVar(&opt.follow, "follow", false, "keep watching for new lines")
 	flags.Uint64Var(&opt.sinceSeq, "since", 0, "only lines after this sequence")
+	flags.Uint64Var(&opt.expectGen, "expect-generation", 0, "refuse if the host has moved past this generation")
+	flags.BoolVar(&opt.allowDestr, "allow-destructive", false, "authorise changes that take a running service away")
+	flags.StringVar(&opt.onBehalfOf, "on-behalf-of", "", "identity this command is being run for, recorded in the audit log")
+	flags.BoolVar(&opt.dryRun, "dry-run", false, "show what apply would do, and do nothing")
 	flags.Usage = func() { usage(flags) }
 
 	rest, err := parseAnywhere(flags, args)
@@ -116,7 +132,9 @@ usage:
   hostctl service start <name>         ask a service to run
   hostctl service stop <name>          ask a service to stop
   hostctl service restart <name>       stop and start a service
+  hostctl plan                         what an apply would do, without doing it
   hostctl apply                        re-read the services directory and converge
+  hostctl audit                        who changed what, and when
   hostctl log [pattern]                what the services wrote
   hostctl log --follow                 keep watching
 
@@ -139,8 +157,12 @@ func dispatch(ctx context.Context, opt options, args []string) (int, error) {
 		return runDescribe(ctx, client, opt)
 	case "service":
 		return runService(ctx, client, opt, args[1:])
+	case "plan":
+		return runPlan(ctx, client, opt)
 	case "apply":
 		return runApply(ctx, client, opt)
+	case "audit":
+		return runAudit(ctx, client, opt)
 	case "log", "logs":
 		return runLog(ctx, client, opt, args[1:])
 	default:
@@ -160,6 +182,10 @@ func codeFor(err error) int {
 		return exitUsage
 	case api.CodeUnavailable:
 		return exitComms
+	case api.CodeConflict, api.CodeDestructive:
+		// Nothing was changed. The caller is meant to look and decide, which
+		// is a different outcome from an operation that tried and failed.
+		return exitRefused
 	default:
 		return exitFailed
 	}

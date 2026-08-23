@@ -162,3 +162,26 @@ func TestEmptyListRepairLeavesStringsAlone(t *testing.T) {
 		t.Fatalf("empty field decoded as %#v", back.Extra)
 	}
 }
+
+// hostd's persistent state lives for years across upgrades, so a document
+// written by an older version must not zero the fields it never heard of.
+// Decoding starts from the current value and overlays what the document
+// carries; a field that is absent keeps its default.
+func TestAbsentFieldsKeepTheirDefaults(t *testing.T) {
+	type snapshot struct {
+		Name    string `filo:"name"`
+		Buffer  int    `filo:"buffer"`
+		Enabled bool   `filo:"enabled"`
+	}
+	got := snapshot{Name: "old", Buffer: 42, Enabled: true}
+	err := Decode(context.Background(), "old.filo", `(host (tuple "name" "new"))`, &got)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got.Name != "new" {
+		t.Errorf("declared field was not applied: %+v", got)
+	}
+	if got.Buffer != 42 || !got.Enabled {
+		t.Errorf("an older document zeroed fields it does not carry: %+v", got)
+	}
+}

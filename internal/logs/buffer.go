@@ -71,7 +71,9 @@ func (b *Buffer) Append(r Record) Record {
 type Query struct {
 	Service string
 	Stream  string
-	Match   string
+	// Kind selects events by their stable code.
+	Kind  string
+	Match string
 	// Limit is the maximum number of records returned, most recent last.
 	Limit int
 	// Since returns only records with a sequence above this value, which is
@@ -86,6 +88,9 @@ func (q Query) Matches(r Record) bool {
 		return false
 	}
 	if q.Stream != "" && r.Stream != q.Stream {
+		return false
+	}
+	if q.Kind != "" && r.Kind != q.Kind {
 		return false
 	}
 	if q.Since > 0 && r.Seq <= q.Since {

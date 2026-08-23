@@ -19,6 +19,25 @@ const (
 	StreamEvent = "event"
 )
 
+// Event kinds. These are codes, not prose: the text of an event may be
+// rewritten between releases, but a program watching for a service that keeps
+// dying must have something stable to match on.
+const (
+	EventStarted     = "service.started"
+	EventExited      = "service.exited"
+	EventStopped     = "service.stopped"
+	EventKilled      = "service.killed"
+	EventStartFailed = "service.start-failed"
+	EventAdopted     = "service.adopted"
+	EventOrphan      = "service.orphan"
+	EventGone        = "service.gone"
+	EventMissed      = "service.missed"
+	EventApplied     = "config.applied"
+	EventSpoolLost   = "spool.overflowed"
+	EventDaemon      = "hostd.started"
+	EventProblem     = "hostd.problem"
+)
+
 // Record is one captured line.
 type Record struct {
 	// Seq is a per-host monotonic sequence, so two lines written in the same
@@ -27,5 +46,7 @@ type Record struct {
 	Time    time.Time `filo:"time"`
 	Service string    `filo:"service"`
 	Stream  string    `filo:"stream"`
-	Text    string    `filo:"text"`
+	// Kind is the stable code of an event, empty for captured output.
+	Kind string `filo:"kind"`
+	Text string `filo:"text"`
 }

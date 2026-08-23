@@ -5,6 +5,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/crgimenes/hostd/internal/logs"
 	"github.com/crgimenes/hostd/internal/service"
 )
 
@@ -126,58 +127,57 @@ func (s *Supervisor) Restart(name string) error {
 	return nil
 }
 
-// Apply replaces the declared set of services.
+// Apply converges on the declared set of services and returns what it did.
+//
+// It computes the same plan Plan does and then carries it out, so a dry run
+// and the real thing describe one transition rather than two that happen to
+// agree most of the time.
 //
 // A service whose definition did not change keeps its process: applying
-// configuration must not restart the machine's work for nothing. One whose
-// definition changed is stopped, and the loop starts it again under the new
-// definition.
-func (s *Supervisor) Apply(declared []service.Service) []string {
+// configuration must not restart the machine's work for nothing.
+func (s *Supervisor) Apply(declared []service.Service) []Change {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
-	var changes []string
+	changes := s.plan(declared)
 
 	wanted := make(map[string]service.Service, len(declared))
 	for _, svc := range declared {
 		wanted[svc.Name] = svc
 	}
 
-	for name, p := range s.procs {
-		svc, still := wanted[name]
-		if !still {
-			if p.running {
-				changes = append(changes, fmt.Sprintf("%s: no longer declared, stopping", name))
-				p.svc.State = service.StateStopped
-				s.beginStop(p, now)
+	for _, c := range changes {
+		switch c.Action {
+		case ActionRemove:
+			p := s.procs[c.Service]
+			if p == nil {
 				continue
 			}
-			delete(s.procs, name)
-			changes = append(changes, fmt.Sprintf("%s: removed", name))
-			continue
-		}
-		if sameDefinition(p.svc, svc) {
-			continue
-		}
-		changes = append(changes, fmt.Sprintf("%s: definition changed, restarting", name))
-		p.svc = svc
-		p.failures = 0
-		p.nextStart = time.Time{}
-		if p.running && !p.stopping {
+			if !p.running {
+				delete(s.procs, c.Service)
+				continue
+			}
+			// It stops first and is forgotten once it is actually gone, so a
+			// service is never dropped from view while its process lives.
+			p.svc.State = service.StateStopped
+			p.removeWhenStopped = true
 			s.beginStop(p, now)
+		case ActionUpdate:
+			p := s.procs[c.Service]
+			if p == nil {
+				continue
+			}
+			p.svc = wanted[c.Service]
+			p.failures = 0
+			p.nextStart = time.Time{}
+			if p.running && !p.stopping {
+				s.beginStop(p, now)
+			}
+		case ActionAdd:
+			s.procs[c.Service] = &proc{svc: wanted[c.Service]}
 		}
 	}
-
-	for name, svc := range wanted {
-		_, exists := s.procs[name]
-		if exists {
-			continue
-		}
-		s.procs[name] = &proc{svc: svc}
-		changes = append(changes, fmt.Sprintf("%s: added", name))
-	}
-
-	sort.Strings(changes)
+	s.event(logs.EventApplied, "hostd", fmt.Sprintf("applied configuration: %d change(s)", len(changes)))
 	return changes
 }
 

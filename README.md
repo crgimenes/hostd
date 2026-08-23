@@ -30,7 +30,12 @@ Early. What works today:
 - services declared one per file in [Filo](https://github.com/crgimenes/filo);
 - supervision with restart policies and backoff;
 - capture of `stdout` and `stderr`, with search and follow;
-- events and output in one timeline, so a failure reads in order;
+- events with stable codes, in the same timeline as the output, so a failure
+  reads in order;
+- a plan you can review before applying it — the same computation `apply`
+  carries out, so a dry run is not decoration;
+- generations, so two operators or an agent cannot overwrite each other, and an
+  audit log that records refusals as well as changes;
 - a local control socket, and `hostctl` over it;
 - **restarting `hostd` does not stop the services**: they keep running and the
   new daemon adopts them, proving each process is the one it started.
@@ -100,15 +105,22 @@ hostctl service list
 hostctl service start <name>
 hostctl service stop <name>
 hostctl service restart <name>
+hostctl plan                      what an apply would do, without doing it
 hostctl apply                     re-read the services directory and converge
+hostctl audit                     who changed what, and when
 hostctl log [pattern]             what the services wrote
 hostctl log --follow              keep watching
 ```
 
+A change that would stop a service nothing declares any more is refused unless
+you pass `--allow-destructive`; the refusal names what would go. Pass
+`--expect-generation N` to a change and it is refused if the host has moved
+since you looked, instead of overwriting somebody else's work.
+
 `--filo` makes `stdout` carry a Filo expression and nothing else; progress and
 diagnostics go to `stderr`. Exit codes are part of the interface: `0` success,
 `1` failed, `2` bad arguments, `3` communication, `4` authorisation, `5`
-partial success.
+partial success, `6` refused and nothing changed.
 
 ## Build
 

@@ -27,6 +27,8 @@ const (
 	OpServiceStop   = "service.stop"
 	OpServiceRestrt = "service.restart"
 	OpApply         = "apply"
+	OpPlan          = "plan"
+	OpAudit         = "audit"
 	OpLogSearch     = "log.search"
 	OpLogFollow     = "log.follow"
 )
@@ -40,6 +42,13 @@ const (
 	CodeNotFound    = "not-found"
 	CodeFailed      = "operation-failed"
 	CodeUnavailable = "unavailable"
+	// CodeConflict means the host moved to another generation since the
+	// caller last looked. It is a refusal, not a failure: nothing was
+	// changed, and reading the current state and retrying is the answer.
+	CodeConflict = "generation-conflict"
+	// CodeDestructive means the operation would take a running service away
+	// and was not authorised to. Destructive work is never inferred.
+	CodeDestructive = "destructive-refused"
 )
 
 // maxRequestBytes bounds one request. A daemon that reads until the client
@@ -55,8 +64,20 @@ type Request struct {
 	Service string `filo:"service"`
 	Stream  string `filo:"stream"`
 	Match   string `filo:"match"`
+	Kind    string `filo:"kind"`
 	Limit   int    `filo:"limit"`
 	Since   uint64 `filo:"since"`
+	// ExpectGeneration is the generation the caller believed it was acting
+	// on. Zero means it makes no claim; any other value must match, or the
+	// operation is refused with the current one rather than overwriting work
+	// somebody else did in the meantime.
+	ExpectGeneration uint64 `filo:"expect-generation"`
+	// AllowDestructive authorises changes that take a running service away.
+	// Destructive work is never inferred from an ordinary apply.
+	AllowDestructive bool `filo:"allow-destructive"`
+	// OnBehalfOf names the identity a caller is acting for, so an agent's
+	// work is auditable as delegated rather than as its own.
+	OnBehalfOf string `filo:"on-behalf-of"`
 	// Body carries Filo source for operations that take a document.
 	Body string `filo:"body"`
 }
@@ -68,6 +89,9 @@ type Response struct {
 	// Message explains a failure to a person and, where possible, says how to
 	// fix it.
 	Message string `filo:"message"`
+	// Generation is the host's generation after the operation. Every answer
+	// carries it, so a caller always knows what to claim next.
+	Generation uint64 `filo:"generation"`
 	// Body is the requested result, already rendered as Filo.
 	Body string `filo:"body"`
 }
