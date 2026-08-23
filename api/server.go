@@ -342,6 +342,10 @@ func (s *Server) dispatch(ctx context.Context, req Request, actor string) Respon
 		return s.mutate(req, actor, req.Name, s.sup.Restart)
 	case OpApply:
 		return s.apply(ctx, req, actor)
+	case OpServicePut:
+		return s.stamp(s.putService(ctx, req, actor))
+	case OpServicePrune:
+		return s.stamp(s.pruneServices(ctx, req, actor))
 	default:
 		return Response{
 			Code:    CodeUnknownOp,
@@ -356,6 +360,7 @@ func (s *Server) searchLogs(req Request) Response {
 		Service: req.Service,
 		Stream:  req.Stream,
 		Kind:    req.Kind,
+		Run:     req.Run,
 		Match:   req.Match,
 		Limit:   req.Limit,
 		Since:   req.Since,
@@ -462,7 +467,8 @@ func (s *Server) describe() Response {
 		Operations: []string{
 			OpDescribe, OpStatus, OpServiceList,
 			OpServiceStart, OpServiceStop, OpServiceRestrt,
-			OpPlan, OpApply, OpAudit, OpLogSearch, OpLogFollow, OpMetrics, OpImagePush,
+			OpPlan, OpApply, OpAudit, OpLogSearch, OpLogFollow, OpMetrics,
+			OpImagePush, OpServicePut, OpServicePrune,
 		},
 	})
 }

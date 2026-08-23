@@ -3,6 +3,7 @@ package api
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"errors"
 	"net"
 	"os"
@@ -439,7 +440,7 @@ func TestApplyReportsBrokenFilesAsPartial(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 	err = os.WriteFile(filepath.Join(dir, "good.filo"),
-		[]byte(`(service (tuple "name" "good") (tuple "command" "/bin/true"))`), 0o600)
+		[]byte(`(service (tuple "name" "good") (tuple "image" "probe:1"))`), 0o600)
 	if err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -644,7 +645,7 @@ func TestDestructiveApplyIsRefusedWithoutAuthorisation(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 	err = os.WriteFile(filepath.Join(f.dir, "services", "api.filo"),
-		[]byte(`(service (tuple "name" "api") (tuple "command" "/bin/true"))`), 0o600)
+		[]byte(`(service (tuple "name" "api") (tuple "image" "probe:1"))`), 0o600)
 	if err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -689,7 +690,7 @@ func TestPlanChangesNothing(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 	err = os.WriteFile(filepath.Join(f.dir, "services", "api.filo"),
-		[]byte(`(service (tuple "name" "api") (tuple "command" "/bin/true"))`), 0o600)
+		[]byte(`(service (tuple "name" "api") (tuple "image" "probe:1"))`), 0o600)
 	if err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -935,4 +936,199 @@ func (f *fixture) search(q logs.Query) []logs.Record {
 func decodeBody(t *testing.T, body string, out any) error {
 	t.Helper()
 	return filoconf.Decode(context.Background(), "response", body, out)
+}
+
+// The operator's tree is the source: a machine receives the declaration and
+// whatever travels with it, and keeps them the way the tree holds them.
+func TestAPushedDeclarationLandsWithItsArtifacts(t *testing.T) {
+	f := newFixture(t)
+	services := filepath.Join(f.dir, "services")
+
+	source := `(service (tuple "name" "caddy") (tuple "image" "caddy:2") (tuple "config" "/etc/caddy"))`
+	err := call(f.client(), Request{Op: OpServicePut, Body: mustMarshal(Declaration{
+		Name:   "caddy",
+		Source: source,
+		Artifacts: []Artifact{
+			{Name: "Caddyfile", Content: base64.StdEncoding.EncodeToString([]byte(":80 {\n}\n"))},
+		},
+	})}, nil)
+	if err != nil {
+		t.Fatalf("put: %v", err)
+	}
+
+	written, err := os.ReadFile(filepath.Join(services, "caddy.filo"))
+	if err != nil {
+		t.Fatalf("the declaration was not written: %v", err)
+	}
+	// Byte for byte what the operator wrote: a declaration that arrives
+	// reformatted is a diff nobody made.
+	if string(written) != source {
+		t.Fatalf("the declaration changed on the way: %q", written)
+	}
+	artifact, err := os.ReadFile(filepath.Join(services, "caddy.d", "Caddyfile"))
+	if err != nil {
+		t.Fatalf("the artifact was not written: %v", err)
+	}
+	if string(artifact) != ":80 {\n}\n" {
+		t.Fatalf("the artifact changed on the way: %q", artifact)
+	}
+}
+
+// What the tree stopped carrying, the machine stops holding: a stale file
+// mounted into a container is a change nobody made.
+func TestAPushDropsWhatTheTreeNoLongerCarries(t *testing.T) {
+	f := newFixture(t)
+	services := filepath.Join(f.dir, "services")
+	source := `(service (tuple "name" "caddy") (tuple "image" "caddy:2") (tuple "config" "/etc/caddy"))`
+
+	err := call(f.client(), Request{Op: OpServicePut, Body: mustMarshal(Declaration{
+		Name: "caddy", Source: source,
+		Artifacts: []Artifact{
+			{Name: "Caddyfile", Content: base64.StdEncoding.EncodeToString([]byte("old"))},
+			{Name: "extra.conf", Content: base64.StdEncoding.EncodeToString([]byte("gone tomorrow"))},
+		},
+	})}, nil)
+	if err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	err = call(f.client(), Request{Op: OpServicePut, Body: mustMarshal(Declaration{
+		Name: "caddy", Source: source,
+		Artifacts: []Artifact{
+			{Name: "Caddyfile", Content: base64.StdEncoding.EncodeToString([]byte("new"))},
+		},
+	})}, nil)
+	if err != nil {
+		t.Fatalf("second put: %v", err)
+	}
+
+	_, err = os.Stat(filepath.Join(services, "caddy.d", "extra.conf"))
+	if !os.IsNotExist(err) {
+		t.Fatal("a file the tree no longer carries is still on the machine")
+	}
+	kept, err := os.ReadFile(filepath.Join(services, "caddy.d", "Caddyfile"))
+	if err != nil || string(kept) != "new" {
+		t.Fatalf("the file that stayed was not updated: %q %v", kept, err)
+	}
+}
+
+// A declaration the daemon cannot read is refused before anything is written:
+// half a declaration on disk is worse than none.
+func TestABrokenDeclarationIsRefusedBeforeItLands(t *testing.T) {
+	f := newFixture(t)
+	resp, err := f.client().Do(context.Background(), Request{Op: OpServicePut, Body: mustMarshal(Declaration{
+		Name:   "broken",
+		Source: `(service (tuple "name" "broken"))`,
+	})})
+	if err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	if !resp.Failed() {
+		t.Fatal("a declaration with no image was written to the machine")
+	}
+	_, err = os.Stat(filepath.Join(f.dir, "services", "broken.filo"))
+	if !os.IsNotExist(err) {
+		t.Fatal("the refused declaration was written anyway")
+	}
+}
+
+// A name with a path in it would write outside the directory it was sent for.
+func TestAnArtifactCannotEscapeItsDirectory(t *testing.T) {
+	f := newFixture(t)
+	resp, err := f.client().Do(context.Background(), Request{Op: OpServicePut, Body: mustMarshal(Declaration{
+		Name:   "caddy",
+		Source: `(service (tuple "name" "caddy") (tuple "image" "caddy:2"))`,
+		Artifacts: []Artifact{
+			{Name: "../../escaped", Content: base64.StdEncoding.EncodeToString([]byte("no"))},
+		},
+	})})
+	if err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	if !resp.Failed() {
+		t.Fatal("an artifact with a path in its name was accepted")
+	}
+}
+
+// The versioned tree is the source, so a service deleted from it stops being
+// held by the machine. What runs there is untouched until an apply says
+// otherwise, which is where somebody reviews the removal.
+func TestAPruneTakesAwayTheServicesTheTreeStoppedCarrying(t *testing.T) {
+	f := newFixture(t)
+	services := filepath.Join(f.dir, "services")
+	for _, name := range []string{"caddy", "site"} {
+		source := `(service (tuple "name" "` + name + `") (tuple "image" "x:1") (tuple "config" "/etc/x"))`
+		err := call(f.client(), Request{Op: OpServicePut, Body: mustMarshal(Declaration{
+			Name: name, Source: source,
+			Artifacts: []Artifact{{Name: "f.conf", Content: base64.StdEncoding.EncodeToString([]byte("x"))}},
+		})}, nil)
+		if err != nil {
+			t.Fatalf("put %s: %v", name, err)
+		}
+	}
+
+	var removed ServiceSet
+	err := call(f.client(), Request{Op: OpServicePrune, Body: mustMarshal(ServiceSet{Names: []string{"caddy"}, Declared: 1})}, &removed)
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if !slices.Equal(removed.Names, []string{"site"}) {
+		t.Fatalf("the prune reported %v", removed.Names)
+	}
+	_, err = os.Stat(filepath.Join(services, "site.filo"))
+	if !os.IsNotExist(err) {
+		t.Fatal("a service the tree no longer carries is still declared on the machine")
+	}
+	_, err = os.Stat(filepath.Join(services, "site.d"))
+	if !os.IsNotExist(err) {
+		t.Fatal("the artifacts of a removed service are still on the machine")
+	}
+	_, err = os.Stat(filepath.Join(services, "caddy.filo"))
+	if err != nil {
+		t.Fatalf("the prune took away a service the tree still carries: %v", err)
+	}
+}
+
+// A tree that declares nothing is what a push from the wrong directory looks
+// like; obeying it would make one mistyped path forget a machine.
+func TestAPruneFromATreeThatDeclaresNothingIsRefused(t *testing.T) {
+	f := newFixture(t)
+	resp, err := f.client().Do(context.Background(), Request{
+		Op: OpServicePrune, Body: mustMarshal(ServiceSet{}),
+	})
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if resp.Code != CodeInvalid {
+		t.Fatalf("a prune from an empty tree answered %s", resp.Code)
+	}
+}
+
+// A machine none of the tree's services is declared for holds none of them.
+// That is ordinary once placement is declared, and refusing it would leave a
+// machine holding services somebody moved away from it.
+func TestAMachineTheTreeDeclaresNothingForIsEmptied(t *testing.T) {
+	f := newFixture(t)
+	services := filepath.Join(f.dir, "services")
+	err := call(f.client(), Request{Op: OpServicePut, Body: mustMarshal(Declaration{
+		Name:   "site",
+		Source: `(service (tuple "name" "site") (tuple "image" "x:1"))`,
+	})}, nil)
+	if err != nil {
+		t.Fatalf("put: %v", err)
+	}
+
+	var removed ServiceSet
+	err = call(f.client(), Request{
+		Op: OpServicePrune, Body: mustMarshal(ServiceSet{Declared: 3}),
+	}, &removed)
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if !slices.Equal(removed.Names, []string{"site"}) {
+		t.Fatalf("the prune reported %v", removed.Names)
+	}
+	_, err = os.Stat(filepath.Join(services, "site.filo"))
+	if !os.IsNotExist(err) {
+		t.Fatal("a service the tree declares for another machine is still here")
+	}
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"io"
 	"strings"
 	"testing"
 )
@@ -57,4 +58,23 @@ func TestUnknownFlagIsRejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("an unknown flag was accepted")
 	}
+}
+
+// Watching is the command an operator gives most, so it is the one they get
+// for typing nothing. Asking for help still prints help.
+func TestNoCommandMeansThePanel(t *testing.T) {
+	flags := flag.NewFlagSet("hostctl", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	var opt options
+	flags.StringVar(&opt.host, "host", "", "")
+
+	rest, err := parseAnywhere(flags, nil)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(rest) != 0 {
+		t.Fatalf("an empty command line carried %v", rest)
+	}
+	// run() turns that into the panel; what is pinned here is that nothing
+	// else is read as a command.
 }

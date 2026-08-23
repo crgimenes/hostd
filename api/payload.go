@@ -11,12 +11,13 @@ import (
 // holds integers exactly only to 2^53, so nanoseconds would arrive rounded.
 // Milliseconds stay exact past 2255, and Seq orders lines within one.
 type LogLine struct {
-	Seq     uint64  `filo:"seq"`
-	Time    float64 `filo:"time-ms"`
-	Service string  `filo:"service"`
-	Stream  string  `filo:"stream"`
-	Kind    string  `filo:"kind"`
-	Text    string  `filo:"text"`
+	Seq     uint64  `filo:"seq" json:"seq"`
+	Time    float64 `filo:"time-ms" json:"time-ms"`
+	Service string  `filo:"service" json:"service"`
+	Stream  string  `filo:"stream" json:"stream"`
+	Kind    string  `filo:"kind" json:"kind"`
+	Run     string  `filo:"run" json:"run"`
+	Text    string  `filo:"text" json:"text"`
 }
 
 func (l LogLine) At() time.Time {
@@ -30,6 +31,7 @@ func toLine(r logs.Record) LogLine {
 		Service: r.Service,
 		Stream:  r.Stream,
 		Kind:    r.Kind,
+		Run:     r.Run,
 		Text:    r.Text,
 	}
 }

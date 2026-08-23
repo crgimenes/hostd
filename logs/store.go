@@ -88,6 +88,7 @@ CREATE TABLE IF NOT EXISTS entries (
 	service TEXT NOT NULL,
 	stream  TEXT NOT NULL,
 	kind    TEXT NOT NULL DEFAULT '',
+	run     TEXT NOT NULL DEFAULT '',
 	text    TEXT NOT NULL
 );
 
@@ -127,6 +128,15 @@ func Open(ctx context.Context, path string, opts Options) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("prepare log store %s: %w", path, err)
 	}
+	// A machine that has been running carries a table built by an older hostd,
+	// and CREATE TABLE IF NOT EXISTS does not change one that exists. Losing
+	// somebody's history to a new column would be a strange way to keep the
+	// promise that the history is the point.
+	err = addColumns(ctx, db)
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("bring the log store %s up to date: %w", path, err)
+	}
 
 	s := &Store{
 		db:       db,
@@ -151,6 +161,45 @@ func Open(ctx context.Context, path string, opts Options) (*Store, error) {
 
 	go s.writeLoop()
 	return s, nil
+}
+
+// What the current schema has that an older one did not. Each is added once
+// and only if it is missing; the table a fresh machine creates already has
+// them all.
+var columns = []struct{ name, definition string }{
+	{"run", "TEXT NOT NULL DEFAULT ''"},
+}
+
+func addColumns(ctx context.Context, db *sql.DB) error {
+	rows, err := db.QueryContext(ctx, `SELECT name FROM pragma_table_info('entries')`)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	present := map[string]bool{}
+	for rows.Next() {
+		var name string
+		err = rows.Scan(&name)
+		if err != nil {
+			return err
+		}
+		present[name] = true
+	}
+	err = rows.Err()
+	if err != nil {
+		return err
+	}
+	for _, column := range columns {
+		if present[column.name] {
+			continue
+		}
+		// #nosec G202 -- audited: both halves are literals from the list above
+		_, err = db.ExecContext(ctx, "ALTER TABLE entries ADD COLUMN "+column.name+" "+column.definition)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) Close() error {
@@ -281,8 +330,9 @@ func (s *Store) writeBatch(batch []Record) error {
 			service, -- 3
 			stream,  -- 4
 			kind,    -- 5
-			text     -- 6
-		) VALUES (?, ?, ?, ?, ?, ?)`)
+			run,     -- 6
+			text     -- 7
+		) VALUES (?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
@@ -296,7 +346,8 @@ func (s *Store) writeBatch(batch []Record) error {
 			r.Service,          // 3
 			r.Stream,           // 4
 			r.Kind,             // 5
-			r.Text,             // 6
+			r.Run,              // 6
+			r.Text,             // 7
 		)
 		if err != nil {
 			return err
@@ -333,6 +384,10 @@ func (s *Store) Search(q Query) ([]Record, error) {
 		where = append(where, "e.kind = ?")
 		args = append(args, q.Kind)
 	}
+	if q.Run != "" {
+		where = append(where, "e.run = ?")
+		args = append(args, q.Run)
+	}
 	if q.Since > 0 {
 		where = append(where, "e.seq > ?")
 		// #nosec G115 -- audited: a sequence reaching 2^63 needs 9.2e18 lines
@@ -358,7 +413,7 @@ func (s *Store) Search(q Query) ([]Record, error) {
 	// Newest first with a limit, then reversed: a limit keeps the most recent
 	// lines, which is what somebody looking at a problem wants.
 	// #nosec G202 -- audited: concatenates only literals, never caller input
-	query := "SELECT e.seq, e.time_ms, e.service, e.stream, e.kind, e.text FROM " + from +
+	query := "SELECT e.seq, e.time_ms, e.service, e.stream, e.kind, e.run, e.text FROM " + from +
 		" WHERE " + strings.Join(where, " AND ") + " ORDER BY e.seq DESC LIMIT ?"
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -375,7 +430,7 @@ func (s *Store) Search(q Query) ([]Record, error) {
 		var r Record
 		var ms int64
 		var seq int64
-		err = rows.Scan(&seq, &ms, &r.Service, &r.Stream, &r.Kind, &r.Text)
+		err = rows.Scan(&seq, &ms, &r.Service, &r.Stream, &r.Kind, &r.Run, &r.Text)
 		if err != nil {
 			return nil, err
 		}
@@ -402,6 +457,30 @@ func ftsQuery(match string) string {
 }
 
 // The returned function stops the delivery and must be called.
+// LastAt is the newest moment this store holds output for a service, which is
+// where a reader resumes. Events are excluded: they are hostd's own words, not
+// the service's, and resuming from one would skip what the service wrote in
+// between.
+func (s *Store) LastAt(service string) (time.Time, error) {
+	s.Flush()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var newest int64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COALESCE(MAX(time_ms), 0) FROM entries
+		WHERE service = ? AND stream IN (?, ?)`,
+		service, StreamOut, StreamErr).Scan(&newest)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if newest == 0 {
+		return time.Time{}, nil
+	}
+	// A resume asks for what came after the last line, not for it again.
+	return time.UnixMilli(newest).Add(time.Millisecond), nil
+}
+
 func (s *Store) Watch(bufferSize int) (<-chan Record, func()) {
 	if bufferSize < 1 {
 		bufferSize = 1

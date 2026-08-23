@@ -3,6 +3,7 @@ package logs
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -416,5 +417,48 @@ func TestDroppedLinesAreReported(t *testing.T) {
 	s.reportDropped()
 	if reported.Len() != 0 {
 		t.Fatalf("a second report with nothing new to say: %q", reported.String())
+	}
+}
+
+// A machine that has been running carries a table an older hostd built. Losing
+// its history to a new column would be a strange way to keep the promise that
+// the history is the point.
+func TestAnOlderStoreGainsWhatIsMissing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "logs.db")
+	old, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	_, err = old.Exec(`CREATE TABLE entries (
+		seq INTEGER PRIMARY KEY, time_ms INTEGER NOT NULL, service TEXT NOT NULL,
+		stream TEXT NOT NULL, kind TEXT NOT NULL DEFAULT '', text TEXT NOT NULL)`)
+	if err != nil {
+		t.Fatalf("build the old table: %v", err)
+	}
+	_, err = old.Exec(`INSERT INTO entries (seq, time_ms, service, stream, kind, text)
+		VALUES (1, ?, 'api', 'stdout', '', 'from before')`, time.Now().UnixMilli())
+	if err != nil {
+		t.Fatalf("write history: %v", err)
+	}
+	err = old.Close()
+	if err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	store, err := Open(context.Background(), path, Options{})
+	if err != nil {
+		t.Fatalf("a store from an older hostd could not be opened: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	// The history is still there, and the store writes again.
+	got := search(t, store, Query{})
+	if len(got) != 1 || got[0].Text != "from before" {
+		t.Fatalf("the history did not survive: %#v", got)
+	}
+	store.Append(Record{Service: "api", Stream: StreamOut, Run: "42", Text: "from now"})
+	got = search(t, store, Query{Run: "42"})
+	if len(got) != 1 || got[0].Text != "from now" {
+		t.Fatalf("the store did not write into the table it just changed: %#v", got)
 	}
 }

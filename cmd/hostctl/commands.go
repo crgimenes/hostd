@@ -106,16 +106,33 @@ func printStatuses(out io.Writer, target string, generation uint64, statuses []s
 	}
 	slices.SortFunc(statuses, func(a, b supervisor.Status) int { return strings.Compare(a.Name, b.Name) })
 	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(w, "SERVICE\tSTATE\tPID\tUPTIME\tRESTARTS\tDETAIL")
+	_, _ = fmt.Fprintln(w, "SERVICE\tSTATE\tPID\tUPTIME\tRUNS\tRESTARTS\tDETAIL")
 	for _, s := range statuses {
 		detail := s.LastError
-		if detail == "" && s.Adopted {
-			detail = "adopted"
+		if detail == "" && s.Every != "" {
+			detail = "every " + s.Every
 		}
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s\n",
-			s.Name, s.State, pidText(s.PID), uptime(s), s.Restarts, detail)
+		if detail == "" && s.Orphan {
+			// On this machine with no file declaring it: worth seeing at a
+			// glance, because it is the one thing an apply will not fix.
+			detail = "orphan, not declared"
+		}
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%s\n",
+			s.Name, s.State, pidText(s.PID), uptime(s), runsText(s), s.Restarts, detail)
 	}
 	_ = w.Flush()
+}
+
+// A service that is not a job has no runs, and a dash says that better than a
+// zero, which reads as "none right now".
+func runsText(s supervisor.Status) string {
+	if s.Runs == 0 && s.State != supervisor.StateRunning {
+		return "-"
+	}
+	if s.Runs == 0 {
+		return "-"
+	}
+	return fmt.Sprint(s.Runs)
 }
 
 func pidText(pid int) string {
@@ -241,6 +258,7 @@ func runLog(ctx context.Context, client *api.Client, opt options, args []string)
 		Service: opt.service,
 		Stream:  opt.stream,
 		Kind:    opt.kind,
+		Run:     opt.run,
 		Limit:   opt.limit,
 		Since:   opt.sinceSeq,
 	}
@@ -286,8 +304,14 @@ func runLog(ctx context.Context, client *api.Client, opt options, args []string)
 func printLine(opt options, l api.LogLine) error {
 	out := opt.out
 	if !opt.filoOut {
+		// A line from a job says which run wrote it: several runs of one job
+		// write at the same time on purpose.
+		where := l.Service
+		if l.Run != "" {
+			where += "/" + l.Run
+		}
 		_, _ = fmt.Fprintf(out, "%s %s %s %s\n",
-			l.At().Format("2006-01-02 15:04:05"), l.Service, streamMark(l.Stream), l.Text)
+			l.At().Format("2006-01-02 15:04:05"), where, streamMark(l.Stream), l.Text)
 		return nil
 	}
 	rendered, err := filoconf.Marshal(l)

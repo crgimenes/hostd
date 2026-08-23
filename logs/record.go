@@ -34,6 +34,9 @@ const (
 	EventApplied     = "config.applied"
 	EventSpoolLost   = "spool.overflowed"
 	EventLogDropped  = "logs.dropped"
+	EventJobStarted  = "job.started"
+	EventJobFinished = "job.finished"
+	EventJobSkipped  = "job.skipped"
 	EventImage       = "image.received"
 	EventDaemon      = "hostd.started"
 	EventProblem     = "hostd.problem"
@@ -48,6 +51,10 @@ type Record struct {
 	Stream  string    `filo:"stream"`
 	// Empty for captured output.
 	Kind string `filo:"kind"`
+	// Which run of a job wrote this. Several runs of one job write at the same
+	// time on purpose, and a timeline that could not tell them apart would be
+	// a timeline nobody can follow.
+	Run  string `filo:"run"`
 	Text string `filo:"text"`
 }
 
@@ -55,6 +62,7 @@ type Query struct {
 	Service string
 	Stream  string
 	Kind    string
+	Run     string
 	Match   string
 	// Most recent kept, oldest first in the result.
 	Limit int
@@ -73,6 +81,9 @@ func (q Query) Matches(r Record) bool {
 		return false
 	}
 	if q.Kind != "" && r.Kind != q.Kind {
+		return false
+	}
+	if q.Run != "" && r.Run != q.Run {
 		return false
 	}
 	if q.Since > 0 && r.Seq <= q.Since {

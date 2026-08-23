@@ -122,10 +122,7 @@ func run(debug bool) error {
 		return err
 	}
 
-	sup := supervisor.New(supervisor.Dirs{
-		State: paths.SupervisionDir(),
-		Spool: paths.SpoolDir(),
-	}, logStore)
+	sup := supervisor.New(logStore, paths.ServicesDir())
 
 	runtime, runtimeErr := docker.Open()
 	if runtimeErr == nil {

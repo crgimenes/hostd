@@ -1,0 +1,690 @@
+/* The window is a macOS app that happens to be drawn with HTML, so it follows
+   the Human Interface Guidelines rather than the conventions of a web page:
+   the system font at the system sizes, a source list on the left, a toolbar
+   over the content, and the system's own accent colour for selection. */
+
+:root {
+	color-scheme: light dark;
+
+	--font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+	--mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+
+	--bg: #ffffff;
+	--canvas: #f6f6f8;
+	--sidebar: #eeeef0;
+	--card: #ffffff;
+	--label: #000000;
+	--secondary: rgba(60, 60, 67, 0.6);
+	--tertiary: rgba(60, 60, 67, 0.35);
+	--separator: rgba(0, 0, 0, 0.1);
+	--hairline: rgba(0, 0, 0, 0.14);
+	--hover: rgba(0, 0, 0, 0.05);
+	--accent: #007aff;
+	--onAccent: #ffffff;
+	--grid: rgba(0, 0, 0, 0.07);
+
+	--running: #34c759;
+	--scheduled: #007aff;
+	--starting: #ff9f0a;
+	--stopped: rgba(60, 60, 67, 0.35);
+	--failed: #ff3b30;
+
+	--row: 26px;
+	--toolbar: 52px;
+}
+
+@media (prefers-color-scheme: dark) {
+	:root {
+		--bg: #1e1e1e;
+		--canvas: #191919;
+		--sidebar: #232325;
+		--card: #292a2c;
+		--label: #ffffff;
+		--secondary: rgba(235, 235, 245, 0.6);
+		--tertiary: rgba(235, 235, 245, 0.3);
+		--separator: rgba(255, 255, 255, 0.1);
+		--hairline: rgba(255, 255, 255, 0.15);
+		--hover: rgba(255, 255, 255, 0.07);
+		--grid: rgba(255, 255, 255, 0.08);
+		--stopped: rgba(235, 235, 245, 0.3);
+		--accent: #0a84ff;
+	}
+}
+
+/* The colour the person chose in System Settings, where the engine exposes it.
+   A hard-coded blue is a guess about somebody else's taste; a selection that
+   silently paints nothing is worse, so the guess is the fallback. */
+@supports (color: AccentColor) {
+	:root {
+		--accent: AccentColor;
+		--onAccent: AccentColorText;
+	}
+}
+
+* {
+	box-sizing: border-box;
+	margin: 0;
+	padding: 0;
+}
+
+/* Every element here declares its own display, which would otherwise win. */
+[hidden] {
+	display: none !important;
+}
+
+html, body {
+	height: 100%;
+	overflow: hidden;
+}
+
+body {
+	font-family: var(--font);
+	font-size: 13px;
+	color: var(--label);
+	background: var(--bg);
+	/* Chrome is not a document: dragging across it must not select it. */
+	-webkit-user-select: none;
+	user-select: none;
+	cursor: default;
+}
+
+#shell {
+	display: grid;
+	grid-template-columns: var(--sidebarWidth, 216px) 1px 1fr;
+	height: 100%;
+}
+
+/* The source list. */
+
+#sidebar {
+	background: var(--sidebar);
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
+}
+
+#tree {
+	flex: 1;
+	overflow-y: auto;
+	list-style: none;
+	padding: 10px 8px;
+}
+
+#tree li {
+	list-style: none;
+}
+
+.row {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	height: var(--row);
+	padding: 0 8px;
+	border-radius: 6px;
+	white-space: nowrap;
+	overflow: hidden;
+}
+
+.row:hover {
+	background: var(--hover);
+}
+
+.row.selected,
+.row.selected:hover {
+	background: var(--accent);
+	color: var(--onAccent);
+}
+
+.row.selected .meta,
+.row.selected .twist {
+	color: inherit;
+	opacity: 0.75;
+}
+
+.row .name {
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.row.machine .name {
+	font-weight: 590;
+}
+
+.row .meta {
+	margin-left: auto;
+	font-size: 11px;
+	color: var(--secondary);
+	font-variant-numeric: tabular-nums;
+}
+
+.twist {
+	width: 12px;
+	flex: none;
+	color: var(--tertiary);
+	font-size: 9px;
+	transition: transform 0.12s ease;
+	transform: rotate(0deg);
+	text-align: center;
+}
+
+.twist.open {
+	transform: rotate(90deg);
+}
+
+.group > .row {
+	padding-left: 20px;
+}
+
+.section {
+	font-size: 11px;
+	font-weight: 590;
+	color: var(--secondary);
+	padding: 14px 8px 4px;
+}
+
+.dot {
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	flex: none;
+	background: var(--stopped);
+}
+
+.dot.running { background: var(--running); }
+.dot.scheduled { background: var(--scheduled); }
+.dot.starting { background: var(--starting); }
+.dot.failed { background: var(--failed); }
+.dot.unreachable { background: var(--failed); }
+
+#sidebarFoot {
+	border-top: 1px solid var(--separator);
+	padding: 7px 14px;
+	font-size: 11px;
+	color: var(--secondary);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+#sidebarFoot .bad {
+	color: var(--failed);
+}
+
+/* The two things that can be dragged: the sidebar's edge and the log's top. */
+
+#grip {
+	background: var(--separator);
+	cursor: col-resize;
+}
+
+#split {
+	height: 1px;
+	background: var(--separator);
+	cursor: row-resize;
+	position: relative;
+}
+
+#split::after {
+	content: "";
+	position: absolute;
+	inset: -3px 0;
+}
+
+/* The detail side: toolbar, content, log. */
+
+#detail {
+	display: grid;
+	grid-template-rows: var(--toolbar) 1fr 1px var(--logHeight, 220px);
+	overflow: hidden;
+}
+
+#toolbar {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding: 0 16px;
+	border-bottom: 1px solid var(--separator);
+	background: var(--bg);
+}
+
+#crumb {
+	min-width: 0;
+}
+
+#title {
+	font-size: 15px;
+	font-weight: 590;
+	letter-spacing: -0.01em;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+#subtitle {
+	font-size: 11px;
+	color: var(--secondary);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+#controls {
+	margin-left: auto;
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+
+/* A segmented control, the way the system draws one. */
+
+#windows {
+	display: inline-flex;
+	background: var(--hover);
+	border-radius: 7px;
+	padding: 2px;
+}
+
+#windows button {
+	font: inherit;
+	font-size: 12px;
+	color: var(--label);
+	background: none;
+	border: 0;
+	border-radius: 5px;
+	padding: 3px 10px;
+	cursor: default;
+}
+
+#windows button.on {
+	background: var(--card);
+	box-shadow: 0 0 0 0.5px var(--hairline), 0 1px 2px rgba(0, 0, 0, 0.12);
+	font-weight: 590;
+}
+
+#range {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 11px;
+	color: var(--secondary);
+	font-variant-numeric: tabular-nums;
+}
+
+button {
+	font: inherit;
+	cursor: default;
+}
+
+.push {
+	font-size: 12px;
+	padding: 3px 10px;
+	border-radius: 6px;
+	border: 0.5px solid var(--hairline);
+	background: var(--card);
+	color: var(--label);
+	box-shadow: 0 1px 1px rgba(0, 0, 0, 0.06);
+}
+
+.push:hover {
+	background: var(--hover);
+}
+
+#rangeReset {
+	font-size: 11px;
+	padding: 2px 8px;
+	border-radius: 5px;
+	border: 0.5px solid var(--hairline);
+	background: var(--card);
+	color: var(--label);
+}
+
+/* Content. */
+
+#content {
+	background: var(--canvas);
+	overflow-y: auto;
+	padding: 16px;
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+}
+
+.card {
+	background: var(--card);
+	border: 0.5px solid var(--hairline);
+	border-radius: 10px;
+	padding: 14px 16px;
+}
+
+.card > h2 {
+	font-size: 13px;
+	font-weight: 590;
+	margin-bottom: 2px;
+}
+
+.card > h2 .aside {
+	font-weight: 400;
+	color: var(--secondary);
+	margin-left: 8px;
+	font-size: 11px;
+}
+
+.cards {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+	gap: 14px;
+}
+
+.machineCard {
+	cursor: default;
+}
+
+.machineCard:hover {
+	border-color: var(--accent);
+}
+
+.stat {
+	display: flex;
+	gap: 22px;
+	margin-top: 8px;
+}
+
+.stat div {
+	display: flex;
+	flex-direction: column;
+}
+
+.stat .value {
+	font-size: 17px;
+	font-weight: 590;
+	font-variant-numeric: tabular-nums;
+	letter-spacing: -0.02em;
+}
+
+.stat .of {
+	font-size: 11px;
+	color: var(--secondary);
+}
+
+table {
+	width: 100%;
+	border-collapse: collapse;
+	margin-top: 8px;
+}
+
+th {
+	text-align: left;
+	font-size: 11px;
+	font-weight: 400;
+	color: var(--secondary);
+	padding: 0 10px 6px 0;
+	border-bottom: 1px solid var(--separator);
+}
+
+td {
+	padding: 7px 10px 7px 0;
+	border-bottom: 1px solid var(--separator);
+	font-variant-numeric: tabular-nums;
+	white-space: nowrap;
+}
+
+tr:last-child td {
+	border-bottom: 0;
+}
+
+td.wide {
+	white-space: normal;
+}
+
+.facts td:first-child {
+	width: 120px;
+}
+
+td .dim, .dim {
+	color: var(--secondary);
+}
+
+td.actions {
+	text-align: right;
+	width: 1%;
+}
+
+td.actions button {
+	margin-left: 6px;
+}
+
+.pill {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+}
+
+.legend {
+	display: flex;
+	gap: 14px;
+	font-size: 11px;
+	color: var(--secondary);
+	margin-bottom: 6px;
+	font-variant-numeric: tabular-nums;
+}
+
+.legend .key {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+}
+
+.swatch {
+	width: 8px;
+	height: 8px;
+	border-radius: 2px;
+	flex: none;
+}
+
+.plot {
+	position: relative;
+	height: 128px;
+}
+
+.plot.short {
+	height: 54px;
+}
+
+canvas {
+	width: 100%;
+	height: 100%;
+	display: block;
+}
+
+.plot .band {
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	background: color-mix(in srgb, var(--accent) 22%, transparent);
+	border-left: 1px solid var(--accent);
+	border-right: 1px solid var(--accent);
+	pointer-events: none;
+}
+
+.plot .readout {
+	position: absolute;
+	top: 4px;
+	right: 6px;
+	font-size: 11px;
+	color: var(--secondary);
+	font-variant-numeric: tabular-nums;
+	pointer-events: none;
+}
+
+.empty {
+	color: var(--secondary);
+	font-size: 12px;
+	padding: 8px 0;
+}
+
+.problem {
+	color: var(--failed);
+	font-size: 12px;
+	margin-top: 6px;
+}
+
+td.problem {
+	padding-top: 0;
+	margin: 0;
+	font-size: 11.5px;
+}
+
+/* The log. */
+
+#console {
+	display: grid;
+	grid-template-rows: 30px 1fr;
+	overflow: hidden;
+	background: var(--bg);
+}
+
+#console header {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 0 16px;
+	border-bottom: 1px solid var(--separator);
+}
+
+#console h2 {
+	font-size: 11px;
+	font-weight: 590;
+	color: var(--secondary);
+}
+
+#filter {
+	font: inherit;
+	font-size: 12px;
+	margin-left: auto;
+	width: 200px;
+	padding: 2px 8px;
+	border-radius: 6px;
+	border: 0.5px solid var(--hairline);
+	background: var(--bg);
+	color: var(--label);
+	-webkit-user-select: text;
+	user-select: text;
+}
+
+#followLabel {
+	font-size: 11px;
+	color: var(--secondary);
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+}
+
+#lines {
+	overflow-y: auto;
+	list-style: none;
+	padding: 6px 16px 10px;
+	font-family: var(--mono);
+	font-size: 11.5px;
+	line-height: 1.55;
+	-webkit-user-select: text;
+	user-select: text;
+}
+
+#lines li {
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+#lines .when {
+	color: var(--tertiary);
+}
+
+#lines .where {
+	color: var(--secondary);
+}
+
+#lines .event {
+	color: var(--scheduled);
+}
+
+#lines li.err .text {
+	color: var(--failed);
+}
+
+/* The one dialog: what to run, since the panel never runs it. */
+
+dialog {
+	border: 0;
+	border-radius: 12px;
+	padding: 20px;
+	max-width: 460px;
+	background: var(--card);
+	color: var(--label);
+	box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
+}
+
+dialog::backdrop {
+	background: rgba(0, 0, 0, 0.25);
+}
+
+dialog h3 {
+	font-size: 13px;
+	font-weight: 590;
+}
+
+dialog p {
+	font-size: 12px;
+	color: var(--secondary);
+	margin: 4px 0 12px;
+}
+
+#commandText {
+	display: block;
+	font-family: var(--mono);
+	font-size: 12px;
+	background: var(--hover);
+	border-radius: 8px;
+	padding: 10px 12px;
+	-webkit-user-select: text;
+	user-select: text;
+	word-break: break-all;
+}
+
+dialog .actions {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+	margin-top: 16px;
+}
+
+dialog button {
+	font-size: 13px;
+	padding: 4px 14px;
+	border-radius: 6px;
+	border: 0.5px solid var(--hairline);
+	background: var(--card);
+	color: var(--label);
+}
+
+dialog button.default {
+	background: var(--accent);
+	color: var(--onAccent);
+	border-color: transparent;
+	font-weight: 500;
+}
+
+::-webkit-scrollbar {
+	width: 9px;
+	height: 9px;
+}
+
+::-webkit-scrollbar-thumb {
+	background: var(--tertiary);
+	border-radius: 5px;
+	border: 2px solid transparent;
+	background-clip: content-box;
+}
+
+::-webkit-scrollbar-track {
+	background: transparent;
+}

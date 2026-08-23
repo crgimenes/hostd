@@ -14,12 +14,14 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/crgimenes/hostd/api"
 	"github.com/crgimenes/hostd/config"
+	"github.com/crgimenes/hostd/service"
 	"github.com/crgimenes/hostd/version"
 )
 
@@ -41,6 +43,11 @@ const (
 var Version string
 
 func main() {
+	// The window has to be created on the thread the process started on: the
+	// macOS UI toolkit refuses anything else, and by the time the panel is
+	// asked for, this goroutine may have been moved. Locking here costs a
+	// pinned thread for every command and buys the one that opens a window.
+	runtime.LockOSThread()
 	version.Set(Version)
 	os.Exit(run(os.Args[1:]))
 }
@@ -51,6 +58,7 @@ type options struct {
 	limit      int
 	stream     string
 	kind       string
+	run        string
 	service    string
 	follow     bool
 	sinceSeq   uint64
@@ -63,6 +71,7 @@ type options struct {
 	hosts      []string
 	all        bool
 	tag        string
+	config     string
 	inventory  string
 	remote     string
 	scope      string
@@ -82,7 +91,8 @@ func run(args []string) int {
 	hosts := flags.String("hosts", "", "machines to operate, separated by commas")
 	flags.BoolVar(&opt.all, "all", false, "every machine listed in the inventory")
 	flags.StringVar(&opt.tag, "tag", "", "every machine carrying this tag in the inventory")
-	flags.StringVar(&opt.inventory, "inventory", "", "file listing the fleet (default inventory.filo in the hostd config directory)")
+	flags.StringVar(&opt.config, "config", "", "directory of declarations to send (default the hostd directory of your config)")
+	flags.StringVar(&opt.inventory, "inventory", "", "file listing the fleet (default inventory.filo inside -config)")
 	flags.StringVar(&opt.remote, "remote-command", "hostd -stdio", "what ssh runs on the machine to reach its daemon")
 	flags.StringVar(&opt.socket, "socket", "", "path to the hostd control socket")
 	flags.BoolVar(&opt.filoOut, "filo", false, "write the result as Filo and nothing else")
@@ -90,6 +100,7 @@ func run(args []string) int {
 	flags.StringVar(&opt.stream, "stream", "", "only stdout, stderr or event")
 	flags.StringVar(&opt.service, "service", "", "only this service")
 	flags.StringVar(&opt.kind, "kind", "", "only events of this kind, e.g. service.exited")
+	flags.StringVar(&opt.run, "run", "", "only this run of a job")
 	flags.BoolVar(&opt.follow, "follow", false, "keep watching for new lines")
 	flags.Uint64Var(&opt.sinceSeq, "since", 0, "only lines after this sequence")
 	flags.Uint64Var(&opt.expectGen, "expect-generation", 0, "refuse if the host has moved past this generation")
@@ -118,9 +129,11 @@ func run(args []string) int {
 		fmt.Printf("hostctl %s (protocol %d, schema %d)\n", version.Version, version.Protocol, version.Schema)
 		return exitOK
 	}
+	// No command is the command an operator gives most: watching. Asking for
+	// help still prints help, and a machine without a window says so with the
+	// reason rather than a usage screen.
 	if len(rest) == 0 {
-		usage(flags, os.Stderr)
-		return exitUsage
+		rest = []string{"gui"}
 	}
 	if opt.socket == "" {
 		opt.socket = config.Locate().Socket()
@@ -136,6 +149,16 @@ func run(args []string) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// The panel watches several machines at once and keeps its own connection
+	// to each, so it is not something to fan out: one window, many hosts.
+	if rest[0] == "gui" {
+		code, guiErr := runGUI(ctx, opt, rest[1:])
+		if guiErr != nil {
+			fmt.Fprintf(os.Stderr, "hostctl: %v\n", guiErr)
+		}
+		return code
+	}
 
 	chosen, err := opt.selection(ctx)
 	if err != nil {
@@ -191,6 +214,7 @@ func usage(flags *flag.FlagSet, w io.Writer) {
 	_, _ = fmt.Fprint(w, `hostctl operates hostd.
 
 usage:
+  hostctl                              watch the fleet in a window
   hostctl -host <machine> status       operate a machine over the network
   hostctl -all status                  ask every machine at once
   hostctl status                       what every service is doing
@@ -204,6 +228,8 @@ usage:
   hostctl audit                        who changed what, and when
   hostctl log [pattern]                what the services wrote
   hostctl log -follow                  keep watching
+  hostctl push                         send your declarations to that machine
+                                       (and drop what the tree stopped carrying)
   hostctl image push <image>           send an image built here to that machine
   hostctl metrics                      what the host and its services are using
   hostctl metrics -window 1h           the same, over a window
@@ -242,14 +268,16 @@ example:
 // The operator's own files, which live on the operator's machine: hostctl runs
 // where the person is, never on the host it operates.
 func (o *options) resolveClientPaths() error {
-	if o.inventory != "" {
-		return nil
+	if o.config == "" {
+		dir, err := os.UserConfigDir()
+		if err != nil {
+			return err
+		}
+		o.config = filepath.Join(dir, "hostd")
 	}
-	dir, err := os.UserConfigDir()
-	if err != nil {
-		return err
+	if o.inventory == "" {
+		o.inventory = filepath.Join(o.config, service.InventoryFile)
 	}
-	o.inventory = filepath.Join(dir, "hostd", "inventory.filo")
 	return nil
 }
 
@@ -260,6 +288,9 @@ func connect(ctx context.Context, opt options) (*api.Client, error) {
 	if opt.host == "" {
 		return api.DialUnix(opt.socket)
 	}
+	// A machine that does not answer is a machine the operator will look at:
+	// there is no retry and no reconnection here, because a client that keeps
+	// trying hides which machine went away.
 	return api.DialSSH(ctx, opt.host, strings.Fields(opt.remote))
 }
 
@@ -292,6 +323,8 @@ func dispatch(ctx context.Context, opt options, args []string) (int, error) {
 		return runMetrics(ctx, client, opt)
 	case "image":
 		return runImage(ctx, client, opt, args[1:])
+	case "push":
+		return runPush(ctx, client, opt, args[1:])
 	default:
 		return exitUsage, fmt.Errorf("unknown command %q; run hostctl with no arguments to see what exists", args[0])
 	}

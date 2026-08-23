@@ -18,9 +18,12 @@ import (
 // on hotel wifi is not opening a hundred connections at once.
 const fleetConcurrency = 8
 
-// The fleet is a file the operator keeps: which machines exist, and what to
-// call groups of them. Reaching any of them is ssh's business, and ssh already
-// knows its own hosts.
+// The fleet is a file the operator keeps: which machines exist and what to call
+// groups of them. A machine is named by whatever ssh is given, so the name here
+// is the name in ~/.ssh/config — the address, the user, the port, the key and
+// the jump host are all that file's business, which the operator already keeps
+// and which every other tool on their machine already honours. A second place
+// to write them would be a second place to disagree with ssh.
 type inventoryEntry struct {
 	Name string   `filo:"name"`
 	Tags []string `filo:"tags"`
@@ -43,6 +46,22 @@ func readInventory(ctx context.Context, path string) ([]inventoryEntry, error) {
 		return nil, err
 	}
 	return entries, nil
+}
+
+// entry is what the inventory knows about a machine. One the file does not
+// list is still a machine — naming a machine that is not in the file is how
+// somebody reaches a new one — it just carries no tags.
+func (o options) entry(ctx context.Context, name string) inventoryEntry {
+	entries, err := readInventory(ctx, o.inventoryPath())
+	if err != nil {
+		return inventoryEntry{Name: name}
+	}
+	for _, candidate := range entries {
+		if candidate.Name == name {
+			return candidate
+		}
+	}
+	return inventoryEntry{Name: name}
 }
 
 // selection turns the flags into the machines to ask. Exactly one selector is

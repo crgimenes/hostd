@@ -19,10 +19,11 @@ import (
 	"github.com/crgimenes/hostd/filoconf"
 )
 
-const (
-	KindExec      = "exec"
-	KindContainer = "container"
-)
+// A service is a container. Supervising a process directly was hostd's job
+// once and is the runtime's now: it already keeps a container alive through
+// its own restart and the machine's reboot, and two supervisors with different
+// opinions about one process is how a service flaps.
+const KindContainer = "container"
 
 const (
 	StateRunning = "running"
@@ -35,6 +36,23 @@ const (
 	RestartNever     = "never"
 )
 
+// What a job does when its last run is still going.
+const (
+	// Start anyway. The runs share the work, which is what a worker pool is
+	// for, and they agree with each other in the queue they read from.
+	OverlapAllow = "overlap"
+	// Let this turn pass. For work that must not run twice at once and has no
+	// other way of saying so.
+	OverlapSkip = "skip"
+)
+
+// Below this a scheduler is a fork bomb with extra steps.
+const MinimumEvery = time.Second
+
+// A ceiling nobody declared is still a ceiling: a job whose runs stop
+// finishing would otherwise start one every turn until the machine dies.
+const DefaultMaxParallel = 10
+
 // Deliberately generous: a database flushing to disk deserves more patience
 // than a web server.
 const DefaultStopTimeout = 30 * time.Second
@@ -42,9 +60,10 @@ const DefaultStopTimeout = 30 * time.Second
 const Extension = ".filo"
 
 type Service struct {
-	Name        string   `filo:"name"`
-	Kind        string   `filo:"kind"`
-	Command     string   `filo:"command"`
+	Name string `filo:"name"`
+	Kind string `filo:"kind"`
+	// What the image runs, when the file wants something other than what the
+	// image itself says.
 	Args        []string `filo:"args"`
 	Dir         string   `filo:"dir"`
 	Env         []string `filo:"env"`
@@ -62,8 +81,38 @@ type Service struct {
 	// keep, "/host/path:/path" is the machine's. Nothing is mounted that the
 	// file did not name.
 	Volumes []string `filo:"volumes"`
-	Memory  float64  `filo:"memory-mb"`
-	CPUs    float64  `filo:"cpus"`
+	// Which machines this belongs on. A declaration that names neither
+	// belongs on every machine it is pushed to, which is what a fleet of one
+	// wants and what a heterogeneous fleet must be able to say otherwise: the
+	// tree is shared, and the database does not belong on the web machines.
+	Hosts []string `filo:"hosts"`
+	Tags  []string `filo:"tags"`
+	// Where the files that travel with this declaration are mounted, read
+	// only. Without it a service directory with artifacts has nowhere to put
+	// them, which is a mistake worth naming rather than ignoring.
+	Config string  `filo:"config"`
+	Memory float64 `filo:"memory-mb"`
+	CPUs   float64 `filo:"cpus"`
+
+	// A job: run this every so often instead of keeping it up. The cron this
+	// replaces stops at the minute; a duration says what it means and goes
+	// below it.
+	Every string `filo:"every"`
+	// What to do when the last run has not finished. Overlapping is the
+	// default because it is what cron does and what a worker pool wants: the
+	// instances share the work, and the queue they read from is where they
+	// agree with each other.
+	Overlap string `filo:"overlap"`
+	// How many may run at once. Scaling without a ceiling is not elasticity,
+	// it is a machine dying slowly while a new instance starts every two
+	// minutes for ever.
+	MaxParallel float64 `filo:"max-parallel"`
+
+	// The hash of the files that travel with this declaration, computed where
+	// they are read and never declared. It is what makes editing a Caddyfile a
+	// change the plan can see: without it, an apply would say there is nothing
+	// to do and the container would keep the old configuration.
+	ConfigHash string
 }
 
 // Mount is a volume as the runtime needs it. A source with no slash is named
@@ -182,6 +231,25 @@ func (s Service) WantRunning() bool {
 	return s.State == StateRunning
 }
 
+// A job is a service with a schedule: it runs and ends, over and over, instead
+// of staying up.
+func (s Service) IsJob() bool { return s.Every != "" }
+
+func (s Service) Interval() time.Duration {
+	every, err := time.ParseDuration(s.Every)
+	if err != nil {
+		return 0
+	}
+	return every
+}
+
+func (s Service) Parallel() int {
+	if s.MaxParallel <= 0 {
+		return DefaultMaxParallel
+	}
+	return int(s.MaxParallel)
+}
+
 var ErrInvalid = errors.New("invalid service")
 
 func invalid(format string, args ...any) error {
@@ -217,29 +285,14 @@ func (s *Service) normalize() error {
 		return invalid("name %q must be 1-64 characters of a-z, 0-9, - and _", s.Name)
 	}
 	if s.Kind == "" {
-		s.Kind = KindExec
+		s.Kind = KindContainer
 	}
-	switch s.Kind {
-	case KindExec:
-		if s.Command == "" {
-			return invalid("%s: command is required", s.Name)
-		}
-		if !filepath.IsAbs(s.Command) {
-			return invalid("%s: command %q must be an absolute path", s.Name, s.Command)
-		}
-		if s.Image != "" || len(s.Ports) > 0 {
-			return invalid("%s: image and ports belong to a container service, not an exec one", s.Name)
-		}
-		if s.Dir != "" && !filepath.IsAbs(s.Dir) {
-			return invalid("%s: dir %q must be an absolute path", s.Name, s.Dir)
-		}
-	case KindContainer:
-		err := s.normalizeContainer()
-		if err != nil {
-			return err
-		}
-	default:
-		return invalid("%s: unknown kind %q", s.Name, s.Kind)
+	if s.Kind != KindContainer {
+		return invalid("%s: kind %q does not exist; a service is a container, and the runtime keeps it alive", s.Name, s.Kind)
+	}
+	err := s.normalizeContainer()
+	if err != nil {
+		return err
 	}
 	for _, e := range s.Env {
 		if !strings.Contains(e, "=") {
@@ -272,10 +325,10 @@ func (s *Service) normalize() error {
 // named here or it does not happen.
 func (s *Service) normalizeContainer() error {
 	if s.Image == "" {
-		return invalid("%s: image is required for a container service", s.Name)
+		return invalid("%s: image is required", s.Name)
 	}
-	if s.Command != "" {
-		return invalid("%s: a container service runs the image's own command; put arguments in args", s.Name)
+	if s.Dir != "" && !filepath.IsAbs(s.Dir) {
+		return invalid("%s: dir %q must be an absolute path inside the container", s.Name, s.Dir)
 	}
 	_, err := s.PublishedPorts()
 	if err != nil {
@@ -285,8 +338,56 @@ func (s *Service) normalizeContainer() error {
 	if err != nil {
 		return invalid("%s: %v", s.Name, err)
 	}
+	if s.Config != "" && !filepath.IsAbs(s.Config) {
+		return invalid("%s: config %q must be an absolute path inside the container", s.Name, s.Config)
+	}
+	err = s.normalizeSchedule()
+	if err != nil {
+		return err
+	}
 	if s.Memory < 0 || s.CPUs < 0 {
 		return invalid("%s: memory-mb and cpus must not be negative", s.Name)
+	}
+	return nil
+}
+
+// A job runs and ends. Everything here is about not letting it pretend to be a
+// service that stays up, or a service pretend to be a job.
+func (s *Service) normalizeSchedule() error {
+	if !s.IsJob() {
+		if s.Overlap != "" || s.MaxParallel != 0 {
+			return invalid("%s: overlap and max-parallel belong to a job, which is a service with every", s.Name)
+		}
+		return nil
+	}
+	every, err := time.ParseDuration(s.Every)
+	if err != nil {
+		return invalid("%s: every %q is not a duration, like 30s or 2m: %v", s.Name, s.Every, err)
+	}
+	if every < MinimumEvery {
+		return invalid("%s: every %s is below %s, and a scheduler firing faster than that is a fork bomb with extra steps",
+			s.Name, every, MinimumEvery)
+	}
+	if s.Overlap == "" {
+		s.Overlap = OverlapAllow
+	}
+	switch s.Overlap {
+	case OverlapAllow, OverlapSkip:
+	default:
+		return invalid("%s: overlap %q is not %q or %q; waiting and killing are not built, and inventing one silently would be worse",
+			s.Name, s.Overlap, OverlapAllow, OverlapSkip)
+	}
+	if s.MaxParallel < 0 {
+		return invalid("%s: max-parallel must not be negative", s.Name)
+	}
+	// The runtime must not bring a job back: it ended because it was done.
+	if s.Restart != "" && s.Restart != RestartNever {
+		return invalid("%s: a job ends when it is done, so restart must be %q; the schedule is what runs it again",
+			s.Name, RestartNever)
+	}
+	s.Restart = RestartNever
+	if len(s.Ports) > 0 {
+		return invalid("%s: a job publishes no port; several runs of it would ask for the same one", s.Name)
 	}
 	return nil
 }
@@ -350,6 +451,11 @@ func LoadDir(ctx context.Context, dir string) ([]Service, error) {
 			problems = append(problems, parseErr.Error())
 			continue
 		}
+		s.ConfigHash, parseErr = hashArtifacts(filepath.Join(dir, s.Name+ArtifactSuffix))
+		if parseErr != nil {
+			problems = append(problems, parseErr.Error())
+			continue
+		}
 		services = append(services, s)
 	}
 	slices.SortFunc(services, func(a, b Service) int { return strings.Compare(a.Name, b.Name) })
@@ -357,4 +463,25 @@ func LoadDir(ctx context.Context, dir string) ([]Service, error) {
 		return services, fmt.Errorf("%w:\n  %s", ErrInvalid, strings.Join(problems, "\n  "))
 	}
 	return services, nil
+}
+
+// BelongsTo answers whether this declaration is meant for a machine. The name
+// is the one ssh is given, which is the one in ~/.ssh/config: a machine has one
+// name here for the same reason it has one there.
+//
+// Naming neither hosts nor tags means everywhere: a tree that says nothing
+// about placement is a tree whose services all belong wherever it is pushed.
+func (s Service) BelongsTo(name string, tags []string) bool {
+	if len(s.Hosts) == 0 && len(s.Tags) == 0 {
+		return true
+	}
+	if slices.Contains(s.Hosts, name) {
+		return true
+	}
+	for _, tag := range tags {
+		if slices.Contains(s.Tags, tag) {
+			return true
+		}
+	}
+	return false
 }

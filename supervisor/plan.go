@@ -23,58 +23,63 @@ const (
 // removals through or make every ordinary change ask for permission, and a
 // confirmation everybody types without reading protects nobody.
 type Change struct {
-	Service     string `filo:"service"`
-	Action      string `filo:"action"`
-	Detail      string `filo:"detail"`
-	Destructive bool   `filo:"destructive"`
-	Disruptive  bool   `filo:"disruptive"`
+	Service     string `filo:"service" json:"service"`
+	Action      string `filo:"action" json:"action"`
+	Detail      string `filo:"detail" json:"detail"`
+	Destructive bool   `filo:"destructive" json:"destructive"`
+	Disruptive  bool   `filo:"disruptive" json:"disruptive"`
 }
 
 // Apply runs this same computation, so a dry run and the real thing cannot
 // drift apart.
 func (s *Supervisor) Plan(declared []service.Service) []Change {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.plan(declared)
-}
-
-func (s *Supervisor) plan(declared []service.Service) []Change {
 	wanted := make(map[string]service.Service, len(declared))
 	for _, svc := range declared {
 		wanted[svc.Name] = svc
 	}
+	// What is running comes from the runtime, so a plan is made against the
+	// machine as it is rather than against what hostd remembers.
+	live := map[string]bool{}
+	ctx, cancel := runtimeContext()
+	found, err := s.containers(ctx)
+	cancel()
+	if err == nil {
+		for _, container := range found {
+			live[container.Service] = container.Running
+		}
+	}
 
 	var changes []Change
-	for name, p := range s.procs {
+	for name, known := range s.declarations() {
 		svc, still := wanted[name]
 		if !still {
 			changes = append(changes, Change{
 				Service:     name,
 				Action:      ActionRemove,
-				Detail:      "no file declares this service any more",
-				Destructive: p.running,
+				Detail:      removedDetail(known),
+				Destructive: live[name],
 			})
 			continue
 		}
-		if sameDefinition(p.svc, svc) {
+		if sameDefinition(known, svc) {
 			continue
 		}
 		changes = append(changes, Change{
 			Service:    name,
 			Action:     ActionUpdate,
-			Detail:     definitionDiff(p.svc, svc),
-			Disruptive: p.running,
+			Detail:     definitionDiff(known, svc),
+			Disruptive: live[name],
 		})
 	}
 	for name, svc := range wanted {
-		_, exists := s.procs[name]
+		_, exists := s.declaration(name)
 		if exists {
 			continue
 		}
 		changes = append(changes, Change{
 			Service: name,
 			Action:  ActionAdd,
-			Detail:  fmt.Sprintf("declared as %s, state %s", svc.Kind, svc.State),
+			Detail:  addedDetail(svc),
 		})
 	}
 
@@ -86,12 +91,26 @@ func (s *Supervisor) plan(declared []service.Service) []Change {
 	return changes
 }
 
+// A job between runs has nothing running to stop, so the removal reads as
+// safe. Saying that its schedule stops is what keeps that from being read as
+// "this changes nothing".
+func removedDetail(svc service.Service) string {
+	if svc.IsJob() {
+		return "no file declares this job any more; it stops running every " + svc.Every
+	}
+	return "no file declares this service any more"
+}
+
+func addedDetail(svc service.Service) string {
+	if svc.IsJob() {
+		return fmt.Sprintf("declared as a job, every %s, state %s", svc.Every, svc.State)
+	}
+	return fmt.Sprintf("declared as %s, state %s", svc.Kind, svc.State)
+}
+
 // So a plan is reviewable without diffing two files by eye.
 func definitionDiff(old, updated service.Service) string {
 	var parts []string
-	if old.Command != updated.Command {
-		parts = append(parts, fmt.Sprintf("command %s -> %s", old.Command, updated.Command))
-	}
 	if !slices.Equal(old.Args, updated.Args) {
 		parts = append(parts, "arguments changed")
 	}
@@ -109,6 +128,9 @@ func definitionDiff(old, updated service.Service) string {
 	}
 	if old.Memory != updated.Memory || old.CPUs != updated.CPUs {
 		parts = append(parts, "resource limits changed")
+	}
+	if old.ConfigHash != updated.ConfigHash {
+		parts = append(parts, "configuration files changed")
 	}
 	if old.Kind != updated.Kind {
 		parts = append(parts, fmt.Sprintf("kind %s -> %s", old.Kind, updated.Kind))

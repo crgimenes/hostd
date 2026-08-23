@@ -224,18 +224,18 @@ type Query struct {
 }
 
 type Point struct {
-	TimeMS float64 `filo:"time-ms"`
-	Value  float64 `filo:"value"`
+	TimeMS float64 `filo:"time-ms" json:"time-ms"`
+	Value  float64 `filo:"value" json:"value"`
 }
 
 // Times are milliseconds on the wire: every Filo number is a float64, exact
 // only to 2^53, so anything finer would arrive rounded.
 type Series struct {
-	Scope  string  `filo:"scope"`
-	Name   string  `filo:"name"`
-	Metric string  `filo:"metric"`
-	StepMS float64 `filo:"step-ms"`
-	Points []Point `filo:"points"`
+	Scope  string  `filo:"scope" json:"scope"`
+	Name   string  `filo:"name" json:"name"`
+	Metric string  `filo:"metric" json:"metric"`
+	StepMS float64 `filo:"step-ms" json:"step-ms"`
+	Points []Point `filo:"points" json:"points"`
 }
 
 // Full detail only covers the recent past; a window that reaches further back

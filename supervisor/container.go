@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -13,8 +14,9 @@ import (
 )
 
 // The label that says a container is hostd's, and which service it is. It is
-// what makes adoption possible: after a restart the daemon asks the runtime
+// what makes the runtime the source of truth: after a restart the daemon asks
 // what it already owns instead of trusting a file to still be true.
+//
 // The filter is the key alone: with a trailing "=" the runtime reads it as
 // "this label, empty value" and matches nothing, which looks exactly like a
 // machine running no containers.
@@ -26,17 +28,17 @@ const labelService = "hostd.service"
 // whatever answers the internet.
 const Network = "hostd"
 
+// A container name derived from the service name, so an operator running
+// docker ps sees which service a container belongs to without a lookup.
+func containerName(service string) string { return "hostd-" + service }
+
 // Named storage carries the service in its name: two services asking for
 // "data" are asking for their own, and sharing has to be deliberate rather
 // than a collision.
 func volumeName(service, volume string) string { return "hostd-" + service + "-" + volume }
 
-// A container name derived from the service name, so an operator running
-// docker ps sees which service a container belongs to without a lookup.
-func containerName(service string) string { return "hostd-" + service }
-
 // Talking to the runtime is a local socket call, but a runtime that is wedged
-// must not hold the supervision loop.
+// must not hold a command.
 const runtimeTimeout = 30 * time.Second
 
 func runtimeContext() (context.Context, context.CancelFunc) {
@@ -44,7 +46,7 @@ func runtimeContext() (context.Context, context.CancelFunc) {
 }
 
 // A stream that outlives the call that started it, but not the supervisor: a
-// log follower still reading after the loop has left is a goroutine holding a
+// reader still waiting after the loop has left is a goroutine holding a
 // connection nobody will read.
 func (s *Supervisor) streamContext() (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -58,106 +60,113 @@ func (s *Supervisor) streamContext() (context.Context, context.CancelFunc) {
 	return ctx, cancel
 }
 
-// Runtime hands the supervisor the container daemon to use. Without it a
-// container service fails to start with a message saying so, which is the
-// honest answer on a machine that runs no containers.
-func (s *Supervisor) Runtime(client *docker.Client) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.runtime = client
+// What the runtime is holding for this host, one entry per service.
+type held struct {
+	docker.Container
+	Service string
 }
 
-// startContainer creates and starts the container for p, under the same lock
-// and the same rules as starting a process: it either ends with something
-// running and recorded, or with an error and nothing left behind.
-func (s *Supervisor) startContainer(p *proc, now time.Time) error {
-	if s.runtime == nil {
-		return fmt.Errorf("this machine has no container runtime; %w", docker.ErrNoRuntime)
+func (s *Supervisor) containers(ctx context.Context) ([]held, error) {
+	client := s.client()
+	if client == nil {
+		return nil, fmt.Errorf("this machine has no container runtime: %w", docker.ErrNoRuntime)
 	}
-	ctx, cancel := runtimeContext()
-	defer cancel()
+	found, err := client.List(ctx, labelService)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]held, 0, len(found))
+	for _, container := range found {
+		out = append(out, held{Container: container, Service: container.Labels[labelService]})
+	}
+	return out, nil
+}
 
-	ports, err := p.svc.PublishedPorts()
+// create builds the container the declaration describes, and starts it when
+// the file says it should be running. The restart policy goes to the runtime:
+// keeping it alive is its job, and hostd asking for the same thing at the same
+// time is how a service flaps.
+func (s *Supervisor) create(ctx context.Context, svc service.Service, start bool) error {
+	client := s.client()
+	if client == nil {
+		return docker.ErrNoRuntime
+	}
+	ports, err := svc.PublishedPorts()
 	if err != nil {
 		return err
 	}
-	mounts, err := s.prepareMounts(ctx, p.svc)
+	mounts, err := s.prepareMounts(ctx, svc)
 	if err != nil {
 		return err
 	}
-	err = s.runtime.EnsureNetwork(ctx, Network)
+	mounts = append(mounts, s.configMount(svc)...)
+	err = client.EnsureNetwork(ctx, Network)
 	if err != nil {
 		return err
 	}
 	// The tag in the file is a name that can be made to mean something else
-	// tomorrow. What ran is recorded as the digest, so "the same image" stays
-	// a checkable claim.
-	digest, err := s.runtime.ImageDigest(ctx, p.svc.Image)
+	// tomorrow. What ran is recorded as the digest of this machine's copy.
+	image, err := client.Image(ctx, svc.Image)
 	if err != nil {
 		if errors.Is(err, docker.ErrNotFound) {
-			return fmt.Errorf("image %s is not on this machine; push it with hostctl before declaring it", p.svc.Image)
+			return fmt.Errorf("image %s is not on this machine; send it with hostctl image push", svc.Image)
 		}
 		return err
 	}
 
-	// A container left over from a previous life holds the name; it is gone
-	// for good, and keeping it would only make the create fail.
-	name := containerName(p.svc.Name)
-	_ = s.runtime.Remove(ctx, name)
-
-	id, err := s.runtime.Create(ctx, docker.Spec{
+	// A container from a previous definition holds the name; it is not the one
+	// declared any more, and keeping it would only make the create fail.
+	name := containerName(svc.Name)
+	err = client.Remove(ctx, name)
+	if err != nil {
+		return err
+	}
+	id, err := client.Create(ctx, docker.Spec{
 		Name:    name,
-		Image:   p.svc.Image,
-		Args:    p.svc.Args,
-		Env:     p.svc.Env,
-		Dir:     p.svc.Dir,
+		Image:   svc.Image,
+		Args:    svc.Args,
+		Env:     svc.Env,
+		Dir:     svc.Dir,
 		Ports:   toDockerPorts(ports),
 		Mounts:  mounts,
-		Labels:  map[string]string{labelService: p.svc.Name},
-		Memory:  int64(p.svc.Memory) * 1024 * 1024,
-		NanoCPU: int64(p.svc.CPUs * 1e9),
+		Labels:  map[string]string{labelService: svc.Name},
+		Memory:  int64(svc.Memory) * 1024 * 1024,
+		NanoCPU: int64(svc.CPUs * 1e9),
 		Network: Network,
-		Alias:   p.svc.Name,
+		Alias:   svc.Name,
+		Restart: restartPolicy(svc),
 	})
 	if err != nil {
 		return err
 	}
-	err = s.runtime.Start(ctx, id)
+	if !start {
+		s.event(logs.EventStarted, svc.Name, fmt.Sprintf("created container %s from %s, not started", short(id), short(image.Digest)))
+		return nil
+	}
+	err = client.Start(ctx, id)
 	if err != nil {
 		// A container created and not started is a name taken for nothing.
-		_ = s.runtime.Remove(ctx, id)
+		_ = client.Remove(ctx, id)
 		return err
 	}
-	observed, err := s.runtime.Inspect(ctx, id)
-	if err != nil {
-		return err
-	}
-
-	p.container = id
-	// The container's main process, so the metrics of a container service are
-	// read the same way as any other service's.
-	p.pid = observed.PID
-	p.token = ""
-	p.started = now
-	p.adopted = false
-	p.running = true
-	p.stopping = false
-	p.killed = false
-	p.lastError = ""
-
-	err = writeState(s.dirs.State, procState{
-		Name:      p.svc.Name,
-		PID:       p.pid,
-		Container: id,
-		StartedAt: float64(now.UnixMilli()),
-	})
-	if err != nil {
-		s.event(logs.EventProblem, p.svc.Name, fmt.Sprintf("started container %s but could not record it: %v; a hostd restart will adopt it by label instead", short(id), err))
-	}
-	s.event(logs.EventStarted, p.svc.Name, fmt.Sprintf("started container %s from %s", short(id), short(digest)))
-	go s.waitContainer(p.svc.Name, id)
-	go s.followContainer(p.svc.Name, id, time.Time{})
+	s.event(logs.EventStarted, svc.Name, fmt.Sprintf("started container %s from %s", short(id), short(image.Digest)))
+	s.nudge()
 	return nil
+}
+
+// What the file asks for, in the runtime's own words. "unless-stopped" is what
+// makes an operator's stop survive a reboot of the machine and a restart of
+// the runtime: the declaration says what should run, and a hand that stopped
+// it is remembered.
+func restartPolicy(svc service.Service) string {
+	switch svc.Restart {
+	case service.RestartOnFailure:
+		return "on-failure"
+	case service.RestartNever:
+		return "no"
+	default:
+		return "unless-stopped"
+	}
 }
 
 // Named storage is created if it is not there and never removed here: a
@@ -168,12 +177,13 @@ func (s *Supervisor) prepareMounts(ctx context.Context, svc service.Service) ([]
 	if err != nil {
 		return nil, err
 	}
+	client := s.client()
 	out := make([]docker.Mount, 0, len(declared))
 	for _, mount := range declared {
 		source := mount.Source
 		if mount.Named {
 			source = volumeName(svc.Name, mount.Source)
-			err = s.runtime.EnsureVolume(ctx, source, map[string]string{labelService: svc.Name})
+			err = client.EnsureVolume(ctx, source, map[string]string{labelService: svc.Name})
 			if err != nil {
 				return nil, err
 			}
@@ -186,6 +196,19 @@ func (s *Supervisor) prepareMounts(ctx context.Context, svc service.Service) ([]
 		})
 	}
 	return out, nil
+}
+
+// What travels with the declaration goes in read only: a container that could
+// rewrite its own configuration would make the tree a lie.
+func (s *Supervisor) configMount(svc service.Service) []docker.Mount {
+	if svc.Config == "" {
+		return nil
+	}
+	return []docker.Mount{{
+		Source:   filepath.Join(s.services, svc.Name+service.ArtifactSuffix),
+		Target:   svc.Config,
+		ReadOnly: true,
+	}}
 }
 
 func toDockerPorts(ports []service.Port) []docker.Port {
@@ -201,157 +224,72 @@ func toDockerPorts(ports []service.Port) []docker.Port {
 	return out
 }
 
-// waitContainer is the container's version of waiting on a child: it blocks
-// until the runtime says the container ended, and only then records the death,
-// so an exit is never noticed a tick late.
-func (s *Supervisor) waitContainer(name, id string) {
-	// No deadline: waiting is the whole operation. It ends when the container
-	// does, when the runtime goes away, or when this daemon leaves.
-	ctx, cancel := s.streamContext()
-	defer cancel()
-	code, err := s.runtime.Wait(ctx, id)
-	if s.hasFinished() {
-		return
+// follow keeps one reader on every running container and lets go of the ones
+// that ended. The runtime keeps its own copy of the output; this is the one an
+// operator reads without entering the machine.
+func (s *Supervisor) follow(ctx context.Context, running []held) {
+	live := make(map[string]bool, len(running))
+	for _, container := range running {
+		if !container.Running {
+			continue
+		}
+		live[container.ID] = true
+		s.mu.Lock()
+		_, already := s.following[container.ID]
+		s.mu.Unlock()
+		if already {
+			continue
+		}
+		s.startFollowing(ctx, container)
 	}
-	// The last lines a container wrote explain the exit, and the follower is
-	// still draining them; giving it a moment puts them before the event.
-	time.Sleep(200 * time.Millisecond)
 
 	s.mu.Lock()
-	p, ok := s.procs[name]
-	if s.finished || !ok || p.container != id {
-		s.mu.Unlock()
+	defer s.mu.Unlock()
+	for id, stop := range s.following {
+		if live[id] {
+			continue
+		}
+		stop()
+		delete(s.following, id)
+	}
+}
+
+func (s *Supervisor) startFollowing(ctx context.Context, container held) {
+	// Where this machine's own log store stopped is the only record of it that
+	// matters: asking the runtime for everything since then replays nothing
+	// and skips nothing.
+	since, err := s.log.LastAt(container.Service)
+	if err != nil {
+		s.reportOnce(container.Service, fmt.Sprintf("cannot tell where the log of %s stopped: %v", container.Service, err))
 		return
 	}
-	now := s.now()
-	p.running = false
-	p.pid = 0
-	p.lastExit = code
-	p.lastError = ""
-	if err != nil && !p.stopping {
-		p.lastError = err.Error()
-	}
-	switch {
-	case p.stopping:
-		s.event(logs.EventStopped, name, fmt.Sprintf("container stopped (exit %d)", code))
-	case code == 0:
-		s.event(logs.EventExited, name, "container exited normally (exit 0)")
-	default:
-		s.event(logs.EventExited, name, fmt.Sprintf("container exited with code %d", code))
-	}
-	container := p.container
-	p.container = ""
-	s.afterExit(p, now, code)
+	streamCtx, cancel := context.WithCancel(ctx)
+	s.mu.Lock()
+	s.following[container.ID] = cancel
 	s.mu.Unlock()
 
-	// Outside the lock: the name has to be free before the next start, and a
-	// removal is a call to the runtime.
-	removeCtx, removeCancel := runtimeContext()
-	defer removeCancel()
-	_ = s.runtime.Remove(removeCtx, container)
-	s.nudge()
-}
-
-// followContainer copies what the container writes into the same timeline as
-// the events about it. The runtime keeps its own copy; this is the one an
-// operator reads without entering the machine.
-func (s *Supervisor) followContainer(name, id string, since time.Time) {
-	ctx, cancel := s.streamContext()
-	defer cancel()
-	err := s.runtime.Logs(ctx, id, since, func(line docker.Line) error {
-		if s.hasFinished() {
-			return errStopFollowing
-		}
-		at := line.At
-		if at.IsZero() {
-			at = s.now()
-		}
-		s.log.Append(logs.Record{
-			Time:    at,
-			Service: name,
-			Stream:  line.Stream,
-			Text:    line.Text,
-		})
-		s.rememberLogPosition(name, id, at)
-		return nil
-	})
-	if err == nil || errors.Is(err, errStopFollowing) || errors.Is(err, context.Canceled) || s.hasFinished() {
-		return
-	}
-	s.event(logs.EventProblem, name, fmt.Sprintf("stopped reading the container's output: %v", err))
-}
-
-var errStopFollowing = errors.New("supervisor: the daemon is leaving")
-
-// Where the follower got to, so the next hostd resumes instead of replaying
-// the whole log or skipping what arrived while it was away.
-func (s *Supervisor) rememberLogPosition(name, id string, at time.Time) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	p, ok := s.procs[name]
-	if !ok || p.container != id {
-		return
-	}
-	p.logSince = at
-}
-
-// adoptContainers finds what the runtime is already running for this host and
-// takes it over, so restarting hostd does not restart the services.
-func (s *Supervisor) adoptContainers(ctx context.Context, states map[string]procState) error {
-	if s.runtime == nil {
-		return nil
-	}
-	found, err := s.runtime.List(ctx, labelService)
-	if err != nil {
-		return fmt.Errorf("ask the container runtime what it is running: %w", err)
-	}
-	for _, container := range found {
-		name := container.Name
-		if len(name) > len("hostd-") {
-			name = name[len("hostd-"):]
-		}
-		p, declared := s.procs[name]
-		if !declared {
-			if container.Running {
-				s.event(logs.EventOrphan, name, fmt.Sprintf("container %s is running but no file declares it; stop it with hostctl service stop %s", short(container.ID), name))
+	client := s.client()
+	go func() {
+		defer cancel()
+		followErr := client.Logs(streamCtx, container.ID, since, func(line docker.Line) error {
+			at := line.At
+			if at.IsZero() {
+				at = s.now()
 			}
-			continue
+			s.log.Append(logs.Record{
+				Time:    at,
+				Service: container.Service,
+				Stream:  line.Stream,
+				Run:     runOf(container),
+				Text:    line.Text,
+			})
+			return nil
+		})
+		if followErr == nil || errors.Is(followErr, context.Canceled) {
+			return
 		}
-		if !container.Running {
-			// A dead container holds the name the next start needs.
-			_ = s.runtime.Remove(ctx, container.ID)
-			continue
-		}
-		observed, inspectErr := s.runtime.Inspect(ctx, container.ID)
-		if inspectErr != nil {
-			return inspectErr
-		}
-		p.container = container.ID
-		p.pid = observed.PID
-		p.started = observed.Started
-		p.adopted = true
-		p.running = true
-		p.logSince = states[name].logSince()
-		s.event(logs.EventAdopted, name, fmt.Sprintf("adopted running container %s after hostd restart", short(container.ID)))
-		go s.waitContainer(name, container.ID)
-		go s.followContainer(name, container.ID, p.logSince)
-	}
-	return nil
-}
-
-// stopContainer asks the runtime to stop the container and lets it kill what
-// does not go. The call blocks for as long as the service's grace, so it does
-// not happen under the supervisor's lock.
-func (s *Supervisor) stopContainer(name, id string, grace time.Duration) {
-	ctx, cancel := context.WithTimeout(context.Background(), grace+runtimeTimeout)
-	defer cancel()
-	err := s.runtime.Stop(ctx, id, grace)
-	if err == nil {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.event(logs.EventProblem, name, fmt.Sprintf("could not stop container %s: %v", short(id), err))
+		s.reportOnce(container.Service, fmt.Sprintf("stopped reading the output of %s: %v", container.Service, followErr))
+	}()
 }
 
 // Identifiers are 64 hex characters, sometimes behind the algorithm that
@@ -366,4 +304,17 @@ func short(id string) string {
 		return id[:12]
 	}
 	return id
+}
+
+// retire takes away the plain container of a service, gracefully. It is named
+// for the service alone, so the runs of a job — named for their instant — are
+// not touched by it.
+func (s *Supervisor) retire(ctx context.Context, svc service.Service) {
+	client := s.client()
+	if client == nil {
+		return
+	}
+	container := containerName(svc.Name)
+	_ = client.Stop(ctx, container, svc.StopGrace())
+	_ = client.Remove(ctx, container)
 }

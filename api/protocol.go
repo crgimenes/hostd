@@ -33,6 +33,8 @@ const (
 	OpLogFollow     = "log.follow"
 	OpMetrics       = "metrics"
 	OpImagePush     = "image.push"
+	OpServicePut    = "service.put"
+	OpServicePrune  = "service.prune"
 )
 
 // Codes are what programs read; messages are for people and may be rewritten.
@@ -60,6 +62,7 @@ type Request struct {
 	Stream  string `filo:"stream"`
 	Match   string `filo:"match"`
 	Kind    string `filo:"kind"`
+	Run     string `filo:"run"`
 	Limit   int    `filo:"limit"`
 	Since   uint64 `filo:"since"`
 	// A metric query: the window in milliseconds, and what to answer it with.

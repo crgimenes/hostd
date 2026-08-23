@@ -64,11 +64,11 @@ func (p Paths) ConfigFile() string { return filepath.Join(p.ConfigDir, "hostd.fi
 
 func (p Paths) ServicesDir() string { return filepath.Join(p.ConfigDir, "services") }
 
-// Under the persistent data directory on purpose: losing it would leave a
-// running service no supervisor can prove ownership of.
-func (p Paths) SupervisionDir() string { return filepath.Join(p.DataDir, "supervision") }
-
-func (p Paths) SpoolDir() string { return filepath.Join(p.DataDir, "spool") }
+// What travels with a declaration lands beside it, so what a machine holds
+// looks like what the operator's tree holds.
+func (p Paths) ArtifactsDir(service string) string {
+	return filepath.Join(p.ServicesDir(), service+".d")
+}
 
 func (p Paths) StateDir() string { return filepath.Join(p.DataDir, "state") }
 
@@ -119,7 +119,7 @@ func Load(ctx context.Context, path string) (Config, error) {
 }
 
 func (p Paths) EnsureDirs() error {
-	for _, dir := range []string{p.ConfigDir, p.ServicesDir(), p.SupervisionDir(), p.SpoolDir(), p.StateDir(), p.LogsDir(), p.MetricsDir(), p.RunDir} {
+	for _, dir := range []string{p.ConfigDir, p.ServicesDir(), p.StateDir(), p.LogsDir(), p.MetricsDir(), p.RunDir} {
 		err := os.MkdirAll(dir, 0o700)
 		if err != nil {
 			return err

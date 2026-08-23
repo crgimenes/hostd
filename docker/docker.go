@@ -169,6 +169,10 @@ type Spec struct {
 	// which is why an application needs no published port at all.
 	Network string
 	Alias   string
+	// What the runtime should do when the container ends. Keeping it alive is
+	// the runtime's job; hostd asking for the same thing at the same time is
+	// how a service flaps.
+	Restart string
 }
 
 // Mount is storage that outlives the container. Named storage is the runtime's
@@ -195,6 +199,15 @@ type Port struct {
 	HostPort      int
 	ContainerPort int
 	Protocol      string
+}
+
+// Nothing is the safe reading of an empty field: a container nobody asked to
+// be restarted is not restarted.
+func (s Spec) restartPolicy() string {
+	if s.Restart == "" {
+		return "no"
+	}
+	return s.Restart
 }
 
 func (p Port) protocol() string {
@@ -243,7 +256,7 @@ func (c *Client) Create(ctx context.Context, spec Spec) (string, error) {
 		"HostConfig": map[string]any{
 			"PortBindings":  bindings,
 			"Mounts":        mounts,
-			"RestartPolicy": map[string]any{"Name": "no"},
+			"RestartPolicy": map[string]any{"Name": spec.restartPolicy()},
 			"Memory":        spec.Memory,
 			"NanoCpus":      spec.NanoCPU,
 			"Privileged":    false,
@@ -271,6 +284,15 @@ func (c *Client) Create(ctx context.Context, spec Spec) (string, error) {
 		return "", err
 	}
 	return created.ID, nil
+}
+
+// UpdateRestart changes what the runtime does when a container ends, without
+// touching the container. A policy that drifted from the declaration — because
+// the file changed, or because a hand changed it — converges without
+// interrupting the service, which is the whole point of applying a file.
+func (c *Client) UpdateRestart(ctx context.Context, id, policy string) error {
+	body := map[string]any{"RestartPolicy": map[string]any{"Name": policy}}
+	return c.call(ctx, http.MethodPost, "/containers/"+id+"/update", nil, body, nil)
 }
 
 func (c *Client) Start(ctx context.Context, id string) error {
@@ -308,6 +330,20 @@ type Container struct {
 	PID     int
 	Started time.Time
 	Exit    int
+	// The runtime's own word for what it is doing: running, restarting,
+	// created, exited, paused or dead.
+	Status string
+	// How many times the runtime brought it back, and what it said the last
+	// time it could not.
+	Restarts int
+	Error    string
+	// The policy the container was created with. A container that is exited
+	// under a policy that keeps things alive was stopped by a hand, because
+	// the runtime would have brought anything else back.
+	Restart string
+	// What hostd wrote on it when it was created: which service it belongs to,
+	// and which run of a job it is.
+	Labels map[string]string
 }
 
 func (c *Client) Inspect(ctx context.Context, id string) (Container, error) {
@@ -316,12 +352,20 @@ func (c *Client) Inspect(ctx context.Context, id string) (Container, error) {
 		Name  string `json:"Name"`
 		Image string `json:"Image"`
 		State struct {
+			Status     string `json:"Status"`
 			Running    bool   `json:"Running"`
 			Pid        int    `json:"Pid"`
 			ExitCode   int    `json:"ExitCode"`
+			Error      string `json:"Error"`
 			StartedAt  string `json:"StartedAt"`
 			FinishedAt string `json:"FinishedAt"`
 		} `json:"State"`
+		RestartCount int `json:"RestartCount"`
+		HostConfig   struct {
+			RestartPolicy struct {
+				Name string `json:"Name"`
+			} `json:"RestartPolicy"`
+		} `json:"HostConfig"`
 		Config struct {
 			Image string `json:"Image"`
 		} `json:"Config"`
@@ -332,14 +376,18 @@ func (c *Client) Inspect(ctx context.Context, id string) (Container, error) {
 	}
 	started, _ := time.Parse(time.RFC3339Nano, raw.State.StartedAt)
 	return Container{
-		ID:      raw.ID,
-		Name:    strings.TrimPrefix(raw.Name, "/"),
-		Image:   raw.Config.Image,
-		Digest:  raw.Image,
-		Running: raw.State.Running,
-		PID:     raw.State.Pid,
-		Started: started,
-		Exit:    raw.State.ExitCode,
+		ID:       raw.ID,
+		Name:     strings.TrimPrefix(raw.Name, "/"),
+		Image:    raw.Config.Image,
+		Digest:   raw.Image,
+		Running:  raw.State.Running,
+		PID:      raw.State.Pid,
+		Started:  started,
+		Exit:     raw.State.ExitCode,
+		Status:   raw.State.Status,
+		Restarts: raw.RestartCount,
+		Error:    raw.State.Error,
+		Restart:  raw.HostConfig.RestartPolicy.Name,
 	}, nil
 }
 
@@ -373,6 +421,8 @@ func (c *Client) List(ctx context.Context, label string) ([]Container, error) {
 			Image:   item.Image,
 			Digest:  item.ImgID,
 			Running: item.State == "running",
+			Status:  item.State,
+			Labels:  item.Labels,
 		})
 	}
 	return out, nil

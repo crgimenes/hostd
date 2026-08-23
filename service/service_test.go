@@ -11,15 +11,15 @@ import (
 )
 
 func TestParseMinimal(t *testing.T) {
-	// The simple case has to stay simple: a name and a command are a whole
+	// The simple case has to stay simple: a name and an image are a whole
 	// service, everything else has a default.
-	src := `(service (tuple "name" "api") (tuple "command" "/usr/local/bin/api"))`
+	src := `(service (tuple "name" "api") (tuple "image" "api:1"))`
 	s, err := Parse(context.Background(), "api.filo", src)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if s.Kind != KindExec {
-		t.Errorf("kind = %q, want %q", s.Kind, KindExec)
+	if s.Kind != KindContainer {
+		t.Errorf("kind = %q, want %q", s.Kind, KindContainer)
 	}
 	if s.State != StateRunning {
 		t.Errorf("state = %q, want %q", s.State, StateRunning)
@@ -38,9 +38,9 @@ func TestParseMinimal(t *testing.T) {
 func TestParseFull(t *testing.T) {
 	src := `(service
 	  (tuple "name" "api")
-	  (tuple "kind" "exec")
-	  (tuple "command" "/usr/local/bin/api")
-	  (tuple "args" (list "--listen" ":8080"))
+	  (tuple "kind" "container")
+	  (tuple "image" "api:1")
+	  (tuple "args" (list "-listen" ":8080"))
 	  (tuple "dir" "/var/lib/api")
 	  (tuple "env" (list "ENV=production"))
 	  (tuple "state" "stopped")
@@ -69,18 +69,17 @@ func TestParseRejects(t *testing.T) {
 		why string
 		src string
 	}{
-		{"no name", `(service (tuple "command" "/bin/true"))`},
-		{"no command", `(service (tuple "name" "api"))`},
-		{"relative command", `(service (tuple "name" "api") (tuple "command" "api"))`},
-		{"relative dir", `(service (tuple "name" "api") (tuple "command" "/bin/true") (tuple "dir" "rel"))`},
-		{"unknown kind", `(service (tuple "name" "api") (tuple "command" "/bin/true") (tuple "kind" "vm"))`},
-		{"unknown state", `(service (tuple "name" "api") (tuple "command" "/bin/true") (tuple "state" "paused"))`},
-		{"unknown restart", `(service (tuple "name" "api") (tuple "command" "/bin/true") (tuple "restart" "maybe"))`},
-		{"env without =", `(service (tuple "name" "api") (tuple "command" "/bin/true") (tuple "env" (list "BROKEN")))`},
-		{"negative stop timeout", `(service (tuple "name" "api") (tuple "command" "/bin/true") (tuple "stop-timeout" -1))`},
-		{"name with slash", `(service (tuple "name" "a/b") (tuple "command" "/bin/true"))`},
-		{"name with dots", `(service (tuple "name" "..") (tuple "command" "/bin/true"))`},
-		{"uppercase name", `(service (tuple "name" "API") (tuple "command" "/bin/true"))`},
+		{"no name", `(service (tuple "image" "api:1"))`},
+		{"no image", `(service (tuple "name" "api"))`},
+		{"relative dir", `(service (tuple "name" "api") (tuple "image" "api:1") (tuple "dir" "rel"))`},
+		{"a kind that does not exist", `(service (tuple "name" "api") (tuple "image" "api:1") (tuple "kind" "exec"))`},
+		{"unknown state", `(service (tuple "name" "api") (tuple "image" "api:1") (tuple "state" "paused"))`},
+		{"unknown restart", `(service (tuple "name" "api") (tuple "image" "api:1") (tuple "restart" "maybe"))`},
+		{"env without =", `(service (tuple "name" "api") (tuple "image" "api:1") (tuple "env" (list "BROKEN")))`},
+		{"negative stop timeout", `(service (tuple "name" "api") (tuple "image" "api:1") (tuple "stop-timeout" -1))`},
+		{"name with slash", `(service (tuple "name" "a/b") (tuple "image" "api:1"))`},
+		{"name with dots", `(service (tuple "name" "..") (tuple "image" "api:1"))`},
+		{"uppercase name", `(service (tuple "name" "API") (tuple "image" "api:1"))`},
 	}
 	for _, c := range cases {
 		_, err := Parse(context.Background(), "t.filo", c.src)
@@ -94,34 +93,6 @@ func TestParseRejects(t *testing.T) {
 	}
 }
 
-// A container service is a real kind that is not built yet. Saying so beats
-// pretending the field does not exist.
-// A container service runs the image's own command, so a command in the file
-// is a misunderstanding worth naming rather than quietly ignoring.
-func TestAContainerRunsTheImageNotACommand(t *testing.T) {
-	src := `(service (tuple "name" "site") (tuple "kind" "container") (tuple "image" "site:1") (tuple "command" "/bin/true"))`
-	_, err := Parse(context.Background(), "site.filo", src)
-	if err == nil {
-		t.Fatal("a container service with a command was accepted")
-	}
-	if !strings.Contains(err.Error(), "image's own command") {
-		t.Fatalf("the error does not say where the command comes from: %v", err)
-	}
-}
-
-func TestAContainerNeedsAnImage(t *testing.T) {
-	src := `(service (tuple "name" "site") (tuple "kind" "container"))`
-	_, err := Parse(context.Background(), "site.filo", src)
-	if err == nil {
-		t.Fatal("a container service with no image was accepted")
-	}
-	if !strings.Contains(err.Error(), "image is required") {
-		t.Fatalf("the error does not say what is missing: %v", err)
-	}
-}
-
-// A port with no address binds to loopback, where the reverse proxy on the
-// same machine reaches it and the internet does not.
 func TestPublishedPortsAreParsedAndDefaultToLoopback(t *testing.T) {
 	src := `(service
 	  (tuple "name" "site")
@@ -160,16 +131,6 @@ func TestABrokenPortIsRefusedWhereItIsWritten(t *testing.T) {
 	}
 }
 
-// The two kinds do not borrow each other's fields: an exec service with an
-// image is a file somebody wrote by copying the wrong example.
-func TestAnExecServiceRefusesContainerFields(t *testing.T) {
-	src := `(service (tuple "name" "api") (tuple "command" "/usr/bin/api") (tuple "image" "api:1"))`
-	_, err := Parse(context.Background(), "api.filo", src)
-	if err == nil {
-		t.Fatal("an exec service with an image was accepted")
-	}
-}
-
 func TestValidName(t *testing.T) {
 	valid := []string{"api", "web-1", "a", "my_service", "x2"}
 	for _, n := range valid {
@@ -195,7 +156,7 @@ func writeService(t *testing.T, dir, file, body string) {
 
 func TestParseFileRequiresMatchingName(t *testing.T) {
 	dir := t.TempDir()
-	writeService(t, dir, "api.filo", `(service (tuple "name" "other") (tuple "command" "/bin/true"))`)
+	writeService(t, dir, "api.filo", `(service (tuple "name" "other") (tuple "image" "probe:1"))`)
 	_, err := ParseFile(context.Background(), filepath.Join(dir, "api.filo"))
 	if err == nil {
 		t.Fatal("mismatched file name accepted")
@@ -208,8 +169,8 @@ func TestParseFileRequiresMatchingName(t *testing.T) {
 
 func TestLoadDir(t *testing.T) {
 	dir := t.TempDir()
-	writeService(t, dir, "b.filo", `(service (tuple "name" "b") (tuple "command" "/bin/true"))`)
-	writeService(t, dir, "a.filo", `(service (tuple "name" "a") (tuple "command" "/bin/true"))`)
+	writeService(t, dir, "b.filo", `(service (tuple "name" "b") (tuple "image" "probe:1"))`)
+	writeService(t, dir, "a.filo", `(service (tuple "name" "a") (tuple "image" "probe:1"))`)
 	writeService(t, dir, "notes.txt", "ignored")
 	services, err := LoadDir(context.Background(), dir)
 	if err != nil {
@@ -236,7 +197,7 @@ func TestLoadDirMissingIsNotAnError(t *testing.T) {
 
 func TestLoadDirReportsEveryProblem(t *testing.T) {
 	dir := t.TempDir()
-	writeService(t, dir, "good.filo", `(service (tuple "name" "good") (tuple "command" "/bin/true"))`)
+	writeService(t, dir, "good.filo", `(service (tuple "name" "good") (tuple "image" "probe:1"))`)
 	writeService(t, dir, "bad1.filo", `(service (tuple "name" "bad1"))`)
 	writeService(t, dir, "bad2.filo", `(service (tuple "name" "bad2") (tuple "command" "relative"))`)
 	services, err := LoadDir(context.Background(), dir)
@@ -259,8 +220,8 @@ func TestLoadDirReportsEveryProblem(t *testing.T) {
 // rejected rather than silently shadowing the first.
 func TestLoadDirCannotDuplicateAService(t *testing.T) {
 	dir := t.TempDir()
-	writeService(t, dir, "api.filo", `(service (tuple "name" "api") (tuple "command" "/bin/true"))`)
-	writeService(t, dir, "api2.filo", `(service (tuple "name" "api") (tuple "command" "/bin/true"))`)
+	writeService(t, dir, "api.filo", `(service (tuple "name" "api") (tuple "image" "probe:1"))`)
+	writeService(t, dir, "api2.filo", `(service (tuple "name" "api") (tuple "image" "probe:1"))`)
 	services, err := LoadDir(context.Background(), dir)
 	if err == nil {
 		t.Fatal("a second file declaring an existing service was accepted")
@@ -317,6 +278,86 @@ func TestABrokenVolumeIsRefusedWhereItIsWritten(t *testing.T) {
 			_, err := Parse(context.Background(), "site.filo", src)
 			if err == nil {
 				t.Fatalf("the volume %q was accepted", spec)
+			}
+		})
+	}
+}
+
+// A job is a service with a schedule, and the cron this replaces stops at the
+// minute.
+func TestAJobDeclaresHowOftenItRuns(t *testing.T) {
+	src := `(service
+	  (tuple "name" "worker")
+	  (tuple "image" "worker:1")
+	  (tuple "every" "30s"))`
+	svc, err := Parse(context.Background(), "worker.filo", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !svc.IsJob() || svc.Interval() != 30*time.Second {
+		t.Fatalf("the schedule parsed as %v", svc.Interval())
+	}
+	// Overlapping is what cron does and what a worker pool wants.
+	if svc.Overlap != OverlapAllow {
+		t.Fatalf("a job defaults to %q", svc.Overlap)
+	}
+	// A ceiling nobody declared is still a ceiling.
+	if svc.Parallel() != DefaultMaxParallel {
+		t.Fatalf("a job with no ceiling declared allows %d", svc.Parallel())
+	}
+	// The runtime must not bring a job back: it ended because it was done.
+	if svc.Restart != RestartNever {
+		t.Fatalf("a job carries the restart policy %q", svc.Restart)
+	}
+}
+
+func TestABrokenScheduleIsRefusedWhereItIsWritten(t *testing.T) {
+	table := []struct {
+		why string
+		src string
+	}{
+		{"not a duration", `(tuple "every" "soon")`},
+		{"below the floor", `(tuple "every" "10ms")`},
+		{"a policy that does not exist", `(tuple "every" "1m") (tuple "overlap" "wait")`},
+		{"restarted by the runtime", `(tuple "every" "1m") (tuple "restart" "always")`},
+		{"a job publishing a port", `(tuple "every" "1m") (tuple "ports" (list "8080:80"))`},
+		{"overlap without a schedule", `(tuple "overlap" "skip")`},
+		{"a ceiling without a schedule", `(tuple "max-parallel" 4)`},
+	}
+	for _, test := range table {
+		t.Run(test.why, func(t *testing.T) {
+			src := `(service (tuple "name" "worker") (tuple "image" "worker:1") ` + test.src + `)`
+			_, err := Parse(context.Background(), "worker.filo", src)
+			if err == nil {
+				t.Fatalf("accepted: %s", test.src)
+			}
+		})
+	}
+}
+
+// A shared tree in a heterogeneous fleet: the database does not belong on the
+// web machines, and saying nothing about placement still means everywhere.
+func TestWhereADeclarationBelongs(t *testing.T) {
+	cases := []struct {
+		name    string
+		svc     Service
+		machine string
+		tags    []string
+		want    bool
+	}{
+		{"nothing declared goes everywhere", Service{}, "yuki", nil, true},
+		{"named machine", Service{Hosts: []string{"yuki", "selene"}}, "yuki", nil, true},
+		{"another machine", Service{Hosts: []string{"selene"}}, "yuki", nil, false},
+		{"the ssh name, not the hostname behind it", Service{Hosts: []string{"yuki.local"}}, "yuki", nil, false},
+		{"by tag", Service{Tags: []string{"web"}}, "yuki", []string{"web", "amd64"}, true},
+		{"another tag", Service{Tags: []string{"db"}}, "yuki", []string{"web"}, false},
+		{"named despite the tags", Service{Hosts: []string{"yuki"}, Tags: []string{"db"}}, "yuki", []string{"web"}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := c.svc.BelongsTo(c.machine, c.tags)
+			if got != c.want {
+				t.Fatalf("BelongsTo = %v, want %v", got, c.want)
 			}
 		})
 	}

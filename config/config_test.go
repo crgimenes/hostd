@@ -30,7 +30,7 @@ func TestRootRedirectsEveryPath(t *testing.T) {
 	p := Locate()
 	paths := []string{
 		p.ConfigDir, p.DataDir, p.RunDir,
-		p.ConfigFile(), p.ServicesDir(), p.SupervisionDir(), p.SpoolDir(), p.Socket(),
+		p.ConfigFile(), p.ServicesDir(), p.StateDir(), p.LogsDir(), p.MetricsDir(), p.Socket(),
 	}
 	for _, path := range paths {
 		if !strings.HasPrefix(path, root+string(filepath.Separator)) {
@@ -97,7 +97,7 @@ func TestEnsureDirsIsIdempotent(t *testing.T) {
 			t.Fatalf("EnsureDirs: %v", err)
 		}
 	}
-	for _, dir := range []string{p.ConfigDir, p.ServicesDir(), p.SupervisionDir(), p.SpoolDir(), p.RunDir} {
+	for _, dir := range []string{p.ConfigDir, p.ServicesDir(), p.StateDir(), p.LogsDir(), p.MetricsDir(), p.RunDir} {
 		info, err := os.Stat(dir)
 		if err != nil {
 			t.Errorf("%s was not created: %v", dir, err)

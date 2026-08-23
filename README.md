@@ -67,6 +67,53 @@ EOF
 `HOSTD_ROOT` redirects every path hostd uses. Without it, the paths are the
 real ones: `/etc/hostd`, `/var/lib/hostd`, `/run/hostd`.
 
+## Your fleet is a directory you version
+
+Everything `hostctl` needs is a directory you keep under version control, and
+everyone who has it and an authorised key can operate the fleet:
+
+```text
+fleet/
+├── inventory.filo      the machines, and what to call groups of them
+├── site.filo           a service that needs nothing else
+└── caddy/              a service that does
+    ├── init.filo       the declaration
+    └── Caddyfile       what it needs
+```
+
+A service is one file until it needs something beside it; then it is a
+directory with an `init.filo` and its files, and nothing else about it changes.
+The directory is the name.
+
+```bash
+hostctl -host yuki.local push     send the declarations and their files
+hostctl -host yuki.local apply    converge, with a plan and a generation
+```
+
+Sending is not applying: a file on a machine has not changed what runs there.
+The files land beside the machine's own declarations (`/etc/hostd/services/`,
+with `caddy.d/` for what travels with `caddy.filo`), read only inside the
+container at the path the declaration names. Editing a `Caddyfile` in the tree
+and pushing makes the next plan say `configuration files changed`, because what
+travels with a declaration is part of it.
+
+One tree describes a whole fleet, so a declaration may say where it belongs:
+
+```lisp
+(tuple "hosts" (list "yuki" "selene"))    only these machines
+(tuple "tags"  (list "web"))              machines carrying this tag
+```
+
+A declaration that says neither belongs on every machine it is pushed to. The
+tags are the inventory's, so `push -all` sends each machine the services
+declared for it and nothing else.
+
+The tree is the source, so deleting a service from it takes its files off the
+machine on the next push, and the plan after that proposes removing what still
+runs — which `apply` refuses without `-allow-destructive`. A tree that declares
+nothing is refused outright: that is what a push from the wrong directory looks
+like.
+
 ## A service is one file
 
 ```lisp
@@ -100,10 +147,17 @@ never privileged. A port with no address in front of it binds to loopback,
 where a reverse proxy on the same host reaches it and the internet does not —
 `hostd` publishes the port and leaves the proxy to whoever owns it.
 
-Restarting is `hostd`'s job, so the runtime is told not to do it: two
-supervisors with different opinions about one process is how a service flaps.
-Restarting `hostd` does not restart the container either — the next daemon asks
-the runtime what it already owns, by label, and adopts it. Container output
+Keeping a service alive is the runtime's job, not `hostd`'s: it already
+survives its own restart and the machine's reboot, and two supervisors with
+different opinions about one process is how a service flaps. `restart` in the
+file becomes the runtime's policy, and a policy that drifted is corrected in
+place rather than by recreating the container.
+
+That is also how a stop is remembered without `hostd` writing anything down:
+under a policy that keeps containers alive, one that is exited and not coming
+back is one a hand stopped, because the runtime would have restarted anything
+else. Restarting `hostd` restarts nothing — the next daemon asks the runtime
+what it holds and picks the log up where its own store stopped. Container output
 lands in the same timeline as the events about it, and the started event names
 the digest that actually ran, because a tag can be made to mean something else
 tomorrow.
@@ -226,8 +280,20 @@ hostctl -tag arm64 describe
 ```lisp
 (inventory
   (host (tuple "name" "yuki.local") (tuple "tags" (list "amd64" "docker")))
+  (host (tuple "name" "web1") (tuple "tags" (list "web")))
   (host (tuple "name" "cronos.local") (tuple "tags" (list "arm64" "dashboard"))))
 ```
+
+A machine is called here what you call it in `~/.ssh/config` — `web1` is a
+`Host web1` there, and where that goes, who it logs in as, on which port,
+through which jump host and with which key is that file's business. It is the
+file you already keep, that every other tool on your machine already honours.
+There is no second place here to write any of it, and so no second place to
+disagree with.
+
+A machine that does not answer is reported and left alone: no retry, no
+reconnection. A client that kept trying would hide which machine went away, and
+deciding what to do about it is the operator's.
 
 Machines are asked at once, eight at a time, and each answer is printed whole
 under its host; a machine that did not answer says so in the same place, because
@@ -239,6 +305,26 @@ its own exit code and body.
 
 `-follow` and `-expect-generation` name one machine: watching is a stream, and a
 generation from one host means nothing on another.
+
+## Watching the fleet
+
+```bash
+hostctl gui
+```
+
+One window over every machine in the inventory: what each one is running, its
+CPU and memory over the last hour, and the log of the whole fleet in one place,
+refreshed every two seconds. `-host`, `-hosts` and `-tag` narrow it.
+
+It is **read only**. A restart or a stop is shown as the `hostctl` command that
+would do it, ready to copy — a dashboard that acts is a dashboard that acts by
+accident. Every number on the screen came from the same operation the command
+line calls, over the same ssh, so the panel and the terminal cannot disagree.
+
+The page is served from a custom `app://` scheme out of the binary: nothing on
+your machine listens on a port, and there is no CDN, no framework and no file on
+disk behind it. The daemon does not carry any of this — `hostd` has no graphical
+dependency at all.
 
 ## Command line
 
@@ -269,6 +355,46 @@ diagnostics go to `stderr`. `-debug` adds one `key=value` line per request on
 percentiles and what the log store is holding or losing. Exit codes are part of the interface: `0` success,
 `1` failed, `2` bad arguments, `3` communication, `4` authorisation, `5`
 partial success, `6` refused and nothing changed.
+
+## Jobs
+
+A service with `every` runs and ends, over and over, instead of staying up:
+
+```lisp
+(service
+  (tuple "name" "retry-webhooks")
+  (tuple "image" "worker:2026-08-23")
+  (tuple "every" "30s")
+  (tuple "max-parallel" 8))
+```
+
+The cron this replaces stops at the minute; a duration says what it means and
+goes below it, down to a second. Runs are aligned to the wall clock, so a job
+every two minutes runs at even minutes and restarting `hostd` does not shift its
+schedule. Starting the daemon is not one of the times a job was asked to run.
+
+**Runs overlap by default**, because that is what cron does and what a worker
+pool wants: if the last run has not finished when the next is due, another one
+starts and they share the work. Nothing here coordinates them — they agree with
+each other in whatever queue they read from, and a scheduler that tried to be
+clever about it would be a second opinion about somebody else's work. Declare
+`(tuple "overlap" "skip")` for work that must not run twice at once.
+
+`max-parallel` is the ceiling, ten by default. Scaling without one is not
+elasticity: it is a machine dying slowly while a new run starts every turn
+because the old ones stopped finishing. Hitting it is reported in the timeline,
+never silent.
+
+Every run is recorded there too — when it started, what it printed, its exit
+code and how long it took — under the run it belongs to, which is what a
+`crontab` cannot answer:
+
+```console
+hostctl -host yuki.local log -service retry-webhooks
+2026-08-23 14:11:40 ticker * run 1787505100000 started as container 6e7d5126699a
+2026-08-23 14:11:40 ticker | working
+2026-08-23 14:11:43 ticker * run 1787505100000 finished with exit 0 after 2.626s
+```
 
 ## Metrics
 
