@@ -1,0 +1,208 @@
+package service
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestParseMinimal(t *testing.T) {
+	// The simple case has to stay simple: a name and a command are a whole
+	// service, everything else has a default.
+	src := `(service (tuple "name" "api") (tuple "command" "/usr/local/bin/api"))`
+	s, err := Parse(context.Background(), "api.filo", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if s.Kind != KindExec {
+		t.Errorf("kind = %q, want %q", s.Kind, KindExec)
+	}
+	if s.State != StateRunning {
+		t.Errorf("state = %q, want %q", s.State, StateRunning)
+	}
+	if s.Restart != RestartAlways {
+		t.Errorf("restart = %q, want %q", s.Restart, RestartAlways)
+	}
+	if s.StopGrace() != DefaultStopTimeout {
+		t.Errorf("stop grace = %v, want %v", s.StopGrace(), DefaultStopTimeout)
+	}
+	if !s.WantRunning() {
+		t.Error("a service with no declared state should want to be running")
+	}
+}
+
+func TestParseFull(t *testing.T) {
+	src := `(service
+	  (tuple "name" "api")
+	  (tuple "kind" "exec")
+	  (tuple "command" "/usr/local/bin/api")
+	  (tuple "args" (list "--listen" ":8080"))
+	  (tuple "dir" "/var/lib/api")
+	  (tuple "env" (list "ENV=production"))
+	  (tuple "state" "stopped")
+	  (tuple "restart" "on-failure")
+	  (tuple "stop-timeout" 5))`
+	s, err := Parse(context.Background(), "api.filo", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(s.Args) != 2 || s.Args[1] != ":8080" {
+		t.Errorf("args = %#v", s.Args)
+	}
+	if s.Dir != "/var/lib/api" || len(s.Env) != 1 {
+		t.Errorf("dir/env = %q %#v", s.Dir, s.Env)
+	}
+	if s.WantRunning() {
+		t.Error("a service declared stopped must not want to run")
+	}
+	if s.StopGrace() != 5*time.Second {
+		t.Errorf("stop grace = %v, want 5s", s.StopGrace())
+	}
+}
+
+func TestParseRejects(t *testing.T) {
+	cases := []struct {
+		why string
+		src string
+	}{
+		{"no name", `(service (tuple "command" "/bin/true"))`},
+		{"no command", `(service (tuple "name" "api"))`},
+		{"relative command", `(service (tuple "name" "api") (tuple "command" "api"))`},
+		{"relative dir", `(service (tuple "name" "api") (tuple "command" "/bin/true") (tuple "dir" "rel"))`},
+		{"unknown kind", `(service (tuple "name" "api") (tuple "command" "/bin/true") (tuple "kind" "vm"))`},
+		{"unknown state", `(service (tuple "name" "api") (tuple "command" "/bin/true") (tuple "state" "paused"))`},
+		{"unknown restart", `(service (tuple "name" "api") (tuple "command" "/bin/true") (tuple "restart" "maybe"))`},
+		{"env without =", `(service (tuple "name" "api") (tuple "command" "/bin/true") (tuple "env" (list "BROKEN")))`},
+		{"negative stop timeout", `(service (tuple "name" "api") (tuple "command" "/bin/true") (tuple "stop-timeout" -1))`},
+		{"name with slash", `(service (tuple "name" "a/b") (tuple "command" "/bin/true"))`},
+		{"name with dots", `(service (tuple "name" "..") (tuple "command" "/bin/true"))`},
+		{"uppercase name", `(service (tuple "name" "API") (tuple "command" "/bin/true"))`},
+	}
+	for _, c := range cases {
+		_, err := Parse(context.Background(), "t.filo", c.src)
+		if err == nil {
+			t.Errorf("%s: accepted", c.why)
+			continue
+		}
+		if !errors.Is(err, ErrInvalid) {
+			t.Errorf("%s: error is not ErrInvalid: %v", c.why, err)
+		}
+	}
+}
+
+// A container service is a real kind that is not built yet. Saying so beats
+// pretending the field does not exist.
+func TestContainerKindSaysNotYet(t *testing.T) {
+	src := `(service (tuple "name" "site") (tuple "kind" "container") (tuple "command" "/bin/true"))`
+	_, err := Parse(context.Background(), "site.filo", src)
+	if err == nil {
+		t.Fatal("container kind accepted")
+	}
+	if !strings.Contains(err.Error(), "not implemented yet") {
+		t.Fatalf("error should say the kind is not built yet: %v", err)
+	}
+}
+
+func TestValidName(t *testing.T) {
+	valid := []string{"api", "web-1", "a", "my_service", "x2"}
+	for _, n := range valid {
+		if !ValidName(n) {
+			t.Errorf("%q rejected", n)
+		}
+	}
+	invalid := []string{"", "-api", "api-", "_api", "api_", "A", "a b", "a/b", "..", ".", "a.b", strings.Repeat("a", 65)}
+	for _, n := range invalid {
+		if ValidName(n) {
+			t.Errorf("%q accepted", n)
+		}
+	}
+}
+
+func writeService(t *testing.T, dir, file, body string) {
+	t.Helper()
+	err := os.WriteFile(filepath.Join(dir, file), []byte(body), 0o600)
+	if err != nil {
+		t.Fatalf("write %s: %v", file, err)
+	}
+}
+
+func TestParseFileRequiresMatchingName(t *testing.T) {
+	dir := t.TempDir()
+	writeService(t, dir, "api.filo", `(service (tuple "name" "other") (tuple "command" "/bin/true"))`)
+	_, err := ParseFile(context.Background(), filepath.Join(dir, "api.filo"))
+	if err == nil {
+		t.Fatal("mismatched file name accepted")
+	}
+	// The message has to tell the operator how to fix it, not just what is wrong.
+	if !strings.Contains(err.Error(), "rename the file to other.filo") {
+		t.Fatalf("error does not say how to fix it: %v", err)
+	}
+}
+
+func TestLoadDir(t *testing.T) {
+	dir := t.TempDir()
+	writeService(t, dir, "b.filo", `(service (tuple "name" "b") (tuple "command" "/bin/true"))`)
+	writeService(t, dir, "a.filo", `(service (tuple "name" "a") (tuple "command" "/bin/true"))`)
+	writeService(t, dir, "notes.txt", "ignored")
+	services, err := LoadDir(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("LoadDir: %v", err)
+	}
+	if len(services) != 2 {
+		t.Fatalf("got %d services, want 2", len(services))
+	}
+	// Sorted, so a plan built from them is the same plan every time.
+	if services[0].Name != "a" || services[1].Name != "b" {
+		t.Fatalf("not sorted: %q %q", services[0].Name, services[1].Name)
+	}
+}
+
+func TestLoadDirMissingIsNotAnError(t *testing.T) {
+	services, err := LoadDir(context.Background(), filepath.Join(t.TempDir(), "absent"))
+	if err != nil {
+		t.Fatalf("a host with no services declared is valid: %v", err)
+	}
+	if len(services) != 0 {
+		t.Fatalf("got %d services", len(services))
+	}
+}
+
+func TestLoadDirReportsEveryProblem(t *testing.T) {
+	dir := t.TempDir()
+	writeService(t, dir, "good.filo", `(service (tuple "name" "good") (tuple "command" "/bin/true"))`)
+	writeService(t, dir, "bad1.filo", `(service (tuple "name" "bad1"))`)
+	writeService(t, dir, "bad2.filo", `(service (tuple "name" "bad2") (tuple "command" "relative"))`)
+	services, err := LoadDir(context.Background(), dir)
+	if err == nil {
+		t.Fatal("broken files accepted")
+	}
+	// Every problem at once, so the operator does not fix them one restart at
+	// a time.
+	if !strings.Contains(err.Error(), "bad1") || !strings.Contains(err.Error(), "bad2") {
+		t.Fatalf("not every problem reported: %v", err)
+	}
+	// The good ones still load, so one typo does not take the host down.
+	if len(services) != 1 || services[0].Name != "good" {
+		t.Fatalf("valid services were dropped: %#v", services)
+	}
+}
+
+// Two files declaring the same service is structurally impossible, because the
+// declared name must equal the file name. This proves the second file is
+// rejected rather than silently shadowing the first.
+func TestLoadDirCannotDuplicateAService(t *testing.T) {
+	dir := t.TempDir()
+	writeService(t, dir, "api.filo", `(service (tuple "name" "api") (tuple "command" "/bin/true"))`)
+	writeService(t, dir, "api2.filo", `(service (tuple "name" "api") (tuple "command" "/bin/true"))`)
+	services, err := LoadDir(context.Background(), dir)
+	if err == nil {
+		t.Fatal("a second file declaring an existing service was accepted")
+	}
+	if len(services) != 1 || services[0].Name != "api" {
+		t.Fatalf("the valid file should still load: %#v", services)
+	}
+}

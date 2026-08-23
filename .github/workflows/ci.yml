@@ -1,0 +1,80 @@
+name: test
+
+on: [push, pull_request, workflow_dispatch]
+
+jobs:
+  # Linux is the bench. hostd supervises processes, handles signals and will
+  # talk to Docker: the parts that matter are only real here.
+  linux:
+    name: linux-${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: go build ./...
+      - run: go vet ./...
+      # -race because a supervisor with a convergence loop, wait goroutines and
+      # an API answering at the same time is exactly the shape where data races
+      # live. -count=1 so a cached result never stands in for a real run.
+      - name: Test
+        timeout-minutes: 10
+        run: go test -race -count=1 -timeout 300s ./...
+
+  # macOS is where development happens, so it has to keep building and passing.
+  # It is a gate, not the bench.
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: go build ./...
+      - run: go vet ./...
+      - name: Test
+        timeout-minutes: 10
+        run: go test -race -count=1 -timeout 300s ./...
+
+  # The release targets must keep compiling even when no runner of that shape
+  # is in the matrix.
+  cross:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Cross build the release targets
+        env:
+          CGO_ENABLED: '0'
+        run: |
+          for target in linux/amd64 linux/arm64; do
+            GOOS=${target%/*} GOARCH=${target#*/} go build ./... || exit 1
+            echo "built $target"
+          done
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: gofmt -l . | tee /dev/stderr | (! read)
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          args: --timeout 5m
+      - name: staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          staticcheck ./...
+      - name: gosec
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          gosec ./...

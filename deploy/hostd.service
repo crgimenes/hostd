@@ -1,0 +1,31 @@
+[Unit]
+Description=hostd control plane
+Documentation=https://github.com/crgimenes/hostd
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/hostd
+Restart=always
+RestartSec=1s
+
+# KillMode=process is what makes restarting hostd safe. The default,
+# control-group, would kill every process in the unit's cgroup on stop or
+# restart — which is every service hostd supervises. The whole adoption design
+# exists so that updating the daemon does not interrupt the work of the host;
+# with the default kill mode, systemd would undo it.
+KillMode=process
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+
+# hostd owns these and creates them itself; listing them here means systemd
+# creates them with the right ownership before the daemon starts.
+StateDirectory=hostd
+StateDirectoryMode=0700
+RuntimeDirectory=hostd
+RuntimeDirectoryMode=0700
+ConfigurationDirectory=hostd
+ConfigurationDirectoryMode=0700
+
+[Install]
+WantedBy=multi-user.target
