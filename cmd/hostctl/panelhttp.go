@@ -90,6 +90,10 @@ func (p *panel) Act(action string) (string, error) {
 		p.pickRange(from, to)
 	case parts[0] == "refresh":
 		p.wake()
+	case parts[0] == "config" && len(rest) == 1 && rest[0] == "choose":
+		p.chooseConfig()
+	case parts[0] == "config" && len(rest) == 1 && rest[0] == "reload":
+		p.reloadFleet()
 	default:
 		return "", fmt.Errorf("no such action: %q", action)
 	}
@@ -219,7 +223,7 @@ func (p *panel) fragments() []fragment {
 	snap := p.latest()
 	view := p.viewport()
 	tree := treeOf(snap, view)
-	detail := detailOf(snap, view)
+	detail := detailOf(snap, view, p.settings())
 
 	out := []fragment{
 		p.renderKeyed("tree", "tree", tree, tree.StructureKey()),
@@ -295,6 +299,8 @@ type rowView struct {
 	Key      string
 	Kind     string
 	Label    string
+	Icon     string
+	Header   bool
 	Dot      string
 	Meta     string
 	Child    bool
@@ -330,7 +336,7 @@ type treeView struct {
 func (t treeView) StructureKey() string {
 	var key strings.Builder
 	for _, row := range t.Rows {
-		fmt.Fprintf(&key, "%s|%s|%v|%v|%s\n", row.Key, row.Label, row.Selected, row.Child, row.Twist)
+		fmt.Fprintf(&key, "%s|%s|%s|%v|%v|%v|%s\n", row.Key, row.Label, row.Icon, row.Selected, row.Child, row.Header, row.Twist)
 	}
 	return key.String()
 }
@@ -342,6 +348,10 @@ func treeOf(snap snapshot, view viewState) treeView {
 		Meta:     strconv.Itoa(len(snap.Fleet)),
 		Selected: view.kind == "fleet",
 		Link:     "select/fleet",
+	}, {
+		Key:    "head-machines",
+		Label:  "Machines",
+		Header: true,
 	}}}
 	for _, host := range snap.Fleet {
 		services := host.Services
@@ -381,6 +391,17 @@ func treeOf(snap snapshot, view viewState) treeView {
 			})
 		}
 	}
+	out.Rows = append(out.Rows, rowView{
+		Key:    "head-panel",
+		Label:  "Panel",
+		Header: true,
+	}, rowView{
+		Key:      "settings",
+		Label:    "Settings",
+		Icon:     "gear",
+		Selected: view.kind == "settings",
+		Link:     "select/settings",
+	})
 	return out
 }
 

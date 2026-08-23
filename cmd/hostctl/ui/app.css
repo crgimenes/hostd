@@ -109,6 +109,48 @@ td.actions {
 	height: 100%;
 }
 
+/* Hidden by the operator, or by there being no room. The sidebar keeps its
+   width so showing it again is not a re-layout of the whole window. */
+body.hideNav #shell {
+	grid-template-columns: 0 0 1fr;
+}
+
+body.hideNav #sidebar,
+body.hideNav #grip {
+	display: none;
+}
+
+/* The hamburger appears exactly when the sidebar is not there, where one is
+   expected: the top left, before the title. */
+#reveal {
+	display: none;
+	align-items: center;
+	justify-content: center;
+	width: 28px;
+	height: 28px;
+	margin-right: 4px;
+	border: 0;
+	border-radius: 6px;
+	background: none;
+	color: var(--secondary);
+	flex: none;
+}
+
+#reveal:hover {
+	background: var(--hover);
+	color: var(--label);
+}
+
+body.hideNav #reveal {
+	display: inline-flex;
+}
+
+.icon {
+	width: 14px;
+	height: 14px;
+	flex: none;
+}
+
 /* The source list. */
 
 #sidebar {
@@ -232,6 +274,36 @@ td.actions {
 	color: var(--failed);
 }
 
+#status {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+}
+
+/* A ring that turns while the fleet is being reached. A window that sits
+   perfectly still during a four-second first round reads as a frozen one. */
+.spinner {
+	width: 11px;
+	height: 11px;
+	flex: none;
+	border-radius: 50%;
+	border: 1.5px solid var(--tertiary);
+	border-top-color: var(--accent);
+	animation: turn 0.7s linear infinite;
+}
+
+@keyframes turn {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.spinner {
+		animation-duration: 2.4s;
+	}
+}
+
 #status.bad {
 	color: var(--failed);
 }
@@ -262,6 +334,15 @@ td.actions {
 	display: grid;
 	grid-template-rows: 1fr 1px var(--logHeight, 220px);
 	overflow: hidden;
+}
+
+body.noLog #pane {
+	grid-template-rows: 1fr;
+}
+
+body.noLog #split,
+body.noLog #console {
+	display: none;
 }
 
 #detail {
@@ -348,6 +429,9 @@ button {
 }
 
 .push {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
 	font-size: 12px;
 	padding: 3px 10px;
 	border-radius: 6px;
@@ -468,6 +552,38 @@ table.services {
 table.services td {
 	overflow: hidden;
 	text-overflow: ellipsis;
+}
+
+/* Narrow enough to be a phone: the picture on a button carries it and the
+   word steps aside, the columns that repeat what the row already says go, and
+   the log takes the bottom half rather than a strip. */
+@media (max-width: 620px) {
+	.push span {
+		display: none;
+	}
+
+	.push {
+		padding: 4px 8px;
+	}
+
+	table.services th:nth-child(3),
+	table.services td:nth-child(3),
+	table.services th:nth-child(5),
+	table.services td:nth-child(5) {
+		display: none;
+	}
+
+	#content {
+		padding: 10px;
+	}
+
+	.card {
+		padding: 10px 12px;
+	}
+
+	#filter {
+		width: 110px;
+	}
 }
 
 table.services th:nth-child(1) { width: 16%; }

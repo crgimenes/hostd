@@ -36,3 +36,7 @@ diretrizes.md
 melhorias.md
 CLAUDE.md
 melhorias.md
+
+# The binaries, when they are built in the tree rather than into GOBIN.
+/hostctl
+/hostd

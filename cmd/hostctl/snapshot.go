@@ -17,12 +17,21 @@ const pollInterval = 2 * time.Second
 // window that dies slowly.
 const maxLines = 4000
 
+// How long a round may take before the window is told it is working. Under
+// this, saying so would be a flicker on every tick and the wire would never be
+// quiet; over it, a still window reads as a frozen one — which is what the
+// first round looks like, when four machines are being reached for the first
+// time and the slowest takes seconds.
+const slowRound = 400 * time.Millisecond
+
 // What the panel knows, as of the last round.
 type snapshot struct {
 	Fleet   []fleetHost
 	Lines   []line
 	Updated time.Time
 	Problem string
+	// A round is going and taking long enough to say so.
+	Busy bool
 }
 
 // A log line with the machine that wrote it, which the answer does not carry
@@ -66,9 +75,38 @@ func (p *panel) wake() {
 }
 
 func (p *panel) round(ctx context.Context) {
+	finished := make(chan struct{})
+	go p.sayIfSlow(finished)
+
 	view := p.viewport()
 	p.absorb(p.Fleet(view.window, view.from, view.to, p.sequences()))
+
+	close(finished)
+	p.working(false)
 	p.push()
+}
+
+// sayIfSlow tells the window the panel is working, but only once the round has
+// taken long enough for a person to wonder.
+func (p *panel) sayIfSlow(finished chan struct{}) {
+	select {
+	case <-finished:
+		return
+	case <-time.After(slowRound):
+	}
+	p.working(true)
+}
+
+// working pushes only on the edge: a state that is already on screen is not
+// sent again.
+func (p *panel) working(busy bool) {
+	p.snapMu.Lock()
+	changed := p.snap.Busy != busy
+	p.snap.Busy = busy
+	p.snapMu.Unlock()
+	if changed {
+		p.push()
+	}
 }
 
 // absorb folds one round's answer into what the panel knows. Separate from the

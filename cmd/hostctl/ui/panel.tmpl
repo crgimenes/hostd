@@ -45,28 +45,35 @@
 
 {{define "tree"}}<ol id="tree" role="tree">
 {{- range .Rows}}
+{{- if .Header}}
+<li class="section">{{.Label}}</li>
+{{- else}}
 <li><div class="row{{if .Child}} child{{else}} machine{{end}}{{if .Selected}} selected{{end}}" role="treeitem"
     {{- if .Link}} data-act="{{.Link}}"{{end}}>
   {{- if .Twist}}<span class="twist {{.Twist}}" data-act="{{.Toggle}}">&#9654;</span>
   {{- else}}<span class="twist"></span>{{end}}
   {{- if .Dot}}{{template "treeDot" .}}{{end}}
+  {{- if .Icon}}{{icon .Icon}}{{end}}
   <span class="name">{{.Label}}</span>
   {{- if .Meta}}{{template "treeMeta" .}}{{end}}
 </div></li>
+{{- end}}
 {{- end}}
 </ol>{{end}}
 
 {{define "treeDot"}}<span id="{{.DotID}}" class="dot {{.Dot}}"></span>{{end}}
 {{define "treeMeta"}}<span id="{{.MetaID}}" class="meta">{{.Meta}}</span>{{end}}
 
-{{define "status"}}<span id="status"{{if .Bad}} class="bad"{{end}}>{{.Text}}</span>{{end}}
+{{define "status"}}<span id="status" class="{{if .Bad}}bad{{end}}{{if .Busy}} busy{{end}}">{{if .Busy}}<span class="spinner" aria-hidden="true"></span>{{end}}{{.Text}}</span>{{end}}
 
-{{define "detail"}}<div id="detail">
+{{define "detail"}}<div id="detail" data-log="{{if .Watching}}on{{else}}off{{end}}">
   <header id="toolbar">
+    <button id="reveal" title="Show the fleet" aria-label="Show the fleet">{{icon "list"}}</button>
     <div id="crumb">
       <h1 id="title">{{.Title}}</h1>
       <p id="subtitle">{{.Subtitle}}</p>
     </div>
+    {{- if .Watching}}
     <div id="controls">
       <span id="range"{{if not .Frozen}} hidden{{end}}><span id="rangeText">{{.RangeText}}</span><button id="rangeReset" data-act="range/live">live</button></span>
       <div id="windows" role="group" aria-label="window">
@@ -77,6 +84,7 @@
         <button data-act="window/86400"{{if and (eq $window 86400) (not $frozen)}} class="on"{{end}}>24h</button>
       </div>
     </div>
+    {{- end}}
   </header>
   <div id="content" data-from="{{.From}}" data-to="{{.To}}">
     {{- if .Empty}}<p class="empty">{{.Empty}}</p>{{end}}
@@ -84,7 +92,7 @@
     {{- range .Cards}}
       <section class="card{{if .Link}} machineCard{{end}}"{{if .Link}} data-act="{{.Link}}"{{end}}>
         <h2><span>{{.Heading}}</span>{{if .Aside}}{{template "cardAside" .}}{{end}}
-          {{- if .Buttons}}<span class="headActions">{{range .Buttons}}<button class="push" data-command="{{.Command}}">{{.Label}}</button>{{end}}</span>{{end}}</h2>
+          {{- if .Buttons}}<span class="headActions">{{range .Buttons}}<button class="push"{{if .Act}} data-act="{{.Act}}"{{else}} data-command="{{.Command}}"{{end}}>{{if .Icon}}{{icon .Icon}}{{end}}<span>{{.Label}}</span></button>{{end}}</span>{{end}}</h2>
         {{- if .Problem}}<p class="problem">{{.Problem}}</p>{{end}}
         {{- if .Numbers}}{{template "statBlock" .}}{{end}}
         {{- if .Head}}
@@ -97,7 +105,7 @@
             <td class="dim">{{.Image}}</td>
             {{template "rowUptime" .}}
             {{template "rowRestarts" .}}
-            <td class="actions">{{range .Buttons}}<button class="push" data-command="{{.Command}}">{{.Label}}</button>{{end}}</td>
+            <td class="actions">{{range .Buttons}}<button class="push" data-command="{{.Command}}" title="{{.Label}}">{{if .Icon}}{{icon .Icon}}{{end}}<span>{{.Label}}</span></button>{{end}}</td>
           </tr>
           {{- if .Problem}}<tr><td class="wide problem" colspan="6">{{.Problem}}</td></tr>{{end}}
           {{- end}}

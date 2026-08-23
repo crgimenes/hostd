@@ -10,6 +10,7 @@ import (
 
 	"github.com/crgimenes/hostd/metrics"
 	"github.com/crgimenes/hostd/supervisor"
+	"github.com/crgimenes/hostd/version"
 )
 
 type detailView struct {
@@ -18,6 +19,11 @@ type detailView struct {
 	Single   bool
 	Empty    string
 	Cards    []cardView
+	// Whether this view is about the fleet. The window buttons and the log
+	// belong to the machines; a page about the panel itself has no use for
+	// either, and showing them would offer a control that governs nothing on
+	// screen.
+	Watching bool
 	// What the charts are drawn against, so a drag across one can say which
 	// instants the pointer covered.
 	From      int64
@@ -70,8 +76,14 @@ func (r rowCells) UpID() string   { return "up-" + safeID(r.Key) }
 func (r rowCells) RstID() string  { return "rst-" + safeID(r.Key) }
 
 type buttonView struct {
-	Label   string
+	Label string
+	// The picture beside the word, never instead of it: the panel is also for
+	// people who have not learned the pictures yet.
+	Icon string
+	// One of the two: a command the person runs themselves, or an act the
+	// panel performs on itself. The fleet only ever gets the first kind.
 	Command string
+	Act     string
 }
 
 type chartView struct {
@@ -91,6 +103,7 @@ type legendView struct {
 type statusView struct {
 	Text string
 	Bad  bool
+	Busy bool
 }
 
 // What has to be true for the PANE element to need replacing: which view this
@@ -98,7 +111,7 @@ type statusView struct {
 // their own fragments. A pane replaced under a pointer eats the click.
 func (d detailView) StructureKey() string {
 	var key strings.Builder
-	fmt.Fprintf(&key, "%s|%s|%v|%s|%d|%v|%s\n", d.Title, d.Subtitle, d.Single, d.Empty, d.Window, d.Frozen, d.RangeText)
+	fmt.Fprintf(&key, "%s|%s|%v|%s|%d|%v|%v|%s\n", d.Title, d.Subtitle, d.Single, d.Empty, d.Window, d.Watching, d.Frozen, d.RangeText)
 	for _, card := range d.Cards {
 		fmt.Fprintf(&key, "%s|%s|%s|%s|%d|%d\n", card.Key, card.Heading, card.Link, card.Problem, len(card.Charts), len(card.Numbers))
 		for _, row := range card.Rows {
@@ -108,7 +121,7 @@ func (d detailView) StructureKey() string {
 			fmt.Fprintf(&key, " f:%s\n", fact[0])
 		}
 		for _, button := range card.Buttons {
-			fmt.Fprintf(&key, " b:%s\n", button.Command)
+			fmt.Fprintf(&key, " b:%s|%s\n", button.Command, button.Act)
 		}
 	}
 	return key.String()
@@ -145,25 +158,31 @@ func (d detailView) volatiles(p *panel) []fragment {
 // and a fragment that changes every round is a wire that is never quiet. When
 // the fleet is well the panel has nothing to say.
 func statusOf(snap snapshot) statusView {
+	if snap.Busy {
+		return statusView{Text: "asking the fleet…", Busy: true}
+	}
 	if snap.Problem != "" {
 		return statusView{Text: snap.Problem, Bad: true}
 	}
 	if snap.Updated.IsZero() {
-		return statusView{Text: "asking the fleet"}
+		return statusView{Text: "asking the fleet…", Busy: true}
 	}
 	return statusView{Text: fmt.Sprintf("watching %d machine(s)", len(snap.Fleet))}
 }
 
-func detailOf(snap snapshot, view viewState) detailView {
+func detailOf(snap snapshot, view viewState, info settingsInfo) detailView {
 	var out detailView
 	switch view.kind {
 	case "host":
 		out = hostDetail(snap, view)
 	case "service":
 		out = serviceDetail(snap, view)
+	case "settings":
+		out = settingsDetail(info)
 	default:
 		out = fleetDetail(snap, view)
 	}
+	out.Watching = view.kind != "settings"
 	out.Window = view.window
 	from, to := span(snap, view)
 	out.From, out.To = int64(from), int64(to)
@@ -348,10 +367,16 @@ func serviceDetail(snap snapshot, view viewState) detailView {
 }
 
 func commandsFor(host, service string, verbs ...string) []buttonView {
+	pictures := map[string]string{
+		"restart": "arrow-clockwise",
+		"stop":    "stop-fill",
+		"start":   "play-fill",
+	}
 	out := make([]buttonView, 0, len(verbs))
 	for _, verb := range verbs {
 		out = append(out, buttonView{
 			Label:   verb,
+			Icon:    pictures[verb],
 			Command: fmt.Sprintf("hostctl -host %s service %s %s", host, verb, service),
 		})
 	}
@@ -548,5 +573,46 @@ func lineOf(held line, view viewState) lineView {
 	case "event":
 		out.Class = "event"
 	}
+	return out
+}
+
+/* The Settings page: where the panel's tree lives and what this binary is.
+   The window is also for people who do not live in a terminal, so the one
+   thing the command line configures — the tree — is visible and changeable
+   here, with the system's own directory chooser. */
+
+type settingsInfo struct {
+	ConfigDir string
+	Inventory string
+	Machines  int
+	Problem   string
+}
+
+func settingsDetail(info settingsInfo) detailView {
+	out := detailView{Title: "Settings", Subtitle: "what this panel watches", Single: true}
+	out.Cards = append(out.Cards, cardView{
+		Key:     "tree",
+		Heading: "Configuration",
+		Problem: info.Problem,
+		Facts: [][2]string{
+			{"configuration root", info.ConfigDir},
+			{"inventory", info.Inventory},
+			{"machines listed", strconv.Itoa(info.Machines)},
+		},
+		Buttons: []buttonView{
+			{Label: "Choose…", Icon: "folder2-open", Act: "config/choose"},
+			{Label: "Reload", Icon: "arrow-clockwise", Act: "config/reload"},
+		},
+	})
+	out.Cards = append(out.Cards, cardView{
+		Key:     "about",
+		Heading: "About hostctl",
+		Facts: [][2]string{
+			{"version", version.Version},
+			{"protocol", strconv.Itoa(version.Protocol)},
+			{"schema", strconv.Itoa(version.Schema)},
+			{"services are declared in", "one .filo file, or a directory with an init.filo and the files that travel with it"},
+		},
+	})
 	return out
 }

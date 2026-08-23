@@ -74,12 +74,22 @@ window.onerror = (message) => {
 // when a fragment is swapped in.
 document.body.addEventListener("click", (event) => {
 	const asked = event.target.closest("[data-act]");
-	if (asked) {
-		act(asked.dataset.act);
+	if (!asked) {
+		return;
+	}
+	act(asked.dataset.act);
+	// On a narrow window the sidebar covers what was just chosen: picking
+	// something is done with it.
+	if (NARROW.matches && asked.closest("#sidebar") && !asked.classList.contains("twist")) {
+		hiddenByHand = true;
+		showNav();
 	}
 });
 
 function settle() {
+	// The log belongs to the machines: a page about the panel itself puts it
+	// away rather than showing a pane about somewhere else.
+	document.body.classList.toggle("noLog", el("detail").dataset.log === "off");
 	const lines = el("lines");
 	while (lines.children.length > MAX_LINES) {
 		lines.firstElementChild.remove();
@@ -294,6 +304,32 @@ function drag(handle, axis, apply) {
 function clamp(value, low, high) {
 	return Math.max(low, Math.min(high, value));
 }
+
+/* The sidebar is hidden by choice, or because there is no room for it. Which
+   of the two matters: a window that widens again gives back the sidebar the
+   operator never hid, and keeps hidden the one they did. */
+
+const NARROW = window.matchMedia("(max-width: 620px)");
+let hiddenByHand = false;
+
+function showNav() {
+	document.body.classList.toggle("hideNav", hiddenByHand || NARROW.matches);
+}
+
+el("reveal").onclick = () => {
+	hiddenByHand = false;
+	document.body.classList.remove("hideNav");
+};
+
+// Hiding is the grip's other gesture: dragged to the floor, the sidebar is
+// being put away rather than made unusably narrow.
+el("grip").ondblclick = () => {
+	hiddenByHand = true;
+	showNav();
+};
+
+NARROW.addEventListener("change", showNav);
+showNav();
 
 settle();
 

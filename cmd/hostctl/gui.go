@@ -9,6 +9,8 @@ import (
 	"html/template"
 	"net/http"
 	"os"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +20,7 @@ import (
 	"github.com/crgimenes/glaze/menu"
 	"github.com/crgimenes/hostd/api"
 	"github.com/crgimenes/hostd/metrics"
+	"github.com/crgimenes/hostd/service"
 	"github.com/crgimenes/hostd/supervisor"
 )
 
@@ -45,8 +48,23 @@ type panel struct {
 	// other refresh found four broken pipes where its fleet used to be.
 	life context.Context
 
+	// The machines and their connections share one lock: letting go of a
+	// machine and closing what was open for it is one decision.
 	mu      sync.Mutex
 	clients map[string]*api.Client
+
+	// Where the panel's tree lives, changeable from the Settings page: the
+	// window is also for people who do not live in a terminal, and a path
+	// only a flag can change is a path only a terminal can change.
+	cfgMu      sync.Mutex
+	cfgDir     string
+	cfgProblem string
+
+	// The native directory chooser, absent outside the window (tests, the
+	// harness): choosing needs a desktop, reading does not.
+	dialogs interface {
+		OpenDirectory(glaze.FileDialogOptions) (string, error)
+	}
 
 	snapMu sync.RWMutex
 	snap   snapshot
@@ -79,13 +97,16 @@ type panel struct {
 }
 
 func newPanel(opt options, hosts []string) (*panel, error) {
-	pages, err := template.ParseFS(ui, "ui/panel.tmpl")
+	pages, err := template.New("panel.tmpl").
+		Funcs(template.FuncMap{"icon": iconSVG}).
+		ParseFS(ui, "ui/panel.tmpl")
 	if err != nil {
 		return nil, err
 	}
 	return &panel{
 		opt:     opt,
 		hosts:   hosts,
+		cfgDir:  opt.config,
 		clients: map[string]*api.Client{},
 		since:   map[string]uint64{},
 		held:    map[string]bool{},
@@ -121,15 +142,105 @@ func (p *panel) Fleet(window int, fromMS, toMS float64, since map[string]uint64)
 		toMS = 0
 	}
 
-	out := make([]fleetHost, len(p.hosts))
+	hosts := p.hostsNow()
+	out := make([]fleetHost, len(hosts))
 	var wg sync.WaitGroup
-	for i, host := range p.hosts {
+	for i, host := range hosts {
 		wg.Go(func() {
 			out[i] = p.one(ctx, host, fromMS, toMS, since[host])
 		})
 	}
 	wg.Wait()
 	return out
+}
+
+func (p *panel) hostsNow() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Clone(p.hosts)
+}
+
+// chooseConfig asks the person, with the system's own directory chooser, and
+// is why this runs inside an Act: the dialog blocks its goroutine, and a Bind
+// callback is off the UI thread by contract.
+func (p *panel) chooseConfig() {
+	if p.dialogs == nil {
+		p.setConfigProblem("choosing a directory needs the window; use -config on the command line here")
+		return
+	}
+	dir, err := p.dialogs.OpenDirectory(glaze.FileDialogOptions{Title: "Choose the configuration directory"})
+	if err != nil {
+		p.setConfigProblem(err.Error())
+		return
+	}
+	if dir == "" {
+		return
+	}
+	p.cfgMu.Lock()
+	p.cfgDir = dir
+	p.cfgMu.Unlock()
+	p.reloadFleet()
+}
+
+// reloadFleet re-reads the inventory under the configuration root and watches
+// what it now says. A tree that lists nothing is refused, not obeyed: an empty
+// window teaches nobody what went wrong.
+func (p *panel) reloadFleet() {
+	p.cfgMu.Lock()
+	dir := p.cfgDir
+	p.cfgMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	entries, err := readInventory(ctx, filepath.Join(dir, service.InventoryFile))
+	if err != nil {
+		p.setConfigProblem(err.Error())
+		return
+	}
+	if len(entries) == 0 {
+		p.setConfigProblem(fmt.Sprintf("no machine is listed in %s", filepath.Join(dir, service.InventoryFile)))
+		return
+	}
+	p.setConfigProblem("")
+
+	hosts := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		hosts = append(hosts, entry.Name)
+	}
+	p.mu.Lock()
+	kept := make(map[string]bool, len(hosts))
+	for _, host := range hosts {
+		kept[host] = true
+	}
+	for host, client := range p.clients {
+		if kept[host] {
+			continue
+		}
+		_ = client.Close()
+		delete(p.clients, host)
+	}
+	p.hosts = hosts
+	p.mu.Unlock()
+	p.wake()
+}
+
+func (p *panel) setConfigProblem(text string) {
+	p.cfgMu.Lock()
+	defer p.cfgMu.Unlock()
+	p.cfgProblem = text
+}
+
+// What the Settings page says. The version comes from the binary; the rest is
+// what this window is pointed at right now.
+func (p *panel) settings() settingsInfo {
+	p.cfgMu.Lock()
+	defer p.cfgMu.Unlock()
+	return settingsInfo{
+		ConfigDir: p.cfgDir,
+		Inventory: filepath.Join(p.cfgDir, service.InventoryFile),
+		Machines:  len(p.hostsNow()),
+		Problem:   p.cfgProblem,
+	}
 }
 
 func (p *panel) one(ctx context.Context, host string, fromMS, toMS float64, since uint64) fleetHost {
@@ -341,6 +452,7 @@ func runGUI(ctx context.Context, opt options, args []string) (int, error) {
 	defer window.Destroy()
 
 	view.emit = window.Eval
+	view.dialogs = window
 	// The bridge the clicks ride: window.hostd_act in the page is Act here.
 	_, err = glaze.BindMethods(window, "hostd", view)
 	if err != nil {
@@ -348,6 +460,9 @@ func runGUI(ctx context.Context, opt options, args []string) (int, error) {
 	}
 	window.SetTitle("hostd")
 	window.SetSize(1100, 760, glaze.HintNone)
+	// The floor is a phone screen: below it the layout has nothing left to
+	// give up, and a window dragged to a sliver reads as the app vanishing.
+	window.SetSize(390, 700, glaze.HintMin)
 	// A machine with no menu bar is not a reason to refuse to watch the fleet;
 	// it only means the keyboard shortcuts belong to the platform.
 	bar, err := install(window)

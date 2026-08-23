@@ -4,7 +4,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -458,3 +460,192 @@ func (b *boundNames) OpenFile(glaze.FileDialogOptions) (string, error)      { re
 func (b *boundNames) OpenFiles(glaze.FileDialogOptions) ([]string, error)   { return nil, nil }
 func (b *boundNames) SaveFile(glaze.FileDialogOptions) (string, error)      { return "", nil }
 func (b *boundNames) OpenDirectory(glaze.FileDialogOptions) (string, error) { return "", nil }
+
+// The Settings page: the person who never touches a terminal can still see
+// where the tree lives, point the panel somewhere else, and read what this
+// binary is.
+func TestTheSettingsPageSaysWhereTheTreeLives(t *testing.T) {
+	view := probePanel(t)
+	view.cfgDir = "/somewhere/fleet"
+	page := get(t, view, "/act/select/settings").Body.String()
+	for _, expected := range []string{"Settings", "/somewhere/fleet", "inventory.filo", "config/choose", "config/reload"} {
+		if !strings.Contains(page, expected) {
+			t.Fatalf("the settings page is missing %q: %s", expected, page)
+		}
+	}
+	tree := get(t, view, "/").Body.String()
+	if !strings.Contains(tree, `data-act="select/settings"`) {
+		t.Fatalf("the tree has no way to reach the settings: %s", tree)
+	}
+}
+
+// Reload re-reads the inventory under the root, and what the tree stopped
+// listing is let go of, connection included.
+func TestReloadRereadsTheInventory(t *testing.T) {
+	view := probePanel(t)
+	dir := t.TempDir()
+	view.cfgDir = dir
+	inventory := filepath.Join(dir, "inventory.filo")
+	err := os.WriteFile(inventory, []byte(`(inventory
+	  (host (tuple "name" "yuki"))
+	  (host (tuple "name" "fresh.local")))`), 0o600)
+	if err != nil {
+		t.Fatalf("write inventory: %v", err)
+	}
+
+	get(t, view, "/act/config/reload")
+	hosts := view.hostsNow()
+	if !slices.Equal(hosts, []string{"yuki", "fresh.local"}) {
+		t.Fatalf("the panel watches %v after the reload", hosts)
+	}
+	if view.settings().Problem != "" {
+		t.Fatalf("a good reload left a problem: %q", view.settings().Problem)
+	}
+
+	// A tree that lists nothing is refused, and what was watched stays.
+	err = os.WriteFile(inventory, []byte(`(inventory)`), 0o600)
+	if err != nil {
+		t.Fatalf("rewrite inventory: %v", err)
+	}
+	get(t, view, "/act/config/reload")
+	if !slices.Equal(view.hostsNow(), []string{"yuki", "fresh.local"}) {
+		t.Fatal("an empty inventory was obeyed")
+	}
+	if view.settings().Problem == "" {
+		t.Fatal("an empty inventory was refused in silence")
+	}
+}
+
+// Outside the window there is no native chooser; the page says so instead of
+// doing nothing, because a button that silently does nothing is a defect
+// nobody can report.
+func TestChoosingWithoutAWindowSaysSo(t *testing.T) {
+	view := probePanel(t)
+	get(t, view, "/act/config/choose")
+	if view.settings().Problem == "" {
+		t.Fatal("choose without a window said nothing")
+	}
+}
+
+// Icons come with the binary, never from a network, and every one the page
+// asks for has to exist: a missing icon would render as nothing at all.
+func TestEveryIconThePageAsksForIsCarried(t *testing.T) {
+	page, err := ui.ReadFile("ui/panel.tmpl")
+	if err != nil {
+		t.Fatalf("read panel.tmpl: %v", err)
+	}
+	asked := regexp.MustCompile(`icon "([a-z0-9-]+)"`).FindAllStringSubmatch(string(page), -1)
+	if len(asked) == 0 {
+		t.Fatal("the page asks for no icon; the pattern this test matches must have changed")
+	}
+	for _, match := range asked {
+		_, err := iconSVG(match[1])
+		if err != nil {
+			t.Fatalf("the page asks for the %q icon and the binary does not carry it", match[1])
+		}
+	}
+	// The ones chosen in Go rather than in the template.
+	view := probePanel(t)
+	for _, path := range []string{"/", "/act/select/settings", "/act/select/host/yuki"} {
+		body := get(t, view, path).Body.String()
+		if strings.Contains(body, "<svg") && strings.Contains(body, "http") {
+			t.Fatalf("%s draws an icon from the network", path)
+		}
+	}
+}
+
+// The window has a floor, and the layout below it has a way to give the screen
+// back: a sidebar that hides and a hamburger that returns it.
+func TestTheWindowHasAFloorAndTheSidebarCanHide(t *testing.T) {
+	source, err := os.ReadFile("gui.go")
+	if err != nil {
+		t.Fatalf("read gui.go: %v", err)
+	}
+	if !strings.Contains(string(source), "glaze.HintMin") {
+		t.Fatal("the window can be dragged to nothing; it has no minimum size")
+	}
+	script, err := ui.ReadFile("ui/app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	for _, needed := range []string{"matchMedia", "hideNav", `el("reveal")`} {
+		if !strings.Contains(string(script), needed) {
+			t.Fatalf("the narrow layout has no %s", needed)
+		}
+	}
+	page, err := ui.ReadFile("ui/panel.tmpl")
+	if err != nil {
+		t.Fatalf("read panel.tmpl: %v", err)
+	}
+	if !strings.Contains(string(page), `id="reveal"`) {
+		t.Fatal("there is no way to bring the sidebar back")
+	}
+}
+
+// A window that sits perfectly still while four machines are being reached for
+// the first time reads as a frozen one. It says it is working — but only when
+// the round is slow enough for a person to wonder, or the indicator would
+// blink on every tick and the wire would never be quiet.
+func TestTheWindowIsToldWhenTheFleetIsSlow(t *testing.T) {
+	view := probePanel(t)
+	var pushes []string
+	view.emit = func(js string) { pushes = append(pushes, js) }
+	get(t, view, "/")
+
+	// A round that answers at once says nothing at all.
+	finished := make(chan struct{})
+	close(finished)
+	view.sayIfSlow(finished)
+	if len(pushes) != 0 {
+		t.Fatalf("a quick round announced itself: %q", pushes)
+	}
+
+	// One that drags says so, once.
+	view.working(true)
+	if len(pushes) != 1 || !strings.Contains(pushes[0], "spinner") {
+		t.Fatalf("a slow round did not raise the indicator: %q", pushes)
+	}
+	view.working(true)
+	if len(pushes) != 1 {
+		t.Fatal("the indicator was raised twice for one state")
+	}
+	view.working(false)
+	if len(pushes) != 2 || strings.Contains(pushes[1], "spinner") {
+		t.Fatalf("the indicator was not lowered: %q", pushes)
+	}
+}
+
+// Before the first answer the window already says it is working: that is the
+// round the operator is most likely to mistake for a freeze.
+func TestTheFirstPaintAlreadySaysItIsWorking(t *testing.T) {
+	view, err := newPanel(options{}, []string{"yuki"})
+	if err != nil {
+		t.Fatalf("newPanel: %v", err)
+	}
+	page := get(t, view, "/").Body.String()
+	if !strings.Contains(page, "spinner") || !strings.Contains(page, "asking the fleet") {
+		t.Fatalf("the first paint looks idle: %s", page)
+	}
+}
+
+// The window buttons and the log are about the machines. A page about the
+// panel itself shows neither: a control that governs nothing on screen is a
+// control that lies about what it does.
+func TestTheSettingsPageHasNoFleetControls(t *testing.T) {
+	view := probePanel(t)
+	get(t, view, "/")
+
+	settings := get(t, view, "/act/select/settings").Body.String()
+	if strings.Contains(settings, `id="windows"`) {
+		t.Fatalf("the settings page offers a time window: %s", settings)
+	}
+	if !strings.Contains(settings, `data-log="off"`) {
+		t.Fatalf("the settings page does not put the log away: %s", settings)
+	}
+
+	// And a page that IS about the machines keeps both.
+	watching := get(t, view, "/act/select/host/yuki").Body.String()
+	if !strings.Contains(watching, `id="windows"`) || !strings.Contains(watching, `data-log="on"`) {
+		t.Fatalf("a machine's page lost its controls: %s", watching)
+	}
+}
