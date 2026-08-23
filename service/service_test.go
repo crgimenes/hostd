@@ -269,3 +269,55 @@ func TestLoadDirCannotDuplicateAService(t *testing.T) {
 		t.Fatalf("the valid file should still load: %#v", services)
 	}
 }
+
+func TestVolumesSayWhatTheyAre(t *testing.T) {
+	src := `(service
+	  (tuple "name" "site")
+	  (tuple "kind" "container")
+	  (tuple "image" "site:1")
+	  (tuple "volumes" (list "certs:/data" "/srv/www:/srv/www:ro")))`
+	svc, err := Parse(context.Background(), "site.filo", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	mounts, err := svc.Mounts()
+	if err != nil {
+		t.Fatalf("Mounts: %v", err)
+	}
+	if len(mounts) != 2 {
+		t.Fatalf("got %d mounts", len(mounts))
+	}
+	if mounts[0] != (Mount{Source: "certs", Target: "/data", Named: true}) {
+		t.Fatalf("named storage parsed as %#v", mounts[0])
+	}
+	if mounts[1] != (Mount{Source: "/srv/www", Target: "/srv/www", ReadOnly: true}) {
+		t.Fatalf("a path from the machine parsed as %#v", mounts[1])
+	}
+}
+
+// Handing a container the runtime's socket hands it the machine, and it looks
+// like an ordinary line in an ordinary file.
+func TestTheRuntimeSocketCannotBeMounted(t *testing.T) {
+	src := `(service (tuple "name" "site") (tuple "kind" "container") (tuple "image" "site:1")
+	  (tuple "volumes" (list "/var/run/docker.sock:/var/run/docker.sock")))`
+	_, err := Parse(context.Background(), "site.filo", src)
+	if err == nil {
+		t.Fatal("a container was given the runtime's socket")
+	}
+	if !strings.Contains(err.Error(), "this machine") {
+		t.Fatalf("the refusal does not say what it grants: %v", err)
+	}
+}
+
+func TestABrokenVolumeIsRefusedWhereItIsWritten(t *testing.T) {
+	table := []string{"/data", "certs:data", "certs:/data:rx", "srv/www:/srv/www", ":/data"}
+	for _, spec := range table {
+		t.Run(spec, func(t *testing.T) {
+			src := `(service (tuple "name" "site") (tuple "kind" "container") (tuple "image" "site:1") (tuple "volumes" (list "` + spec + `")))`
+			_, err := Parse(context.Background(), "site.filo", src)
+			if err == nil {
+				t.Fatalf("the volume %q was accepted", spec)
+			}
+		})
+	}
+}

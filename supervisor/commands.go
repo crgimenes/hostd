@@ -190,5 +190,6 @@ func sameDefinition(a, b service.Service) bool {
 	if a.Image != b.Image || a.Memory != b.Memory || a.CPUs != b.CPUs {
 		return false
 	}
-	return slices.Equal(a.Args, b.Args) && slices.Equal(a.Env, b.Env) && slices.Equal(a.Ports, b.Ports)
+	return slices.Equal(a.Args, b.Args) && slices.Equal(a.Env, b.Env) &&
+		slices.Equal(a.Ports, b.Ports) && slices.Equal(a.Volumes, b.Volumes)
 }

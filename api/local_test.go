@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"io"
+	"os"
 	"os/user"
 	"runtime"
 	"strings"
@@ -73,15 +74,21 @@ func TestTheActorIsTheAccountOnTheOtherEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("current user: %v", err)
 	}
+	// Through sudo the kernel sees root, and the operator's own name is what
+	// the audit should carry alongside it.
+	want := me.Username
+	behind := os.Getenv("SUDO_USER")
+	if me.Username == "root" && behind != "" {
+		want = behind + " (root)"
+	}
 	recent := f.store.Recent(1)
 	if len(recent) != 1 {
 		t.Fatalf("the operation was not audited: %#v", recent)
 	}
-	// Root through sudo carries the operator's own name alongside it.
-	if recent[0].Actor != me.Username && !strings.HasPrefix(recent[0].Actor, me.Username+" ") {
-		t.Fatalf("the audit names %q, expected the account that connected (%s)", recent[0].Actor, me.Username)
+	if recent[0].Actor != want {
+		t.Fatalf("the audit names %q, expected %q", recent[0].Actor, want)
 	}
-	if recent[0].Actor == state.ActorLocal && me.Username != state.ActorLocal {
+	if recent[0].Actor == state.ActorLocal && want != state.ActorLocal {
 		t.Fatal("the identity fell back to the machine when the kernel could have named the account")
 	}
 }

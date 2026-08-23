@@ -285,3 +285,91 @@ func TestTheRealRuntimeAnswers(t *testing.T) {
 		t.Fatalf("List: %v", err)
 	}
 }
+
+// Services find each other by name on the host's own network, which is what
+// lets an application publish nothing to the machine and still be reachable by
+// whatever answers the internet.
+func TestCreateJoinsTheSharedNetworkUnderTheServiceName(t *testing.T) {
+	var body map[string]any
+	client := fakeRuntime(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		_, _ = w.Write([]byte(`{"Id":"abc"}`))
+	}))
+
+	_, err := client.Create(context.Background(), Spec{
+		Name:    "hostd-site",
+		Image:   "site:1",
+		Network: "hostd",
+		Alias:   "site",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	networking, ok := body["NetworkingConfig"].(map[string]any)
+	if !ok {
+		t.Fatalf("the container was not put on a network: %#v", body)
+	}
+	endpoints, _ := networking["EndpointsConfig"].(map[string]any)
+	endpoint, ok := endpoints["hostd"].(map[string]any)
+	if !ok {
+		t.Fatalf("the endpoint is %#v", endpoints)
+	}
+	aliases, _ := endpoint["Aliases"].([]any)
+	if len(aliases) != 1 || aliases[0] != "site" {
+		t.Fatalf("the service answers to %v, expected its own name", aliases)
+	}
+}
+
+// Named storage and a path from the machine are different things, and the
+// request has to say which is which.
+func TestMountsSayWhatTheyAre(t *testing.T) {
+	var body map[string]any
+	client := fakeRuntime(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		_, _ = w.Write([]byte(`{"Id":"abc"}`))
+	}))
+
+	_, err := client.Create(context.Background(), Spec{
+		Name:  "hostd-site",
+		Image: "site:1",
+		Mounts: []Mount{
+			{Source: "hostd-site-certs", Target: "/data", Named: true},
+			{Source: "/srv/www", Target: "/srv/www", ReadOnly: true},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	host, _ := body["HostConfig"].(map[string]any)
+	mounts, _ := host["Mounts"].([]any)
+	if len(mounts) != 2 {
+		t.Fatalf("got %d mounts: %#v", len(mounts), host["Mounts"])
+	}
+	named, _ := mounts[0].(map[string]any)
+	if named["Type"] != "volume" || named["Source"] != "hostd-site-certs" || named["ReadOnly"] != false {
+		t.Fatalf("named storage came out as %#v", named)
+	}
+	bind, _ := mounts[1].(map[string]any)
+	if bind["Type"] != "bind" || bind["Target"] != "/srv/www" || bind["ReadOnly"] != true {
+		t.Fatalf("a path from the machine came out as %#v", bind)
+	}
+}
+
+// Two daemons starting at once both find the network missing; the one that
+// loses the race is told it exists, which is the state it wanted.
+func TestEnsureNetworkAcceptsLosingTheRace(t *testing.T) {
+	client := fakeRuntime(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"message":"network hostd not found"}`))
+			return
+		}
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"message":"network with name hostd already exists"}`))
+	}))
+
+	err := client.EnsureNetwork(context.Background(), "hostd")
+	if err != nil {
+		t.Fatalf("losing the race was reported as a failure: %v", err)
+	}
+}

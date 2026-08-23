@@ -20,6 +20,17 @@ import (
 // machine running no containers.
 const labelService = "hostd.service"
 
+// The network every service of this host shares. A service reaches another by
+// its own name on it, which is why an application needs no port published to
+// the machine at all: the only thing that has to be reachable from outside is
+// whatever answers the internet.
+const Network = "hostd"
+
+// Named storage carries the service in its name: two services asking for
+// "data" are asking for their own, and sharing has to be deliberate rather
+// than a collision.
+func volumeName(service, volume string) string { return "hostd-" + service + "-" + volume }
+
 // A container name derived from the service name, so an operator running
 // docker ps sees which service a container belongs to without a lookup.
 func containerName(service string) string { return "hostd-" + service }
@@ -70,6 +81,14 @@ func (s *Supervisor) startContainer(p *proc, now time.Time) error {
 	if err != nil {
 		return err
 	}
+	mounts, err := s.prepareMounts(ctx, p.svc)
+	if err != nil {
+		return err
+	}
+	err = s.runtime.EnsureNetwork(ctx, Network)
+	if err != nil {
+		return err
+	}
 	// The tag in the file is a name that can be made to mean something else
 	// tomorrow. What ran is recorded as the digest, so "the same image" stays
 	// a checkable claim.
@@ -93,9 +112,12 @@ func (s *Supervisor) startContainer(p *proc, now time.Time) error {
 		Env:     p.svc.Env,
 		Dir:     p.svc.Dir,
 		Ports:   toDockerPorts(ports),
+		Mounts:  mounts,
 		Labels:  map[string]string{labelService: p.svc.Name},
 		Memory:  int64(p.svc.Memory) * 1024 * 1024,
 		NanoCPU: int64(p.svc.CPUs * 1e9),
+		Network: Network,
+		Alias:   p.svc.Name,
 	})
 	if err != nil {
 		return err
@@ -136,6 +158,34 @@ func (s *Supervisor) startContainer(p *proc, now time.Time) error {
 	go s.waitContainer(p.svc.Name, id)
 	go s.followContainer(p.svc.Name, id, time.Time{})
 	return nil
+}
+
+// Named storage is created if it is not there and never removed here: a
+// service that goes away leaves its data behind, because deleting somebody's
+// data is not a decision for a converge loop.
+func (s *Supervisor) prepareMounts(ctx context.Context, svc service.Service) ([]docker.Mount, error) {
+	declared, err := svc.Mounts()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]docker.Mount, 0, len(declared))
+	for _, mount := range declared {
+		source := mount.Source
+		if mount.Named {
+			source = volumeName(svc.Name, mount.Source)
+			err = s.runtime.EnsureVolume(ctx, source, map[string]string{labelService: svc.Name})
+			if err != nil {
+				return nil, err
+			}
+		}
+		out = append(out, docker.Mount{
+			Source:   source,
+			Target:   mount.Target,
+			ReadOnly: mount.ReadOnly,
+			Named:    mount.Named,
+		})
+	}
+	return out, nil
 }
 
 func toDockerPorts(ports []service.Port) []docker.Port {

@@ -276,3 +276,67 @@ func TestANewImageIsAChange(t *testing.T) {
 		t.Fatal("a container with another memory ceiling was read as unchanged")
 	}
 }
+
+// The proxy case, which is why the shared network exists: one service reaches
+// another by its own name, so an application publishes nothing to the machine
+// and only whatever answers the internet does.
+func TestServicesReachEachOtherByName(t *testing.T) {
+	client, image := requireRuntime(t)
+	h := newHarness(t)
+	cleanup(t, client, testService)
+	h.sup = New(h.dirs, h.buffer)
+	h.sup.Runtime(client)
+
+	svc := container(testService, image, `echo reached-by-name > /tmp/i.html; httpd -f -p 80 -h /tmp`)
+	err := h.sup.Adopt(context.Background(), []service.Service{svc})
+	if err != nil {
+		t.Fatalf("Adopt: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	h.cancel = cancel
+	go h.sup.Run(ctx)
+	defer h.stop()
+	h.waitFor("the service to be running", func() bool { return h.status(testService).State == StateRunning })
+
+	// A second container on the same network, asking for the service by the
+	// name the file gave it. Nothing is published to the machine.
+	probe := "hostd-suite-caller"
+	callCtx, callCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer callCancel()
+	t.Cleanup(func() {
+		removeCtx, removeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer removeCancel()
+		_ = client.Remove(removeCtx, probe)
+	})
+	_ = client.Remove(callCtx, probe)
+	id, err := client.Create(callCtx, docker.Spec{
+		Name:    probe,
+		Image:   image,
+		Args:    []string{"wget", "-q", "-T", "10", "-O-", "http://" + testService + "/i.html"},
+		Network: Network,
+		Alias:   probe,
+	})
+	if err != nil {
+		t.Fatalf("create the caller: %v", err)
+	}
+	err = client.Start(callCtx, id)
+	if err != nil {
+		t.Fatalf("start the caller: %v", err)
+	}
+	code, err := client.Wait(callCtx, id)
+	if err != nil {
+		t.Fatalf("wait for the caller: %v", err)
+	}
+
+	var answer string
+	err = client.Logs(callCtx, id, time.Time{}, func(line docker.Line) error {
+		answer += line.Text
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("read the caller's output: %v", err)
+	}
+	if code != 0 || !strings.Contains(answer, "reached-by-name") {
+		t.Fatalf("one service could not reach another by name: exit %d, output %q", code, answer)
+	}
+}

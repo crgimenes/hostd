@@ -56,10 +56,67 @@ type Service struct {
 	// machine. Nothing is published that was not asked for, and a port with no
 	// address binds to loopback, where a reverse proxy on the same host
 	// reaches it and the internet does not.
-	Image  string   `filo:"image"`
-	Ports  []string `filo:"ports"`
-	Memory float64  `filo:"memory-mb"`
-	CPUs   float64  `filo:"cpus"`
+	Image string   `filo:"image"`
+	Ports []string `filo:"ports"`
+	// Storage that outlives the container: "name:/path" is the runtime's to
+	// keep, "/host/path:/path" is the machine's. Nothing is mounted that the
+	// file did not name.
+	Volumes []string `filo:"volumes"`
+	Memory  float64  `filo:"memory-mb"`
+	CPUs    float64  `filo:"cpus"`
+}
+
+// Mount is a volume as the runtime needs it. A source with no slash is named
+// storage; anything else is a path on the machine.
+type Mount struct {
+	Source   string
+	Target   string
+	ReadOnly bool
+	Named    bool
+}
+
+func (s Service) Mounts() ([]Mount, error) {
+	out := make([]Mount, 0, len(s.Volumes))
+	for _, spec := range s.Volumes {
+		mount, err := parseMount(spec)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, mount)
+	}
+	return out, nil
+}
+
+// Handing a container the runtime's own socket hands it the machine, and it
+// looks like an ordinary line in an ordinary file. Everything else is the
+// operator's call, written down where it can be reviewed.
+var forbiddenMounts = []string{"/var/run/docker.sock", "/run/docker.sock", "/run/podman/podman.sock"}
+
+func parseMount(spec string) (Mount, error) {
+	fields := strings.Split(spec, ":")
+	readOnly := false
+	if len(fields) == 3 {
+		if fields[2] != "ro" && fields[2] != "rw" {
+			return Mount{}, fmt.Errorf("volume %q: the third field is ro or rw", spec)
+		}
+		readOnly = fields[2] == "ro"
+		fields = fields[:2]
+	}
+	if len(fields) != 2 {
+		return Mount{}, fmt.Errorf("volume %q must be source:/path, with an optional ro or rw after it", spec)
+	}
+	source, target := fields[0], fields[1]
+	if source == "" || !strings.HasPrefix(target, "/") {
+		return Mount{}, fmt.Errorf("volume %q: the path inside the container must be absolute", spec)
+	}
+	named := !strings.Contains(source, "/")
+	if !named && !strings.HasPrefix(source, "/") {
+		return Mount{}, fmt.Errorf("volume %q: a path on the machine must be absolute, and a volume name must not contain a slash", spec)
+	}
+	if !named && slices.Contains(forbiddenMounts, filepath.Clean(source)) {
+		return Mount{}, fmt.Errorf("volume %q: mounting the container runtime's socket gives the container this machine; if a service really needs it, run it outside hostd", spec)
+	}
+	return Mount{Source: source, Target: target, ReadOnly: readOnly, Named: named}, nil
 }
 
 // Port is a published port as the runtime needs it, parsed from the form an
@@ -221,6 +278,10 @@ func (s *Service) normalizeContainer() error {
 		return invalid("%s: a container service runs the image's own command; put arguments in args", s.Name)
 	}
 	_, err := s.PublishedPorts()
+	if err != nil {
+		return invalid("%s: %v", s.Name, err)
+	}
+	_, err = s.Mounts()
 	if err != nil {
 		return invalid("%s: %v", s.Name, err)
 	}

@@ -160,9 +160,32 @@ type Spec struct {
 	Env     []string
 	Dir     string
 	Ports   []Port
+	Mounts  []Mount
 	Labels  map[string]string
 	Memory  int64
 	NanoCPU int64
+	// The network the services of this host share, and the name this one
+	// answers to on it. A proxy reaches an application by its service name,
+	// which is why an application needs no published port at all.
+	Network string
+	Alias   string
+}
+
+// Mount is storage that outlives the container. Named storage is the runtime's
+// to keep; a path from the machine is the operator's, and saying which is
+// which is the whole difference.
+type Mount struct {
+	Source   string
+	Target   string
+	ReadOnly bool
+	Named    bool
+}
+
+func (m Mount) kind() string {
+	if m.Named {
+		return "volume"
+	}
+	return "bind"
 }
 
 type Port struct {
@@ -202,6 +225,15 @@ func (c *Client) Create(ctx context.Context, spec Spec) (string, error) {
 			"HostPort": fmt.Sprint(port.HostPort),
 		})
 	}
+	mounts := make([]map[string]any, 0, len(spec.Mounts))
+	for _, mount := range spec.Mounts {
+		mounts = append(mounts, map[string]any{
+			"Type":     mount.kind(),
+			"Source":   mount.Source,
+			"Target":   mount.Target,
+			"ReadOnly": mount.ReadOnly,
+		})
+	}
 	body := map[string]any{
 		"Image":        spec.Image,
 		"Cmd":          spec.Args,
@@ -210,6 +242,7 @@ func (c *Client) Create(ctx context.Context, spec Spec) (string, error) {
 		"ExposedPorts": exposed,
 		"HostConfig": map[string]any{
 			"PortBindings":  bindings,
+			"Mounts":        mounts,
 			"RestartPolicy": map[string]any{"Name": "no"},
 			"Memory":        spec.Memory,
 			"NanoCpus":      spec.NanoCPU,
@@ -222,6 +255,13 @@ func (c *Client) Create(ctx context.Context, spec Spec) (string, error) {
 	}
 	if spec.Dir != "" {
 		body["WorkingDir"] = spec.Dir
+	}
+	if spec.Network != "" {
+		body["NetworkingConfig"] = map[string]any{
+			"EndpointsConfig": map[string]any{
+				spec.Network: map[string]any{"Aliases": []string{spec.Alias}},
+			},
+		}
 	}
 	var created struct {
 		ID string `json:"Id"`
@@ -356,6 +396,44 @@ func (c *Client) Wait(ctx context.Context, id string) (int, error) {
 		return result.StatusCode, errors.New(result.Error.Message)
 	}
 	return result.StatusCode, nil
+}
+
+// EnsureNetwork creates the network the host's services share, if it is not
+// there. Services find each other by name on it, which is what lets a proxy
+// reach an application that publishes nothing to the machine.
+func (c *Client) EnsureNetwork(ctx context.Context, name string) error {
+	err := c.call(ctx, http.MethodGet, "/networks/"+url.PathEscape(name), nil, nil, nil)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	body := map[string]any{"Name": name, "Driver": "bridge"}
+	err = c.call(ctx, http.MethodPost, "/networks/create", nil, body, nil)
+	// Two daemons starting at once both find it missing and both create it;
+	// the second is told it exists, which is the state it wanted.
+	if err != nil && !strings.Contains(err.Error(), "already exists") {
+		return err
+	}
+	return nil
+}
+
+// EnsureVolume creates named storage if it is not there. It is never removed
+// here: a service that goes away leaves its data behind, because deleting
+// somebody's data is not something a converge loop should decide.
+func (c *Client) EnsureVolume(ctx context.Context, name string, labels map[string]string) error {
+	err := c.call(ctx, http.MethodGet, "/volumes/"+url.PathEscape(name), nil, nil, nil)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	return c.call(ctx, http.MethodPost, "/volumes/create", nil, map[string]any{
+		"Name":   name,
+		"Labels": labels,
+	}, nil)
 }
 
 // ImageDigest is what the declaration is pinned to. A tag is a name that can

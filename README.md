@@ -88,7 +88,7 @@ A container is the same file with another kind:
   (tuple "name" "site")
   (tuple "kind" "container")
   (tuple "image" "site:2026-08-23")
-  (tuple "ports" (list "8080:80"))
+  (tuple "volumes" (list "data:/data" "/etc/hostd/site:/etc/site:ro"))
   (tuple "memory-mb" 256)
   (tuple "restart" "always"))
 ```
@@ -107,6 +107,29 @@ the runtime what it already owns, by label, and adopts it. Container output
 lands in the same timeline as the events about it, and the started event names
 the digest that actually ran, because a tag can be made to mean something else
 tomorrow.
+
+Every service of a host shares one network, and answers on it by its own name.
+That is why the example above publishes nothing to the machine: a reverse proxy
+in front of it reaches `http://site` directly, and the only thing that has to
+be published is whatever answers the internet.
+
+```lisp
+(service
+  (tuple "name" "caddy")
+  (tuple "kind" "container")
+  (tuple "image" "caddy:2-alpine")
+  (tuple "ports" (list "0.0.0.0:80:80" "0.0.0.0:443:443"))
+  (tuple "volumes" (list "/etc/hostd/caddy:/etc/caddy:ro" "data:/data"))
+  (tuple "restart" "always"))
+```
+
+`volumes` says what outlives the container. A source with no slash is storage
+the runtime keeps, created if absent and named after the service that asked for
+it (`data` becomes `hostd-caddy-data`); anything else is an absolute path on the
+machine. Removing a service never removes its storage — deleting somebody's data
+is not a decision a converge loop should make. The runtime's own socket cannot
+be mounted: handing a container that socket hands it the machine, and it looks
+like an ordinary line in an ordinary file.
 
 Docker is the runtime; Podman answers the same API on its own socket, and
 whichever is present is the one used.
