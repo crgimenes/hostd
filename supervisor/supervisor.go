@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/crgimenes/hostd/docker"
 	"github.com/crgimenes/hostd/logs"
 	"github.com/crgimenes/hostd/procid"
 	"github.com/crgimenes/hostd/service"
@@ -74,6 +75,10 @@ type proc struct {
 	// nil for an adopted process: hostd supervises it without being its
 	// parent, so it can neither wait on it nor read its exit code.
 	cmd *exec.Cmd
+	// Set for a container service: what the runtime is holding on hostd's
+	// behalf, and where its log reader got to.
+	container string
+	logSince  time.Time
 
 	running  bool
 	stopping bool
@@ -97,9 +102,10 @@ type proc struct {
 }
 
 type Supervisor struct {
-	dirs Dirs
-	log  *logs.Store
-	now  func() time.Time
+	dirs    Dirs
+	log     *logs.Store
+	runtime *docker.Client
+	now     func() time.Time
 
 	mu       sync.Mutex
 	procs    map[string]*proc
@@ -187,7 +193,14 @@ func (s *Supervisor) Adopt(ctx context.Context, declared []service.Service) erro
 		s.procs[svc.Name] = &proc{svc: svc}
 	}
 
+	err = errors.Join(err, s.adoptContainers(ctx, states))
+
 	for name, st := range states {
+		if st.Container != "" {
+			// Containers are adopted from the runtime, which knows better than
+			// a file whether they are still running.
+			continue
+		}
 		_, declaredStill := byName[name]
 		alive := procid.Matches(st.PID, st.Token)
 		switch {

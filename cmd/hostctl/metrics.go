@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
+	"io"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -13,6 +13,7 @@ import (
 )
 
 func runMetrics(ctx context.Context, client *api.Client, opt options) (int, error) {
+	out := opt.out
 	req := api.Request{
 		Op:      api.OpMetrics,
 		Scope:   opt.scope,
@@ -43,22 +44,22 @@ func runMetrics(ctx context.Context, client *api.Client, opt options) (int, erro
 		return exitFailed, err
 	}
 	emit(opt, resp.Body, func() {
-		fmt.Printf("host %s, generation %d\n", client.Target(), resp.Generation)
+		_, _ = fmt.Fprintf(out, "host %s, generation %d\n", client.Target(), resp.Generation)
 		if len(series) == 0 {
-			fmt.Println("nothing has been sampled yet; hostd samples every " + metrics.SampleInterval.String())
+			_, _ = fmt.Fprintln(out, "nothing has been sampled yet; hostd samples every "+metrics.SampleInterval.String())
 			return
 		}
 		if opt.window > 0 {
-			printWindow(series)
+			printWindow(out, series)
 			return
 		}
-		printLatest(series, now)
+		printLatest(out, series, now)
 	})
 	return exitOK, nil
 }
 
-func printLatest(series []metrics.Series, now time.Time) {
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+func printLatest(out io.Writer, series []metrics.Series, now time.Time) {
+	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(w, "SCOPE\tNAME\tMETRIC\tVALUE\tAGE")
 	for _, s := range series {
 		if len(s.Points) == 0 {
@@ -74,8 +75,8 @@ func printLatest(series []metrics.Series, now time.Time) {
 
 // A window is a shape, not a number: the summary is what a person can read,
 // and -filo carries the points for anything that draws them.
-func printWindow(series []metrics.Series) {
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+func printWindow(out io.Writer, series []metrics.Series) {
+	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(w, "SCOPE\tNAME\tMETRIC\tPOINTS\tMIN\tAVG\tMAX\tLAST")
 	for _, s := range series {
 		if len(s.Points) == 0 {

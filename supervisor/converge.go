@@ -35,7 +35,9 @@ func (s *Supervisor) reconcile() {
 // A process hostd started is reaped by its wait goroutine; an adopted one can
 // only be checked by asking the kernel whether it is still the same process.
 func (s *Supervisor) observe(p *proc, now time.Time) {
-	if !p.running || p.cmd != nil {
+	// A container's end is reported by the goroutine waiting on the runtime,
+	// the same way a child's is reported by the one waiting on it.
+	if !p.running || p.cmd != nil || p.container != "" {
 		return
 	}
 	if procid.Matches(p.pid, p.token) {
@@ -63,6 +65,9 @@ func (s *Supervisor) maybeStart(p *proc, now time.Time) {
 }
 
 func (s *Supervisor) start(p *proc, now time.Time) error {
+	if p.svc.Kind == service.KindContainer {
+		return s.startContainer(p, now)
+	}
 	s.ensureTails(p)
 	out, err := logs.OpenSpool(s.dirs.Spool, p.svc.Name, logs.StreamOut)
 	if err != nil {
@@ -216,6 +221,13 @@ func (s *Supervisor) beginStop(p *proc, now time.Time) {
 	}
 	p.stopping = true
 	p.deadline = now.Add(p.svc.StopGrace())
+	if p.container != "" {
+		// The runtime asks, waits and kills; the call blocks for the whole
+		// grace, so it cannot happen under the supervisor's lock.
+		go s.stopContainer(p.svc.Name, p.container, p.svc.StopGrace())
+		s.event(logs.EventStopped, p.svc.Name, fmt.Sprintf("asked container %s to stop", short(p.container)))
+		return
+	}
 	err := signal(p.pid, syscall.SIGTERM)
 	if err != nil {
 		s.event(logs.EventProblem, p.svc.Name, fmt.Sprintf("could not signal process %d: %v", p.pid, err))
@@ -230,6 +242,11 @@ func (s *Supervisor) enforceStop(p *proc, now time.Time) {
 		return
 	}
 	if now.Before(p.deadline) {
+		return
+	}
+	// The runtime kills what did not stop within the grace, so there is
+	// nothing for hostd to send; what is left is to wait for the exit.
+	if p.container != "" {
 		return
 	}
 	if !p.killed {
@@ -367,7 +384,14 @@ func (s *Supervisor) savePositions(minInterval time.Duration) {
 	defer s.mu.Unlock()
 	now := s.now()
 	for _, p := range s.procs {
-		if !p.running || p.pid == 0 || p.outTail == nil {
+		if !p.running || p.pid == 0 {
+			continue
+		}
+		if p.container != "" {
+			s.saveContainerPosition(p, now, minInterval)
+			continue
+		}
+		if p.outTail == nil {
 			continue
 		}
 		out, errOff := p.outTail.Offset(), p.errTail.Offset()
@@ -390,6 +414,25 @@ func (s *Supervisor) savePositions(minInterval time.Duration) {
 		}
 		p.persistedOut, p.persistedErr, p.lastPersist = out, errOff, now
 	}
+}
+
+// The container's own position: the timestamp its log reader reached, which is
+// where the next hostd asks the runtime to resume from.
+func (s *Supervisor) saveContainerPosition(p *proc, now time.Time, minInterval time.Duration) {
+	if p.logSince.IsZero() || now.Sub(p.lastPersist) < minInterval {
+		return
+	}
+	err := writeState(s.dirs.State, procState{
+		Name:       p.svc.Name,
+		PID:        p.pid,
+		Container:  p.container,
+		StartedAt:  float64(p.started.UnixMilli()),
+		LogSinceMS: float64(p.logSince.UnixMilli()),
+	})
+	if err != nil {
+		return
+	}
+	p.lastPersist = now
 }
 
 // event records a fact about a service in the same timeline as its output, so

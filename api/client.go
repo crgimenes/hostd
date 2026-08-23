@@ -3,6 +3,7 @@ package api
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -11,8 +12,16 @@ import (
 
 const dialTimeout = 10 * time.Second
 
+// What a client talks over: the socket on this machine, or the pipes of an ssh
+// running the daemon's stdio mode on another. The protocol is the same either
+// way, which is what lets the transport be somebody else's problem.
+type transport interface {
+	io.ReadWriteCloser
+	SetDeadline(time.Time) error
+}
+
 type Client struct {
-	conn   net.Conn
+	conn   transport
 	reader *bufio.Reader
 	target string
 
@@ -26,7 +35,11 @@ func DialUnix(path string) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot reach hostd on %s: %w; is it running? check with systemctl status hostd", path, err)
 	}
-	return &Client{conn: conn, reader: bufio.NewReader(conn), target: path}, nil
+	return newClient(conn, path), nil
+}
+
+func newClient(conn transport, target string) *Client {
+	return &Client{conn: conn, reader: bufio.NewReader(conn), target: target}
 }
 
 func (c *Client) Close() error { return c.conn.Close() }
@@ -55,6 +68,8 @@ func (c *Client) do(ctx context.Context, req Request) (Response, error) {
 	if !ok {
 		deadline = time.Now().Add(requestTimeout)
 	}
+	// A pipe has no deadline of its own; what bounds it is the context ssh was
+	// started with, and cancelling that kills the command.
 	err := c.conn.SetDeadline(deadline)
 	if err != nil {
 		return Response{}, err
@@ -65,6 +80,13 @@ func (c *Client) do(ctx context.Context, req Request) (Response, error) {
 	}
 	var resp Response
 	err = ReadMessage(ctx, c.reader, &resp)
+	if errors.Is(err, io.EOF) {
+		// The bare "EOF" the reader returns names the mechanism and teaches
+		// nothing: what the operator needs is where to look.
+		return Response{}, fmt.Errorf(
+			"hostd on %s closed the connection without answering; it either restarted, or this user cannot open its socket",
+			c.target)
+	}
 	if err != nil {
 		return Response{}, err
 	}
@@ -75,7 +97,7 @@ func (c *Client) do(ctx context.Context, req Request) (Response, error) {
 // on it.
 func (c *Client) Follow(ctx context.Context, req Request, fn func(LogLine) error) error {
 	req.Op = OpLogFollow
-	err := c.conn.SetWriteDeadline(time.Now().Add(requestTimeout))
+	err := c.conn.SetDeadline(time.Now().Add(requestTimeout))
 	if err != nil {
 		return err
 	}
@@ -90,7 +112,7 @@ func (c *Client) Follow(ctx context.Context, req Request, fn func(LogLine) error
 		_ = c.conn.Close()
 	}()
 	for {
-		err = c.conn.SetReadDeadline(time.Time{})
+		err = c.conn.SetDeadline(time.Time{})
 		if err != nil {
 			return err
 		}

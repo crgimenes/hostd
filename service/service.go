@@ -8,17 +8,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/crgimenes/hostd/filoconf"
 )
 
-// Only exec exists today; container is accepted by the parser so it can be
-// rejected with an error that says it is not built yet.
 const (
 	KindExec      = "exec"
 	KindContainer = "container"
@@ -51,6 +51,67 @@ type Service struct {
 	State       string   `filo:"state"`
 	Restart     string   `filo:"restart"`
 	StopTimeout float64  `filo:"stop-timeout"`
+
+	// A container service: the image to run and what of it reaches the
+	// machine. Nothing is published that was not asked for, and a port with no
+	// address binds to loopback, where a reverse proxy on the same host
+	// reaches it and the internet does not.
+	Image  string   `filo:"image"`
+	Ports  []string `filo:"ports"`
+	Memory float64  `filo:"memory-mb"`
+	CPUs   float64  `filo:"cpus"`
+}
+
+// Port is a published port as the runtime needs it, parsed from the form an
+// operator already knows: [address:]host:container[/protocol].
+type Port struct {
+	HostIP        string
+	HostPort      int
+	ContainerPort int
+	Protocol      string
+}
+
+func (s Service) PublishedPorts() ([]Port, error) {
+	out := make([]Port, 0, len(s.Ports))
+	for _, spec := range s.Ports {
+		port, err := parsePort(spec)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, port)
+	}
+	return out, nil
+}
+
+func parsePort(spec string) (Port, error) {
+	rest, protocol, hasProtocol := strings.Cut(spec, "/")
+	if !hasProtocol {
+		protocol = "tcp"
+	}
+	if protocol != "tcp" && protocol != "udp" {
+		return Port{}, fmt.Errorf("port %q: protocol must be tcp or udp", spec)
+	}
+	fields := strings.Split(rest, ":")
+	var address string
+	switch len(fields) {
+	case 2:
+	case 3:
+		address, fields = fields[0], fields[1:]
+	default:
+		return Port{}, fmt.Errorf("port %q must be host:container, with an optional address before it", spec)
+	}
+	host, err := strconv.Atoi(fields[0])
+	if err != nil || host < 1 || host > 65535 {
+		return Port{}, fmt.Errorf("port %q: %q is not a port number", spec, fields[0])
+	}
+	inside, err := strconv.Atoi(fields[1])
+	if err != nil || inside < 1 || inside > 65535 {
+		return Port{}, fmt.Errorf("port %q: %q is not a port number", spec, fields[1])
+	}
+	if address != "" && net.ParseIP(address) == nil {
+		return Port{}, fmt.Errorf("port %q: %q is not an address", spec, address)
+	}
+	return Port{HostIP: address, HostPort: host, ContainerPort: inside, Protocol: protocol}, nil
 }
 
 func (s Service) StopGrace() time.Duration {
@@ -103,19 +164,25 @@ func (s *Service) normalize() error {
 	}
 	switch s.Kind {
 	case KindExec:
+		if s.Command == "" {
+			return invalid("%s: command is required", s.Name)
+		}
+		if !filepath.IsAbs(s.Command) {
+			return invalid("%s: command %q must be an absolute path", s.Name, s.Command)
+		}
+		if s.Image != "" || len(s.Ports) > 0 {
+			return invalid("%s: image and ports belong to a container service, not an exec one", s.Name)
+		}
+		if s.Dir != "" && !filepath.IsAbs(s.Dir) {
+			return invalid("%s: dir %q must be an absolute path", s.Name, s.Dir)
+		}
 	case KindContainer:
-		return invalid("%s: kind %q is not implemented yet; only %q works today", s.Name, KindContainer, KindExec)
+		err := s.normalizeContainer()
+		if err != nil {
+			return err
+		}
 	default:
 		return invalid("%s: unknown kind %q", s.Name, s.Kind)
-	}
-	if s.Command == "" {
-		return invalid("%s: command is required", s.Name)
-	}
-	if !filepath.IsAbs(s.Command) {
-		return invalid("%s: command %q must be an absolute path", s.Name, s.Command)
-	}
-	if s.Dir != "" && !filepath.IsAbs(s.Dir) {
-		return invalid("%s: dir %q must be an absolute path", s.Name, s.Dir)
 	}
 	for _, e := range s.Env {
 		if !strings.Contains(e, "=") {
@@ -139,6 +206,26 @@ func (s *Service) normalize() error {
 	}
 	if s.StopTimeout < 0 {
 		return invalid("%s: stop-timeout must not be negative", s.Name)
+	}
+	return nil
+}
+
+// The image is what a container service runs, so the command belongs to the
+// image and not to the file. Everything the container gets from the machine is
+// named here or it does not happen.
+func (s *Service) normalizeContainer() error {
+	if s.Image == "" {
+		return invalid("%s: image is required for a container service", s.Name)
+	}
+	if s.Command != "" {
+		return invalid("%s: a container service runs the image's own command; put arguments in args", s.Name)
+	}
+	_, err := s.PublishedPorts()
+	if err != nil {
+		return invalid("%s: %v", s.Name, err)
+	}
+	if s.Memory < 0 || s.CPUs < 0 {
+		return invalid("%s: memory-mb and cpus must not be negative", s.Name)
 	}
 	return nil
 }

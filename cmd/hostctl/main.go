@@ -13,6 +13,8 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -57,16 +59,31 @@ type options struct {
 	onBehalfOf string
 	dryRun     bool
 	debug      bool
+	host       string
+	hosts      []string
+	all        bool
+	tag        string
+	inventory  string
+	remote     string
 	scope      string
 	metric     string
-	window     time.Duration
-	step       time.Duration
+	// Where the answer goes. Stdout normally; a buffer per host when several
+	// machines are asked at once, so two answers never interleave.
+	out    io.Writer
+	window time.Duration
+	step   time.Duration
 }
 
 func run(args []string) int {
-	var opt options
+	opt := options{out: os.Stdout}
 	flags := flag.NewFlagSet("hostctl", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
+	flags.StringVar(&opt.host, "host", "", "machine to operate; without it, the hostd on this machine")
+	hosts := flags.String("hosts", "", "machines to operate, separated by commas")
+	flags.BoolVar(&opt.all, "all", false, "every machine listed in the inventory")
+	flags.StringVar(&opt.tag, "tag", "", "every machine carrying this tag in the inventory")
+	flags.StringVar(&opt.inventory, "inventory", "", "file listing the fleet (default inventory.filo in the hostd config directory)")
+	flags.StringVar(&opt.remote, "remote-command", "hostd -stdio", "what ssh runs on the machine to reach its daemon")
 	flags.StringVar(&opt.socket, "socket", "", "path to the hostd control socket")
 	flags.BoolVar(&opt.filoOut, "filo", false, "write the result as Filo and nothing else")
 	flags.IntVar(&opt.limit, "limit", 200, "maximum number of log lines")
@@ -108,9 +125,40 @@ func run(args []string) int {
 	if opt.socket == "" {
 		opt.socket = config.Locate().Socket()
 	}
+	err = opt.resolveClientPaths()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "hostctl: %v\n", err)
+		return exitUsage
+	}
+	if *hosts != "" {
+		opt.hosts = strings.Split(*hosts, ",")
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	chosen, err := opt.selection(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "hostctl: %v\n", err)
+		return exitUsage
+	}
+	if len(chosen) > 1 {
+		if opt.follow {
+			fmt.Fprintln(os.Stderr, "hostctl: -follow watches one machine at a time; name it with -host")
+			return exitUsage
+		}
+		// Optimistic control is per machine: a generation from one host means
+		// nothing on another, and claiming it on all of them would refuse
+		// every machine but one.
+		if opt.expectGen != 0 {
+			fmt.Fprintln(os.Stderr, "hostctl: -expect-generation applies to one machine; name it with -host")
+			return exitUsage
+		}
+		return fanOut(ctx, opt, chosen, rest)
+	}
+	if len(chosen) == 1 {
+		opt.host = chosen[0]
+	}
 
 	code, err := dispatch(ctx, opt, rest)
 	if err != nil {
@@ -143,6 +191,8 @@ func usage(flags *flag.FlagSet, w io.Writer) {
 	_, _ = fmt.Fprint(w, `hostctl operates hostd.
 
 usage:
+  hostctl -host <machine> status       operate a machine over the network
+  hostctl -all status                  ask every machine at once
   hostctl status                       what every service is doing
   hostctl describe                     versions and capabilities of the daemon
   hostctl service list                 same as status, by service
@@ -169,14 +219,51 @@ exit status:
   0 success   1 failed   2 bad arguments   3 no connection
   4 not authorised   5 partial success   6 refused, nothing changed
 
+the network:
+  -host names one machine, -hosts a few, -all every machine in the inventory,
+  and -tag those carrying a tag there. Several machines are asked at once and
+  each answer is printed whole under its host; exit 5 means some answered and
+  some did not.
+
+  Reaching a machine is ssh running "hostd -stdio" on it, so authentication,
+  host identity and the record of the attempt are sshd's, and no port of ours
+  is on the network. Membership of the hostd group on that machine is the
+  permission to operate it, and the audit records the account that did.
+
 example:
+  hostctl -host yuki.local status
+  hostctl -all metrics
   hostctl log -service api -follow
   hostctl metrics -service api -metric cpu-percent -window 30m
 `)
 }
 
+// The operator's own files, which live on the operator's machine: hostctl runs
+// where the person is, never on the host it operates.
+func (o *options) resolveClientPaths() error {
+	if o.inventory != "" {
+		return nil
+	}
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return err
+	}
+	o.inventory = filepath.Join(dir, "hostd", "inventory.filo")
+	return nil
+}
+
+// Reaching another machine is running the daemon's stdio mode there over ssh.
+// Authentication, host identity and the record of the attempt are sshd's, and
+// none of it is written again here.
+func connect(ctx context.Context, opt options) (*api.Client, error) {
+	if opt.host == "" {
+		return api.DialUnix(opt.socket)
+	}
+	return api.DialSSH(ctx, opt.host, strings.Fields(opt.remote))
+}
+
 func dispatch(ctx context.Context, opt options, args []string) (int, error) {
-	client, err := api.DialUnix(opt.socket)
+	client, err := connect(ctx, opt)
 	if err != nil {
 		return exitComms, err
 	}

@@ -81,6 +81,36 @@ real ones: `/etc/hostd`, `/var/lib/hostd`, `/run/hostd`.
 `kind` defaults to `exec`, `state` to `running`, `restart` to `always`.
 `dir`, `env` and `stop-timeout` are optional.
 
+A container is the same file with another kind:
+
+```lisp
+(service
+  (tuple "name" "site")
+  (tuple "kind" "container")
+  (tuple "image" "site:2026-08-23")
+  (tuple "ports" (list "8080:80"))
+  (tuple "memory-mb" 256)
+  (tuple "restart" "always"))
+```
+
+The image runs its own command, so `args` only overrides what it takes. What
+the container gets from the machine is what the file names and nothing else:
+no host network, no host process namespace, no devices, no added capabilities,
+never privileged. A port with no address in front of it binds to loopback,
+where a reverse proxy on the same host reaches it and the internet does not —
+`hostd` publishes the port and leaves the proxy to whoever owns it.
+
+Restarting is `hostd`'s job, so the runtime is told not to do it: two
+supervisors with different opinions about one process is how a service flaps.
+Restarting `hostd` does not restart the container either — the next daemon asks
+the runtime what it already owns, by label, and adopts it. Container output
+lands in the same timeline as the events about it, and the started event names
+the digest that actually ran, because a tag can be made to mean something else
+tomorrow.
+
+Docker is the runtime; Podman answers the same API on its own socket, and
+whichever is present is the one used.
+
 Filo is a language, not just a notation, so a file may compute a value — but it
 produces a declaration and never touches the machine. There is no builtin for
 files, network or processes in a configuration.
@@ -93,16 +123,77 @@ Installing is copying a binary and activating the service:
 deploy/install.sh yuki.local
 ```
 
-It reads the machine's architecture over ssh, cross-compiles `hostd` and
-`hostctl` for it, installs them in `/usr/local/bin` with the systemd unit,
-enables the service and asks the running daemon to describe itself — an
-answer with a different version means the restart did not take. It needs ssh
-access and either root or passwordless sudo, and installs nothing else.
+It reads the machine's architecture over ssh, cross-compiles `hostd` for it,
+installs it in `/usr/local/bin` with the systemd unit, enables the service and
+checks that the daemon which came up reports the version just installed — any
+other version means the restart did not take. It needs ssh access and either
+root or passwordless sudo, and installs nothing else.
+
+It also puts the account you ssh in as into the `hostd` group, which is the
+permission to operate that machine.
+
+Only the daemon goes on the machine. `hostctl` is the operator's client and
+runs on the operator's computer; a host that needs the client installed to be
+operated is a host you are still administering by ssh.
 
 Running it again is the upgrade path: the daemon is replaced and restarted,
 and the services under supervision keep running. The unit uses
 `KillMode=process` for exactly that reason — the default would kill every
 process in the unit's cgroup, which is every service `hostd` supervises.
+
+## Operating a machine from your own
+
+```bash
+hostctl -host yuki.local status
+hostctl -host yuki.local log -follow
+```
+
+Reaching a machine is `ssh` running `hostd -stdio` on it. Authentication, host
+identity and the record of the attempt are `sshd`'s, so **hostd puts no port on
+the network at all** — the daemon listens on a unix socket and nothing else.
+A key restricted with a forced command in `authorized_keys` is a permission this
+program did not have to invent:
+
+```
+command="/usr/local/bin/hostd -stdio" ssh-ed25519 AAAA... an-agent
+```
+
+Membership of the `hostd` group on the machine is what lets an account open the
+socket, and the audit log records that account by name — the kernel's answer to
+who is on the other end, not something the caller said about itself. Group
+membership is decided at login: after being added, open a new session (`ssh -O
+exit <host>` if you multiplex).
+
+## The fleet
+
+The fleet is a file you keep — which machines exist, and what to call groups of
+them. Reaching any of them is ssh's business, and ssh already knows its own
+hosts.
+
+```bash
+hostctl -all status                    every machine in the inventory
+hostctl -hosts yuki.local,m1.local plan
+hostctl -tag arm64 describe
+```
+
+`inventory.filo`, in the hostd directory of your config:
+
+```lisp
+(inventory
+  (host (tuple "name" "yuki.local") (tuple "tags" (list "amd64" "docker")))
+  (host (tuple "name" "cronos.local") (tuple "tags" (list "arm64" "dashboard"))))
+```
+
+Machines are asked at once, eight at a time, and each answer is printed whole
+under its host; a machine that did not answer says so in the same place, because
+which host is missing is part of the fleet's state. Exit `5` means some answered
+and some did not — an outcome of its own, since reading it as failure retries
+what already worked and reading it as success acts on a picture with a hole in
+it. With `-filo` the whole fleet comes back as one expression, each machine with
+its own exit code and body.
+
+`-follow` and `-expect-generation` name one machine: watching is a stream, and a
+generation from one host means nothing on another.
 
 ## Command line
 

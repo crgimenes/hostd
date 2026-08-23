@@ -184,5 +184,11 @@ func sameDefinition(a, b service.Service) bool {
 		a.Restart != b.Restart || a.StopTimeout != b.StopTimeout {
 		return false
 	}
-	return slices.Equal(a.Args, b.Args) && slices.Equal(a.Env, b.Env)
+	// A container that names another image, another port or another ceiling is
+	// another service: without this a deploy would leave the old image running
+	// and report nothing to change.
+	if a.Image != b.Image || a.Memory != b.Memory || a.CPUs != b.CPUs {
+		return false
+	}
+	return slices.Equal(a.Args, b.Args) && slices.Equal(a.Env, b.Env) && slices.Equal(a.Ports, b.Ports)
 }

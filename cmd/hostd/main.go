@@ -15,6 +15,7 @@ import (
 
 	"github.com/crgimenes/hostd/api"
 	"github.com/crgimenes/hostd/config"
+	"github.com/crgimenes/hostd/docker"
 	"github.com/crgimenes/hostd/logs"
 	"github.com/crgimenes/hostd/metrics"
 	"github.com/crgimenes/hostd/service"
@@ -30,6 +31,7 @@ func main() {
 	version.Set(Version)
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	debug := flag.Bool("debug", false, "write one key=value diagnostic line to stderr every 30s")
+	stdio := flag.Bool("stdio", false, "serve one client over stdin and stdout, which is how ssh reaches this daemon")
 	flag.Usage = func() {
 		_, _ = fmt.Print(`hostd supervises the services declared on this machine.
 
@@ -49,6 +51,17 @@ flags:
 
 	if *showVersion {
 		fmt.Printf("hostd %s (protocol %d, schema %d)\n", version.Version, version.Protocol, version.Schema)
+		return
+	}
+
+	if *stdio {
+		// The daemon holding the state is the one already running; this
+		// process only carries the conversation to it.
+		err := api.Stdio(config.Locate().Socket(), os.Stdin, os.Stdout)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hostd: %v\n", err)
+			os.Exit(1)
+		}
 		return
 	}
 
@@ -114,6 +127,17 @@ func run(debug bool) error {
 		Spool: paths.SpoolDir(),
 	}, logStore)
 
+	runtime, runtimeErr := docker.Open()
+	if runtimeErr == nil {
+		pingErr := runtime.Ping(ctx)
+		if pingErr != nil {
+			runtimeErr = pingErr
+		}
+	}
+	if runtimeErr == nil {
+		sup.Runtime(runtime)
+	}
+
 	adoptErr := sup.Adopt(ctx, declared)
 	if adoptErr != nil {
 		fmt.Fprintf(os.Stderr, "hostd: %v\n", adoptErr)
@@ -164,12 +188,30 @@ func run(debug bool) error {
 		Kind:    logs.EventDaemon,
 		Text:    fmt.Sprintf("hostd %s listening on %s", version.Version, paths.Socket()),
 	})
+	// Which capability this machine has is worth saying once, where the
+	// operator reads it: a container service declared on a machine with no
+	// runtime fails later, and this is the line that explains why.
+	logStore.Append(logs.Record{
+		Service: "hostd",
+		Stream:  logs.StreamEvent,
+		Kind:    logs.EventDaemon,
+		Text:    runtimeLine(runtime, runtimeErr),
+	})
 	fmt.Fprintf(os.Stderr, "hostd %s listening on %s\n", version.Version, paths.Socket())
+	// Reaching this machine from another is ssh running `hostd -stdio` here.
+	// There is no port of ours on the network to defend.
 
 	sup.Run(ctx)
 
 	// Leaving does not stop the services: the next hostd adopts them.
 	return <-serverErr
+}
+
+func runtimeLine(client *docker.Client, err error) string {
+	if err != nil {
+		return "no container runtime on this machine: " + err.Error()
+	}
+	return "container runtime at " + client.Socket()
 }
 
 const debugInterval = 30 * time.Second

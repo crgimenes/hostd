@@ -27,6 +27,17 @@ type procState struct {
 	// instead of replaying or skipping.
 	OutOffset int64 `filo:"out-offset"`
 	ErrOffset int64 `filo:"err-offset"`
+	// A container service: what the runtime is holding, and the timestamp its
+	// log reader had reached.
+	Container  string  `filo:"container"`
+	LogSinceMS float64 `filo:"log-since-ms"`
+}
+
+func (p procState) logSince() time.Time {
+	if p.LogSinceMS == 0 {
+		return time.Time{}
+	}
+	return time.UnixMilli(int64(p.LogSinceMS))
 }
 
 func (p procState) startTime() time.Time {

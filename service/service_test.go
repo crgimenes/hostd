@@ -96,14 +96,77 @@ func TestParseRejects(t *testing.T) {
 
 // A container service is a real kind that is not built yet. Saying so beats
 // pretending the field does not exist.
-func TestContainerKindSaysNotYet(t *testing.T) {
-	src := `(service (tuple "name" "site") (tuple "kind" "container") (tuple "command" "/bin/true"))`
+// A container service runs the image's own command, so a command in the file
+// is a misunderstanding worth naming rather than quietly ignoring.
+func TestAContainerRunsTheImageNotACommand(t *testing.T) {
+	src := `(service (tuple "name" "site") (tuple "kind" "container") (tuple "image" "site:1") (tuple "command" "/bin/true"))`
 	_, err := Parse(context.Background(), "site.filo", src)
 	if err == nil {
-		t.Fatal("container kind accepted")
+		t.Fatal("a container service with a command was accepted")
 	}
-	if !strings.Contains(err.Error(), "not implemented yet") {
-		t.Fatalf("error should say the kind is not built yet: %v", err)
+	if !strings.Contains(err.Error(), "image's own command") {
+		t.Fatalf("the error does not say where the command comes from: %v", err)
+	}
+}
+
+func TestAContainerNeedsAnImage(t *testing.T) {
+	src := `(service (tuple "name" "site") (tuple "kind" "container"))`
+	_, err := Parse(context.Background(), "site.filo", src)
+	if err == nil {
+		t.Fatal("a container service with no image was accepted")
+	}
+	if !strings.Contains(err.Error(), "image is required") {
+		t.Fatalf("the error does not say what is missing: %v", err)
+	}
+}
+
+// A port with no address binds to loopback, where the reverse proxy on the
+// same machine reaches it and the internet does not.
+func TestPublishedPortsAreParsedAndDefaultToLoopback(t *testing.T) {
+	src := `(service
+	  (tuple "name" "site")
+	  (tuple "kind" "container")
+	  (tuple "image" "site@sha256:abc")
+	  (tuple "ports" (list "8080:80" "0.0.0.0:9000:9000/udp")))`
+	svc, err := Parse(context.Background(), "site.filo", src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	ports, err := svc.PublishedPorts()
+	if err != nil {
+		t.Fatalf("PublishedPorts: %v", err)
+	}
+	if len(ports) != 2 {
+		t.Fatalf("got %d ports, expected 2", len(ports))
+	}
+	if ports[0] != (Port{HostIP: "", HostPort: 8080, ContainerPort: 80, Protocol: "tcp"}) {
+		t.Fatalf("the simple form parsed as %#v", ports[0])
+	}
+	if ports[1] != (Port{HostIP: "0.0.0.0", HostPort: 9000, ContainerPort: 9000, Protocol: "udp"}) {
+		t.Fatalf("the full form parsed as %#v", ports[1])
+	}
+}
+
+func TestABrokenPortIsRefusedWhereItIsWritten(t *testing.T) {
+	table := []string{"80", "not:80", "8080:0", "8080:80/sctp", "1.2.3:8080:80"}
+	for _, spec := range table {
+		t.Run(spec, func(t *testing.T) {
+			src := `(service (tuple "name" "site") (tuple "kind" "container") (tuple "image" "site:1") (tuple "ports" (list "` + spec + `")))`
+			_, err := Parse(context.Background(), "site.filo", src)
+			if err == nil {
+				t.Fatalf("the port %q was accepted", spec)
+			}
+		})
+	}
+}
+
+// The two kinds do not borrow each other's fields: an exec service with an
+// image is a file somebody wrote by copying the wrong example.
+func TestAnExecServiceRefusesContainerFields(t *testing.T) {
+	src := `(service (tuple "name" "api") (tuple "command" "/usr/bin/api") (tuple "image" "api:1"))`
+	_, err := Parse(context.Background(), "api.filo", src)
+	if err == nil {
+		t.Fatal("an exec service with an image was accepted")
 	}
 }
 

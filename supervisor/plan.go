@@ -101,6 +101,15 @@ func definitionDiff(old, updated service.Service) string {
 	if old.Dir != updated.Dir {
 		parts = append(parts, fmt.Sprintf("dir %q -> %q", old.Dir, updated.Dir))
 	}
+	if old.Image != updated.Image {
+		parts = append(parts, fmt.Sprintf("image %s -> %s", old.Image, updated.Image))
+	}
+	if !slices.Equal(old.Ports, updated.Ports) {
+		parts = append(parts, "published ports changed")
+	}
+	if old.Memory != updated.Memory || old.CPUs != updated.CPUs {
+		parts = append(parts, "resource limits changed")
+	}
 	if old.Kind != updated.Kind {
 		parts = append(parts, fmt.Sprintf("kind %s -> %s", old.Kind, updated.Kind))
 	}

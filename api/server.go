@@ -8,7 +8,9 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -98,12 +100,41 @@ func ListenUnix(path string) (net.Listener, error) {
 	if err != nil {
 		return nil, err
 	}
-	err = os.Chmod(path, 0o600)
+	err = grantGroup(path, filepath.Dir(path))
 	if err != nil {
 		_ = listener.Close()
 		return nil, err
 	}
 	return listener, nil
+}
+
+// Membership of the hostd group is the permission to operate this machine.
+// Without the group the socket stays root's alone, which is what it was before
+// anybody created one.
+func grantGroup(socket, dir string) error {
+	found, err := user.LookupGroup(Group)
+	if err != nil {
+		return os.Chmod(socket, 0o600)
+	}
+	gid, err := strconv.Atoi(found.Gid)
+	if err != nil {
+		return os.Chmod(socket, 0o600)
+	}
+	for _, path := range []string{dir, socket} {
+		err = os.Chown(path, os.Getuid(), gid)
+		if err != nil {
+			return err
+		}
+	}
+	// #nosec G302 -- audited: the group is the permission to operate this
+	// machine, so the socket and its directory are reachable by it and by
+	// nobody else
+	err = os.Chmod(dir, 0o750)
+	if err != nil {
+		return err
+	}
+	// #nosec G302 -- audited: same group, same reason
+	return os.Chmod(socket, 0o660)
 }
 
 // The shortest sun_path any target offers (macOS 104, Linux 108), minus the
@@ -150,7 +181,19 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 	}
 }
 
+// Who is on the other end, from the kernel rather than from anything the
+// caller said. Over ssh that is the unix account the operator logged in as,
+// which is what "who stopped the service at three in the morning" needs.
+func (s *Server) actor(conn net.Conn) string {
+	peer := Peer(conn)
+	if peer == "" {
+		return state.ActorLocal
+	}
+	return peer
+}
+
 func (s *Server) handle(ctx context.Context, conn net.Conn) {
+	actor := s.actor(conn)
 	reader := bufio.NewReader(conn)
 	for {
 		err := conn.SetReadDeadline(time.Now().Add(idleTimeout))
@@ -175,7 +218,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 			return
 		}
 		opCtx, cancel := context.WithTimeout(ctx, requestTimeout)
-		resp := s.dispatch(opCtx, req)
+		resp := s.dispatch(opCtx, req, actor)
 		cancel()
 		err = WriteMessage(conn, resp)
 		if err != nil {
@@ -186,7 +229,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 
 // Reads answer straight away; mutations pass the generation check first and
 // are audited whether carried out or refused.
-func (s *Server) dispatch(ctx context.Context, req Request) Response {
+func (s *Server) dispatch(ctx context.Context, req Request, actor string) Response {
 	switch req.Op {
 	case OpDescribe:
 		return s.stamp(s.describe())
@@ -201,13 +244,13 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 	case OpMetrics:
 		return s.stamp(s.readMetrics(req))
 	case OpServiceStart:
-		return s.mutate(req, req.Name, s.sup.Start)
+		return s.mutate(req, actor, req.Name, s.sup.Start)
 	case OpServiceStop:
-		return s.mutate(req, req.Name, s.sup.Stop)
+		return s.mutate(req, actor, req.Name, s.sup.Stop)
 	case OpServiceRestrt:
-		return s.mutate(req, req.Name, s.sup.Restart)
+		return s.mutate(req, actor, req.Name, s.sup.Restart)
 	case OpApply:
-		return s.apply(ctx, req)
+		return s.apply(ctx, req, actor)
 	default:
 		return Response{
 			Code:    CodeUnknownOp,
@@ -273,11 +316,11 @@ func (s *Server) stamp(resp Response) Response {
 }
 
 // Generation check, the work, then the audit entry.
-func (s *Server) mutate(req Request, name string, fn func(string) (bool, error)) Response {
+func (s *Server) mutate(req Request, actor, name string, fn func(string) (bool, error)) Response {
 	if name == "" {
 		return s.stamp(Response{Code: CodeInvalid, Message: "this operation needs a service name"})
 	}
-	entry := state.Entry{Operation: req.Op, Target: name, OnBehalfOf: req.OnBehalfOf}
+	entry := state.Entry{Operation: req.Op, Target: name, Actor: actor, OnBehalfOf: req.OnBehalfOf}
 
 	err := s.store.Check(req.ExpectGeneration)
 	if err != nil {
@@ -352,8 +395,8 @@ func (s *Server) planOnly(ctx context.Context) Response {
 	return body(changes)
 }
 
-func (s *Server) apply(ctx context.Context, req Request) Response {
-	entry := state.Entry{Operation: OpApply, Target: s.services, OnBehalfOf: req.OnBehalfOf}
+func (s *Server) apply(ctx context.Context, req Request, actor string) Response {
+	entry := state.Entry{Operation: OpApply, Target: s.services, Actor: actor, OnBehalfOf: req.OnBehalfOf}
 
 	err := s.store.Check(req.ExpectGeneration)
 	if err != nil {

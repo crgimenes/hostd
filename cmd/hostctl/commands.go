@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
+	"io"
 	"slices"
 	"strings"
 	"text/tabwriter"
@@ -18,14 +18,16 @@ import (
 // With -filo, stdout carries a Filo expression and nothing else: a caller
 // parsing it must not have to skip a heading.
 func emit(opt options, filoBody string, human func()) {
+	out := opt.out
 	if opt.filoOut {
-		fmt.Println(strings.TrimRight(filoBody, "\n"))
+		_, _ = fmt.Fprintln(out, strings.TrimRight(filoBody, "\n"))
 		return
 	}
 	human()
 }
 
 func runDescribe(ctx context.Context, client *api.Client, opt options) (int, error) {
+	out := opt.out
 	resp, err := client.Do(ctx, api.Request{Op: api.OpDescribe})
 	if err != nil {
 		return exitComms, err
@@ -39,11 +41,11 @@ func runDescribe(ctx context.Context, client *api.Client, opt options) (int, err
 		return exitFailed, err
 	}
 	emit(opt, resp.Body, func() {
-		fmt.Printf("host      %s\n", client.Target())
-		fmt.Printf("version   %s\n", d.Version)
-		fmt.Printf("protocol  %d\n", d.Protocol)
-		fmt.Printf("schema    %d\n", d.Schema)
-		fmt.Printf("supports  %s\n", strings.Join(d.Operations, " "))
+		_, _ = fmt.Fprintf(out, "host      %s\n", client.Target())
+		_, _ = fmt.Fprintf(out, "version   %s\n", d.Version)
+		_, _ = fmt.Fprintf(out, "protocol  %d\n", d.Protocol)
+		_, _ = fmt.Fprintf(out, "schema    %d\n", d.Schema)
+		_, _ = fmt.Fprintf(out, "supports  %s\n", strings.Join(d.Operations, " "))
 	})
 	return exitOK, nil
 }
@@ -92,18 +94,18 @@ func showStatus(ctx context.Context, client *api.Client, opt options, req api.Re
 	if err != nil {
 		return exitFailed, err
 	}
-	emit(opt, resp.Body, func() { printStatuses(client.Target(), resp.Generation, statuses) })
+	emit(opt, resp.Body, func() { printStatuses(opt.out, client.Target(), resp.Generation, statuses) })
 	return exitOK, nil
 }
 
-func printStatuses(target string, generation uint64, statuses []supervisor.Status) {
-	fmt.Printf("host %s, generation %d\n", target, generation)
+func printStatuses(out io.Writer, target string, generation uint64, statuses []supervisor.Status) {
+	_, _ = fmt.Fprintf(out, "host %s, generation %d\n", target, generation)
 	if len(statuses) == 0 {
-		fmt.Println("no services are declared")
+		_, _ = fmt.Fprintln(out, "no services are declared")
 		return
 	}
 	slices.SortFunc(statuses, func(a, b supervisor.Status) int { return strings.Compare(a.Name, b.Name) })
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(w, "SERVICE\tSTATE\tPID\tUPTIME\tRESTARTS\tDETAIL")
 	for _, s := range statuses {
 		detail := s.LastError
@@ -152,6 +154,7 @@ func runApply(ctx context.Context, client *api.Client, opt options) (int, error)
 }
 
 func showPlan(ctx context.Context, client *api.Client, opt options, req api.Request, empty string) (int, error) {
+	out := opt.out
 	resp, err := client.Do(ctx, req)
 	if err != nil {
 		return exitComms, err
@@ -164,12 +167,12 @@ func showPlan(ctx context.Context, client *api.Client, opt options, req api.Requ
 		}
 	}
 	emit(opt, resp.Body, func() {
-		fmt.Printf("host %s, generation %d\n", client.Target(), resp.Generation)
+		_, _ = fmt.Fprintf(out, "host %s, generation %d\n", client.Target(), resp.Generation)
 		if len(changes) == 0 {
-			fmt.Println(empty)
+			_, _ = fmt.Fprintln(out, empty)
 			return
 		}
-		printChanges(changes)
+		printChanges(out, changes)
 	})
 	if !resp.Failed() {
 		return exitOK, nil
@@ -180,8 +183,8 @@ func showPlan(ctx context.Context, client *api.Client, opt options, req api.Requ
 	return codeFor(resp.Err()), resp.Err()
 }
 
-func printChanges(changes []supervisor.Change) {
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+func printChanges(out io.Writer, changes []supervisor.Change) {
+	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(w, "SERVICE\tACTION\tIMPACT\tDETAIL")
 	for _, c := range changes {
 		impact := "safe"
@@ -197,6 +200,7 @@ func printChanges(changes []supervisor.Change) {
 }
 
 func runAudit(ctx context.Context, client *api.Client, opt options) (int, error) {
+	out := opt.out
 	resp, err := client.Do(ctx, api.Request{Op: api.OpAudit, Limit: opt.limit})
 	if err != nil {
 		return exitComms, err
@@ -210,12 +214,12 @@ func runAudit(ctx context.Context, client *api.Client, opt options) (int, error)
 		return exitFailed, err
 	}
 	emit(opt, resp.Body, func() {
-		fmt.Printf("host %s, generation %d\n", client.Target(), resp.Generation)
+		_, _ = fmt.Fprintf(out, "host %s, generation %d\n", client.Target(), resp.Generation)
 		if len(entries) == 0 {
-			fmt.Println("nothing has changed this host yet")
+			_, _ = fmt.Fprintln(out, "nothing has changed this host yet")
 			return
 		}
-		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 		_, _ = fmt.Fprintln(w, "WHEN\tACTOR\tOPERATION\tTARGET\tGEN\tRESULT\tDETAIL")
 		for _, e := range entries {
 			actor := e.Actor
@@ -232,6 +236,7 @@ func runAudit(ctx context.Context, client *api.Client, opt options) (int, error)
 }
 
 func runLog(ctx context.Context, client *api.Client, opt options, args []string) (int, error) {
+	out := opt.out
 	req := api.Request{
 		Service: opt.service,
 		Stream:  opt.stream,
@@ -266,7 +271,7 @@ func runLog(ctx context.Context, client *api.Client, opt options, args []string)
 		return exitFailed, err
 	}
 	if opt.filoOut {
-		fmt.Println(strings.TrimRight(resp.Body, "\n"))
+		_, _ = fmt.Fprintln(out, strings.TrimRight(resp.Body, "\n"))
 		return exitOK, nil
 	}
 	for _, l := range lines {
@@ -279,16 +284,17 @@ func runLog(ctx context.Context, client *api.Client, opt options, args []string)
 }
 
 func printLine(opt options, l api.LogLine) error {
+	out := opt.out
 	if !opt.filoOut {
-		fmt.Printf("%s %s %s %s\n",
+		_, _ = fmt.Fprintf(out, "%s %s %s %s\n",
 			l.At().Format("2006-01-02 15:04:05"), l.Service, streamMark(l.Stream), l.Text)
 		return nil
 	}
-	out, err := filoconf.Marshal(l)
+	rendered, err := filoconf.Marshal(l)
 	if err != nil {
 		return fmt.Errorf("cannot render log line %d: %w", l.Seq, err)
 	}
-	fmt.Println(out)
+	_, _ = fmt.Fprintln(out, rendered)
 	return nil
 }
 

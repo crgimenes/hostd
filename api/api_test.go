@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"net"
@@ -873,5 +874,49 @@ func TestACommandThatChangesNothingHoldsTheGeneration(t *testing.T) {
 	recent := f.store.Recent(1)
 	if len(recent) != 1 || recent[0].Detail != "nothing to change" {
 		t.Fatalf("the audit does not say the command changed nothing: %#v", recent)
+	}
+}
+
+// A socket that opens and closes without answering is what a forwarded socket
+// the far user cannot read looks like. "EOF" names the mechanism and teaches
+// nothing; the message has to name what to check.
+func TestAConnectionClosedWithoutAnAnswerSaysWhatToCheck(t *testing.T) {
+	dir, err := os.MkdirTemp("", "h")
+	if err != nil {
+		t.Fatalf("temp dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	socket := filepath.Join(dir, "s")
+	if len(socket) > maxSocketPath {
+		t.Skipf("temporary directory makes a socket path of %d bytes", len(socket))
+	}
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = listener.Close() }()
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		// Reads the request and answers nothing, which is what a forwarded
+		// socket does when the far side cannot open it.
+		_, _ = bufio.NewReader(conn).ReadString('\n')
+		_ = conn.Close()
+	}()
+
+	client, err := DialUnix(socket)
+	if err != nil {
+		t.Fatalf("DialUnix: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	_, err = client.Do(context.Background(), Request{Op: OpStatus})
+	if err == nil {
+		t.Fatal("a connection closed without an answer was reported as success")
+	}
+	if !strings.Contains(err.Error(), "closed the connection without answering") {
+		t.Fatalf("the message does not say what happened: %v", err)
 	}
 }
