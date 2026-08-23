@@ -93,6 +93,32 @@ func (c *Client) do(ctx context.Context, req Request) (Response, error) {
 	return resp, nil
 }
 
+// Push sends an image the caller is streaming out of its own runtime. The
+// answer names the digest the other machine ended up with, which is what a
+// declaration should be pinned to.
+func (c *Client) Push(ctx context.Context, image, arch string, content io.Reader) (Response, error) {
+	// No deadline across the whole upload: what bounds it is silence, which
+	// the other end enforces per chunk, and the context the caller holds.
+	err := c.conn.SetDeadline(time.Time{})
+	if err != nil {
+		return Response{}, err
+	}
+	err = WriteMessage(c.conn, Request{Op: OpImagePush, Name: image, Arch: arch})
+	if err != nil {
+		return Response{}, err
+	}
+	err = WriteChunks(c.conn, content)
+	if err != nil {
+		return Response{}, err
+	}
+	var resp Response
+	err = ReadMessage(ctx, c.reader, &resp)
+	if err != nil {
+		return Response{}, err
+	}
+	return resp, nil
+}
+
 // Consumes the connection: a client that follows issues no further requests
 // on it.
 func (c *Client) Follow(ctx context.Context, req Request, fn func(LogLine) error) error {

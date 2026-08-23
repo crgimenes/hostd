@@ -204,6 +204,7 @@ usage:
   hostctl audit                        who changed what, and when
   hostctl log [pattern]                what the services wrote
   hostctl log -follow                  keep watching
+  hostctl image push <image>           send an image built here to that machine
   hostctl metrics                      what the host and its services are using
   hostctl metrics -window 1h           the same, over a window
 
@@ -289,6 +290,8 @@ func dispatch(ctx context.Context, opt options, args []string) (int, error) {
 		return runLog(ctx, client, opt, args[1:])
 	case "metrics":
 		return runMetrics(ctx, client, opt)
+	case "image":
+		return runImage(ctx, client, opt, args[1:])
 	default:
 		return exitUsage, fmt.Errorf("unknown command %q; run hostctl with no arguments to see what exists", args[0])
 	}

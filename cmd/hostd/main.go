@@ -179,6 +179,9 @@ func run(debug bool) error {
 	}
 
 	server := api.NewServer(sup, store, logStore, metricStore, paths.ServicesDir())
+	if runtimeErr == nil {
+		server.Runtime(runtime)
+	}
 	serverErr := make(chan error, 1)
 	go func() { serverErr <- server.Serve(ctx, listener) }()
 

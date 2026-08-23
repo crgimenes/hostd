@@ -187,6 +187,28 @@ who is on the other end, not something the caller said about itself. Group
 membership is decided at login: after being added, open a new session (`ssh -O
 exit <host>` if you multiplex).
 
+## Sending an image
+
+Build it here, send it there, declare it. No registry sits in the middle, and
+the machine fetches nothing by itself:
+
+```bash
+docker build --platform linux/amd64 -t site:2026-08-23 .
+hostctl -host yuki.local image push site:2026-08-23
+```
+
+The archive streams out of the runtime here and into the runtime there through
+the same ssh the commands travel on — neither machine writes it to disk. An
+image built for another architecture is refused before the bytes cross, saying
+which platform to build for, because the alternative is an image that loads
+perfectly and then fails to start with `exec format error`.
+
+What proves the transfer is the sha256 of the bytes, computed on both sides.
+It is not the image id: two daemons reading the same archive arrive at
+different ids, because an id is of the config each one writes. That is also why
+a service file names the image by the id **that machine** reported, or by tag —
+an id is not portable across the fleet.
+
 ## The fleet
 
 The fleet is a file you keep — which machines exist, and what to call groups of

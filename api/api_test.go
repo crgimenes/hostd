@@ -130,6 +130,7 @@ type fixture struct {
 	store   *state.Store
 	buffer  *logs.Store
 	metrics *metrics.Store
+	server  *Server
 	socket  string
 	dir     string
 	cancel  context.CancelFunc
@@ -180,6 +181,7 @@ func newFixture(t *testing.T) *fixture {
 	f.cancel = cancel
 	f.metrics = metricStore
 	server := NewServer(f.sup, f.store, f.buffer, metricStore, filepath.Join(dir, "services"))
+	f.server = server
 	go func() { f.served <- server.Serve(ctx, listener) }()
 	t.Cleanup(func() {
 		cancel()
@@ -919,4 +921,18 @@ func TestAConnectionClosedWithoutAnAnswerSaysWhatToCheck(t *testing.T) {
 	if !strings.Contains(err.Error(), "closed the connection without answering") {
 		t.Fatalf("the message does not say what happened: %v", err)
 	}
+}
+
+func (f *fixture) search(q logs.Query) []logs.Record {
+	f.t.Helper()
+	records, err := f.buffer.Search(q)
+	if err != nil {
+		f.t.Fatalf("Search: %v", err)
+	}
+	return records
+}
+
+func decodeBody(t *testing.T, body string, out any) error {
+	t.Helper()
+	return filoconf.Decode(context.Background(), "response", body, out)
 }

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 
 	"github.com/crgimenes/hostd/filoconf"
@@ -31,6 +32,7 @@ const (
 	OpLogSearch     = "log.search"
 	OpLogFollow     = "log.follow"
 	OpMetrics       = "metrics"
+	OpImagePush     = "image.push"
 )
 
 // Codes are what programs read; messages are for people and may be rewritten.
@@ -62,6 +64,9 @@ type Request struct {
 	Since   uint64 `filo:"since"`
 	// A metric query: the window in milliseconds, and what to answer it with.
 	// Zero From asks for the newest value of every series instead.
+	// What an image was built to run on, so a machine that cannot run it says
+	// so before the bytes cross the wire.
+	Arch   string  `filo:"arch"`
 	Scope  string  `filo:"scope"`
 	Metric string  `filo:"metric"`
 	FromMS float64 `filo:"from-ms"`
@@ -147,6 +152,82 @@ func readLimitedLine(r *bufio.Reader) (string, error) {
 		b.Write(chunk)
 		if !isPrefix {
 			return b.String(), nil
+		}
+	}
+}
+
+// An image does not fit the line protocol, so a request that carries one is
+// followed by its bytes in chunks: a decimal length on its own line, that many
+// bytes, and a zero length to end. Nothing is buffered whole at either end —
+// what arrives is written straight to the runtime — and the size does not have
+// to be known before the first byte, which is what lets the image be streamed
+// out of the runtime that has it.
+const (
+	chunkSize = 1 << 20
+	// A ceiling on what one upload can cost the machine. Real images are far
+	// below this; something above it is a mistake or an attack, and either way
+	// the answer is to stop reading.
+	maxUploadBytes = 8 << 30
+)
+
+// WriteChunks copies everything from r as framed chunks. The deadline is not
+// set here: a long upload that keeps moving must not die of its own length,
+// and one that stops moving is the caller's to bound.
+func WriteChunks(w io.Writer, r io.Reader) error {
+	buffer := make([]byte, chunkSize)
+	for {
+		n, err := r.Read(buffer)
+		if n > 0 {
+			_, writeErr := fmt.Fprintf(w, "%d\n", n)
+			if writeErr != nil {
+				return writeErr
+			}
+			_, writeErr = w.Write(buffer[:n])
+			if writeErr != nil {
+				return writeErr
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			_, err = io.WriteString(w, "0\n")
+			return err
+		}
+		if err != nil {
+			return err
+		}
+	}
+}
+
+// ReadChunks copies the framed chunks into w until the end marker. A frame
+// that claims more than the ceiling ends the read rather than the machine.
+func ReadChunks(r *bufio.Reader, w io.Writer, reset func()) (int64, error) {
+	var total int64
+	for {
+		if reset != nil {
+			// Each frame that arrives buys time for the next one: a stalled
+			// upload dies, a slow one does not.
+			reset()
+		}
+		line, err := readLimitedLine(r)
+		if err != nil {
+			return total, err
+		}
+		size, err := strconv.ParseInt(strings.TrimSpace(line), 10, 64)
+		if err != nil {
+			return total, fmt.Errorf("expected the length of a chunk, got %q", line)
+		}
+		if size == 0 {
+			return total, nil
+		}
+		if size < 0 || size > chunkSize {
+			return total, fmt.Errorf("a chunk of %d bytes is not one this protocol sends", size)
+		}
+		total += size
+		if total > maxUploadBytes {
+			return total, fmt.Errorf("the upload passed %d bytes, which is more than this machine accepts", int64(maxUploadBytes))
+		}
+		_, err = io.CopyN(w, r, size)
+		if err != nil {
+			return total, err
 		}
 	}
 }

@@ -440,15 +440,44 @@ func (c *Client) EnsureVolume(ctx context.Context, name string, labels map[strin
 // be made to mean something else tomorrow; recording the digest is what makes
 // "the same image" a checkable claim.
 func (c *Client) ImageDigest(ctx context.Context, image string) (string, error) {
-	var raw struct {
-		ID       string   `json:"Id"`
-		RepoTags []string `json:"RepoTags"`
-	}
-	err := c.call(ctx, http.MethodGet, "/images/"+url.PathEscape(image)+"/json", nil, nil, &raw)
+	found, err := c.Image(ctx, image)
 	if err != nil {
 		return "", err
 	}
-	return raw.ID, nil
+	return found.Digest, nil
+}
+
+// Image is what the runtime holds under a name: what it really is, and what it
+// was built to run on.
+type ImageInfo struct {
+	Digest string
+	Arch   string
+}
+
+func (c *Client) Image(ctx context.Context, image string) (ImageInfo, error) {
+	var raw struct {
+		ID           string `json:"Id"`
+		Architecture string `json:"Architecture"`
+	}
+	err := c.call(ctx, http.MethodGet, "/images/"+url.PathEscape(image)+"/json", nil, nil, &raw)
+	if err != nil {
+		return ImageInfo{}, err
+	}
+	return ImageInfo{Digest: raw.ID, Arch: raw.Architecture}, nil
+}
+
+// Arch is what this machine runs. An image built for another one loads
+// perfectly well and then fails to start with "exec format error", which is a
+// sentence that explains nothing to whoever deployed it.
+func (c *Client) Arch(ctx context.Context) (string, error) {
+	var version struct {
+		Arch string `json:"Arch"`
+	}
+	err := c.call(ctx, http.MethodGet, "/version", nil, nil, &version)
+	if err != nil {
+		return "", err
+	}
+	return version.Arch, nil
 }
 
 // Line is one thing a container wrote, with the runtime's own timestamp: a
@@ -529,4 +558,43 @@ func splitTimestamp(raw string) (time.Time, string) {
 		return time.Time{}, raw
 	}
 	return at, rest
+}
+
+// Save streams an image out of the runtime as a tar, which is what crosses the
+// wire to another machine. Nothing is written to disk here: the bytes go from
+// one runtime to the other through the pipe.
+func (c *Client) Save(ctx context.Context, image string, w io.Writer) error {
+	resp, err := c.do(ctx, http.MethodGet, "/images/"+url.PathEscape(image)+"/get", nil, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	_, err = io.Copy(w, resp.Body)
+	return err
+}
+
+// Load reads that tar into this machine's runtime. A stream that is cut short
+// fails here, which is what keeps an interrupted upload from becoming an image
+// somebody could declare.
+func (c *Client) Load(ctx context.Context, r io.Reader) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url("/images/load", url.Values{"quiet": {"1"}}), r)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/x-tar")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("load the image into the runtime: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("load the image into the runtime: %s: %s", resp.Status, message(body))
+	}
+	// The runtime answers 200 and then says in the body that it could not read
+	// the archive, so the status alone is not the answer.
+	if strings.Contains(string(body), `"error"`) {
+		return fmt.Errorf("load the image into the runtime: %s", message(body))
+	}
+	return nil
 }

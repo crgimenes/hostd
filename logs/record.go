@@ -34,6 +34,7 @@ const (
 	EventApplied     = "config.applied"
 	EventSpoolLost   = "spool.overflowed"
 	EventLogDropped  = "logs.dropped"
+	EventImage       = "image.received"
 	EventDaemon      = "hostd.started"
 	EventProblem     = "hostd.problem"
 )

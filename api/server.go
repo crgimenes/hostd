@@ -3,6 +3,8 @@ package api
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/crgimenes/hostd/docker"
 	"github.com/crgimenes/hostd/logs"
 	"github.com/crgimenes/hostd/metrics"
 	"github.com/crgimenes/hostd/service"
@@ -57,6 +60,7 @@ type Server struct {
 	store    Store
 	log      *logs.Store
 	metrics  *metrics.Store
+	runtime  *docker.Client
 	services string
 
 	sem chan struct{}
@@ -74,6 +78,11 @@ func NewServer(sup Supervisor, store Store, logStore *logs.Store, metricStore *m
 		sem:      make(chan struct{}, maxClients),
 	}
 }
+
+// Runtime hands the server the container daemon images are pushed into.
+// Without it a push fails saying this machine runs no containers, which is the
+// honest answer rather than a timeout.
+func (s *Server) Runtime(client *docker.Client) { s.runtime = client }
 
 // A stale socket file from a killed daemon would stop hostd from starting, so
 // it is removed first. The private directory is what keeps the local socket
@@ -181,6 +190,78 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 	}
 }
 
+// loadImage streams what the client is sending straight into the runtime. The
+// bytes are never held whole: an image is hundreds of megabytes, and a daemon
+// that buffered one would be a daemon a client could exhaust.
+func (s *Server) loadImage(ctx context.Context, conn net.Conn, reader *bufio.Reader, req Request) Response {
+	if s.runtime == nil {
+		// The bytes are already on their way, so they are read and dropped:
+		// leaving them in the pipe would desynchronise the connection.
+		_, _ = ReadChunks(reader, io.Discard, nil)
+		return Response{Code: CodeFailed, Message: "this machine has no container runtime to load an image into"}
+	}
+	// An image for another architecture loads perfectly well and then fails to
+	// start with "exec format error". Refusing it here costs the transfer and
+	// says the real reason.
+	here, err := s.runtime.Arch(ctx)
+	if err == nil && req.Arch != "" && req.Arch != here {
+		_, _ = ReadChunks(reader, io.Discard, nil)
+		return Response{
+			Code: CodeInvalid,
+			Message: fmt.Sprintf("%s was built for %s and this machine is %s; build it for %s (docker build --platform linux/%s)",
+				req.Name, req.Arch, here, here, here),
+		}
+	}
+	pipeReader, pipeWriter := io.Pipe()
+	loaded := make(chan error, 1)
+	go func() { loaded <- s.runtime.Load(ctx, pipeReader) }()
+
+	// The bytes are hashed as they pass. An image id is not this: two daemons
+	// reading the same archive compute different ids, because the id is of the
+	// config each one writes. What travelled is what can be compared.
+	content := sha256.New()
+	total, err := ReadChunks(reader, io.MultiWriter(pipeWriter, content), func() {
+		_ = conn.SetReadDeadline(time.Now().Add(requestTimeout))
+	})
+	_ = pipeWriter.CloseWithError(err)
+	loadErr := <-loaded
+	if err != nil {
+		return Response{Code: CodeFailed, Message: fmt.Sprintf("the image did not arrive whole: %v", err)}
+	}
+	if loadErr != nil {
+		return Response{Code: CodeFailed, Message: loadErr.Error()}
+	}
+
+	// What the machine now has, by digest: a tag is a name that can be made to
+	// mean something else tomorrow.
+	digest, err := s.runtime.ImageDigest(ctx, req.Name)
+	if err != nil {
+		return Response{Code: CodeFailed, Message: fmt.Sprintf("%s was loaded but cannot be found: %v", req.Name, err)}
+	}
+	sum := hex.EncodeToString(content.Sum(nil))
+	s.log.Append(logs.Record{
+		Service: "hostd",
+		Stream:  logs.StreamEvent,
+		Kind:    logs.EventImage,
+		Text:    fmt.Sprintf("received image %s as %s, %d bytes, content sha256:%s", req.Name, digest, total, sum),
+	})
+	return body(Image{Name: req.Name, Digest: digest, Bytes: float64(total), Content: sum})
+}
+
+// What a push answers with, so the declaration can be pinned to what really
+// arrived rather than to the tag it was called by.
+type Image struct {
+	Name string `filo:"name"`
+	// What this machine now calls it. Two machines loading the same archive
+	// arrive at different ids, so this is the one to declare here and nowhere
+	// else.
+	Digest string  `filo:"digest"`
+	Bytes  float64 `filo:"bytes"`
+	// The hash of what crossed the wire, which is the same on both sides and
+	// is what proves the transfer.
+	Content string `filo:"content-sha256"`
+}
+
 // Who is on the other end, from the kernel rather than from anything the
 // caller said. Over ssh that is the unix account the operator logged in as,
 // which is what "who stopped the service at three in the morning" needs.
@@ -216,6 +297,16 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		if req.Op == OpLogFollow {
 			s.follow(ctx, conn, req)
 			return
+		}
+		// An image arrives as bytes after the request line, so this one reads
+		// from the connection instead of only writing to it.
+		if req.Op == OpImagePush {
+			resp := s.loadImage(ctx, conn, reader, req)
+			err = WriteMessage(conn, s.stamp(resp))
+			if err != nil {
+				return
+			}
+			continue
 		}
 		opCtx, cancel := context.WithTimeout(ctx, requestTimeout)
 		resp := s.dispatch(opCtx, req, actor)
@@ -371,7 +462,7 @@ func (s *Server) describe() Response {
 		Operations: []string{
 			OpDescribe, OpStatus, OpServiceList,
 			OpServiceStart, OpServiceStop, OpServiceRestrt,
-			OpPlan, OpApply, OpAudit, OpLogSearch, OpLogFollow, OpMetrics,
+			OpPlan, OpApply, OpAudit, OpLogSearch, OpLogFollow, OpMetrics, OpImagePush,
 		},
 	})
 }
