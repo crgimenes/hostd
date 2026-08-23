@@ -135,13 +135,13 @@ func TestSweepFoldsDetailIntoMinutes(t *testing.T) {
 
 // A window that reaches past the detail window is answered from the minutes
 // rather than from a hole.
-func TestQueryPicksTheResolutionThatStillExists(t *testing.T) {
-	now := time.Now()
-	if (Query{From: now.Add(-24 * time.Hour)}).step() != MinuteStep {
-		t.Fatal("a day-long window was answered at full detail, which no longer exists")
-	}
-	if (Query{From: now.Add(-5 * time.Minute)}).step() != RawStep {
-		t.Fatal("a recent window gave up detail it still has")
+// Superseded by the stitched answer: a window is no longer answered from one
+// resolution, it takes full detail where that still exists and minutes where
+// only minutes remain. What is left to pin here is the explicit override.
+func TestAnExplicitStepIsObeyed(t *testing.T) {
+	clause, args := (Query{StepMS: MinuteStep}).stepPredicate(time.Now())
+	if clause != "step_ms = ?" || len(args) != 1 || args[0] != MinuteStep {
+		t.Fatalf("an explicit step was rewritten: %s %v", clause, args)
 	}
 }
 
@@ -274,5 +274,66 @@ func TestLatestNarrowsLikeAWindowDoes(t *testing.T) {
 	}
 	if len(series) != 1 || series[0].Name != "api" {
 		t.Fatalf("the filter let something else through: %#v", series)
+	}
+}
+
+// The defect an operator sees as "the chart vanished on 6h": the sweep folds
+// full detail older than six hours into minutes and deletes it, so a window
+// answered from ONE step has a hole — six hours of minutes that do not exist
+// yet, or a day missing its newest six hours of detail. The answer stitches
+// both steps.
+func TestAWindowIsStitchedAcrossBothSteps(t *testing.T) {
+	store := openStore(t, Options{})
+	now := time.Now()
+
+	// What the machine holds after a sweep: minutes for the old stretch, full
+	// detail for the recent one.
+	old := Sample{Time: now.Add(-20 * time.Hour), Scope: ScopeHost, Metric: MetricCPUPercent, Value: 10}
+	recent := Sample{Time: now.Add(-10 * time.Minute), Scope: ScopeHost, Metric: MetricCPUPercent, Value: 20}
+	err := store.Append([]Sample{recent})
+	if err != nil {
+		t.Fatalf("add recent: %v", err)
+	}
+	err = store.Append([]Sample{old})
+	if err != nil {
+		t.Fatalf("add old: %v", err)
+	}
+	err = store.Sweep(now)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+
+	for _, window := range []time.Duration{6 * time.Hour, 24 * time.Hour} {
+		out, err := store.Query(Query{From: now.Add(-window), Metric: MetricCPUPercent})
+		if err != nil {
+			t.Fatalf("query %s: %v", window, err)
+		}
+		if len(out) != 1 {
+			t.Fatalf("the %s window answered %d series", window, len(out))
+		}
+		found := false
+		for _, point := range out[0].Points {
+			if point.Value == 20 {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("the %s window is missing its newest samples: %+v", window, out[0].Points)
+		}
+	}
+
+	// The day window also reaches the folded past.
+	out, err := store.Query(Query{From: now.Add(-24 * time.Hour), Metric: MetricCPUPercent})
+	if err != nil {
+		t.Fatalf("query day: %v", err)
+	}
+	sawOld := false
+	for _, point := range out[0].Points {
+		if point.Value == 10 {
+			sawOld = true
+		}
+	}
+	if !sawOld {
+		t.Fatalf("the day window lost the folded past: %+v", out[0].Points)
 	}
 }

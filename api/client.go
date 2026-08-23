@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"time"
 )
 
@@ -24,6 +25,10 @@ type Client struct {
 	conn   transport
 	reader *bufio.Reader
 	target string
+	// One request owns the stream from first byte to last: two requests
+	// interleaved on one pipe corrupt the protocol for both, and the caller
+	// sees a machine that stopped answering rather than its own concurrency.
+	mu sync.Mutex
 
 	// Set to divert runtime diagnostics: one key=value line per request, for
 	// an agent that greps rather than reads.
@@ -64,6 +69,8 @@ func (c *Client) Do(ctx context.Context, req Request) (Response, error) {
 }
 
 func (c *Client) do(ctx context.Context, req Request) (Response, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	deadline, ok := ctx.Deadline()
 	if !ok {
 		deadline = time.Now().Add(requestTimeout)
@@ -97,6 +104,8 @@ func (c *Client) do(ctx context.Context, req Request) (Response, error) {
 // answer names the digest the other machine ended up with, which is what a
 // declaration should be pinned to.
 func (c *Client) Push(ctx context.Context, image, arch string, content io.Reader) (Response, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	// No deadline across the whole upload: what bounds it is silence, which
 	// the other end enforces per chunk, and the context the caller holds.
 	err := c.conn.SetDeadline(time.Time{})

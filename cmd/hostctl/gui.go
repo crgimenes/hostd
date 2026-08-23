@@ -1,17 +1,21 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"embed"
+	"errors"
 	"fmt"
-	"mime"
-	"net/url"
-	"path"
+	"html/template"
+	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/crgimenes/glaze"
+	"github.com/crgimenes/glaze/menu"
 	"github.com/crgimenes/hostd/api"
 	"github.com/crgimenes/hostd/metrics"
 	"github.com/crgimenes/hostd/supervisor"
@@ -35,9 +39,61 @@ const uiOrigin = "app://hostd/"
 type panel struct {
 	opt   options
 	hosts []string
+	// The lifetime of the panel's ssh connections. DialSSH hands the context
+	// to exec.CommandContext, which KILLS the process when it ends — so a
+	// connection dialed with a round's context died with the round, and every
+	// other refresh found four broken pipes where its fleet used to be.
+	life context.Context
 
 	mu      sync.Mutex
 	clients map[string]*api.Client
+
+	snapMu sync.RWMutex
+	snap   snapshot
+	since  map[string]uint64
+	held   map[string]bool
+	cursor uint64
+
+	viewMu sync.Mutex
+	view   viewState
+
+	// Rings the poller: the one goroutine allowed to talk to the fleet.
+	nudge chan struct{}
+
+	// How the fleet reaches the window: the poller pushes what changed into
+	// the page, and a round where nothing changed pushes nothing. The page
+	// never asks — a screen polling a server is a screen that touches its own
+	// HTML on a clock, and anything the operator held is lost to the tick.
+	emit func(js string)
+
+	// The newest log line the window holds, in the panel's own numbering.
+	pushed uint64
+
+	// What the window already holds, by fragment. A piece whose digest has not
+	// moved is never sent again, and a piece that is never sent is a piece that
+	// cannot flicker under somebody's pointer.
+	sentMu sync.Mutex
+	sent   map[string]string
+
+	pages *template.Template
+}
+
+func newPanel(opt options, hosts []string) (*panel, error) {
+	pages, err := template.ParseFS(ui, "ui/panel.tmpl")
+	if err != nil {
+		return nil, err
+	}
+	return &panel{
+		opt:     opt,
+		hosts:   hosts,
+		clients: map[string]*api.Client{},
+		since:   map[string]uint64{},
+		held:    map[string]bool{},
+		sent:    map[string]string{},
+		nudge:   make(chan struct{}, 1),
+		view:    viewState{kind: "fleet", window: 3600, closed: map[string]bool{}},
+		pages:   pages,
+	}, nil
 }
 
 // Fleet answers with everything the overview needs, one entry per machine. A
@@ -52,10 +108,10 @@ type fleetHost struct {
 	Since    uint64              `json:"since"`
 }
 
-// Fleet is called by the page on a timer. The window in seconds is how far back
-// the graphs reach, unless the operator dragged a range on a chart, which
-// arrives as fromMS and toMS and is used instead. since is the last log
-// sequence the page already has, so a refresh carries only what is new.
+// Fleet asks every machine at once. The window in seconds is how far back the
+// graphs reach, unless the operator dragged a range on a chart, which arrives
+// as fromMS and toMS and is used instead. since is the last log sequence the
+// panel already has, so a round carries only what is new.
 func (p *panel) Fleet(window int, fromMS, toMS float64, since map[string]uint64) []fleetHost {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -78,7 +134,14 @@ func (p *panel) Fleet(window int, fromMS, toMS float64, since map[string]uint64)
 
 func (p *panel) one(ctx context.Context, host string, fromMS, toMS float64, since uint64) fleetHost {
 	answer := fleetHost{Host: host, Since: since}
-	client, err := p.client(ctx, host)
+	if p.opt.debug {
+		start := time.Now()
+		defer func() {
+			fmt.Fprintf(os.Stderr, "debug round host=%s elapsed-ms=%.0f error=%q\n",
+				host, float64(time.Since(start).Microseconds())/1000, answer.Error)
+		}()
+	}
+	client, err := p.client(host)
 	if err != nil {
 		answer.Error = err.Error()
 		return answer
@@ -115,18 +178,27 @@ func (p *panel) one(ctx context.Context, host string, fromMS, toMS float64, sinc
 	return answer
 }
 
-// One connection per machine, kept: opening an ssh for every refresh would
-// spend a handshake a second on a window that is only watching.
-func (p *panel) client(ctx context.Context, host string) (*api.Client, error) {
+// One connection per machine, kept: opening an ssh for every round would spend
+// a handshake a second on a window that is only watching.
+func (p *panel) client(host string) (*api.Client, error) {
 	p.mu.Lock()
 	existing, ok := p.clients[host]
 	p.mu.Unlock()
 	if ok {
 		return existing, nil
 	}
-	opened, err := api.DialSSH(ctx, host, strings.Fields(p.opt.remote))
+	// Dialed on the panel's own lifetime, never a round's: the round asks and
+	// leaves, the connection stays.
+	opened, err := api.DialSSH(p.life, host, strings.Fields(p.opt.remote))
 	if err != nil {
 		return nil, err
+	}
+	if p.opt.debug {
+		// The terminal the panel was started from becomes its flight recorder:
+		// one line per request, with the machine and how long it took. When
+		// the window misbehaves, this is what says which machine, which
+		// operation, and whether the answer ever came.
+		opened.Debug = os.Stderr
 	}
 	p.mu.Lock()
 	p.clients[host] = opened
@@ -135,7 +207,7 @@ func (p *panel) client(ctx context.Context, host string) (*api.Client, error) {
 }
 
 // A machine that stopped answering is let go of, not retried in a loop: the
-// next refresh opens a new connection, and if it fails again the panel says so
+// next round opens a new connection, and if it fails again the panel says so
 // where the operator can see which machine went away.
 func (p *panel) drop(host string) {
 	p.mu.Lock()
@@ -154,6 +226,57 @@ func (p *panel) close() {
 		_ = client.Close()
 		delete(p.clients, host)
 	}
+}
+
+/* What the window asks of the view. */
+
+// pick is ["fleet"] or ["host", name] or ["service", host, name].
+func (p *panel) pick(rest []string) {
+	p.viewMu.Lock()
+	defer p.viewMu.Unlock()
+	p.view.kind = rest[0]
+	p.view.host = ""
+	p.view.name = ""
+	if len(rest) > 1 {
+		p.view.host = rest[1]
+	}
+	if len(rest) > 2 {
+		p.view.name = rest[2]
+	}
+	if p.view.host != "" {
+		// Asking about a machine is asking what is on it. Leaving it shut
+		// would answer with the name of the machine the operator just named.
+		p.view.closed[p.view.host] = false
+	}
+}
+
+func (p *panel) toggle(host string) {
+	p.viewMu.Lock()
+	defer p.viewMu.Unlock()
+	p.view.closed[host] = !p.view.closed[host]
+}
+
+func (p *panel) pickWindow(value string) {
+	seconds, err := strconv.Atoi(value)
+	if err != nil || seconds <= 0 {
+		return
+	}
+	p.viewMu.Lock()
+	p.view.window = seconds
+	p.view.from = 0
+	p.view.to = 0
+	p.viewMu.Unlock()
+	p.wake()
+}
+
+// A zero range is the way back to live: what the operator dragged stops being
+// what the charts are about.
+func (p *panel) pickRange(from, to float64) {
+	p.viewMu.Lock()
+	p.view.from = from
+	p.view.to = to
+	p.viewMu.Unlock()
+	p.wake()
 }
 
 // ask is one request and its answer, decoded: the panel calls the same
@@ -192,11 +315,22 @@ func runGUI(ctx context.Context, opt options, args []string) (int, error) {
 		}
 	}
 
-	view := &panel{opt: opt, hosts: hosts, clients: map[string]*api.Client{}}
+	view, err := newPanel(opt, hosts)
+	if err != nil {
+		return exitFailed, err
+	}
 	defer view.close()
 
+	// The fleet is asked off the UI thread, for good: the scheme handler that
+	// serves the window runs ON that thread, so a round trip over ssh inside it
+	// would freeze the window for as long as the slowest machine takes.
+	polling, stop := context.WithCancel(ctx)
+	defer stop()
+	view.life = polling
+	go view.poll(polling)
+
 	window, err := glaze.NewWithOptions(glaze.Options{
-		SchemeHandlers: map[string]glaze.SchemeHandler{"app": serveUI},
+		SchemeHandlers: map[string]glaze.SchemeHandler{"app": serve(view.routes(), opt.debug)},
 		// A dashboard is clicked in passing, so a click on an inactive window
 		// must reach the page instead of being spent activating it.
 		AcceptsFirstMouse: true,
@@ -206,36 +340,73 @@ func runGUI(ctx context.Context, opt options, args []string) (int, error) {
 	}
 	defer window.Destroy()
 
-	window.SetTitle("hostd")
-	window.SetSize(1100, 760, glaze.HintNone)
+	view.emit = window.Eval
+	// The bridge the clicks ride: window.hostd_act in the page is Act here.
 	_, err = glaze.BindMethods(window, "hostd", view)
 	if err != nil {
 		return exitFailed, err
 	}
-	window.Navigate(uiOrigin + "index.html")
+	window.SetTitle("hostd")
+	window.SetSize(1100, 760, glaze.HintNone)
+	// A machine with no menu bar is not a reason to refuse to watch the fleet;
+	// it only means the keyboard shortcuts belong to the platform.
+	bar, err := install(window)
+	if err != nil && !errors.Is(err, menu.ErrUnsupported) {
+		return exitFailed, err
+	}
+	if bar != nil {
+		defer bar.Release()
+	}
+	window.Navigate(uiOrigin)
 	window.Run()
 	return exitOK, nil
 }
 
-// serveUI answers from the embedded files and nothing else: there is no path
-// on the operator's machine this can reach, because there is no filesystem
-// behind it.
-func serveUI(req *glaze.SchemeRequest) *glaze.SchemeResponse {
-	parsed, err := url.Parse(req.URL)
-	if err != nil {
-		return nil
+// serve turns an ordinary handler into a scheme handler. Nothing listens
+// anywhere: the request never leaves the process, which is what keeps the
+// machine of the person who is only looking at graphs free of open doors.
+func serve(handler http.Handler, debug bool) glaze.SchemeHandler {
+	return func(req *glaze.SchemeRequest) *glaze.SchemeResponse {
+		if debug {
+			fmt.Fprintf(os.Stderr, "debug scheme url=%q\n", req.URL)
+		}
+		asked, err := http.NewRequest(http.MethodGet, strings.TrimPrefix(req.URL, "app://hostd"), nil)
+		if err != nil {
+			return nil
+		}
+		var wrote answered
+		handler.ServeHTTP(&wrote, asked)
+		if wrote.code == http.StatusNotFound {
+			return nil
+		}
+		return &glaze.SchemeResponse{Body: wrote.body.Bytes(), MIMEType: wrote.Header().Get("Content-Type")}
 	}
-	name := path.Clean("/" + parsed.Path)
-	if name == "/" {
-		name = "/index.html"
+}
+
+// The smallest thing an http.Handler can write into. The alternative is
+// net/http/httptest, which belongs to tests and would ship in the binary.
+type answered struct {
+	head http.Header
+	body bytes.Buffer
+	code int
+}
+
+func (a *answered) Header() http.Header {
+	if a.head == nil {
+		a.head = http.Header{}
 	}
-	content, err := ui.ReadFile("ui" + name)
-	if err != nil {
-		return nil
+	return a.head
+}
+
+func (a *answered) Write(p []byte) (int, error) {
+	if a.code == 0 {
+		a.code = http.StatusOK
 	}
-	kind := mime.TypeByExtension(path.Ext(name))
-	if kind == "" {
-		kind = "application/octet-stream"
+	return a.body.Write(p)
+}
+
+func (a *answered) WriteHeader(code int) {
+	if a.code == 0 {
+		a.code = code
 	}
-	return &glaze.SchemeResponse{Body: content, MIMEType: kind}
 }

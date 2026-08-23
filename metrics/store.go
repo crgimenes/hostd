@@ -238,14 +238,26 @@ type Series struct {
 	Points []Point `filo:"points" json:"points"`
 }
 
-// Full detail only covers the recent past; a window that reaches further back
-// is answered from the minute series rather than from a hole.
+// What a window is answered from. Full detail only covers the recent past, so
+// a window that reaches further back is stitched: the minute series up to
+// where the sweep has folded, full detail from there on. Answering from one
+// step alone leaves a hole — a six-hour window read only from minutes is a
+// window over the exact stretch the minutes do not cover yet, which is an
+// empty chart, and a day read only from minutes is a day missing its newest
+// six hours.
+func (q Query) stepPredicate(now time.Time) (clause string, args []any) {
+	if q.StepMS > 0 {
+		return "step_ms = ?", []any{q.StepMS}
+	}
+	folded := now.Add(-rawRetention).UnixMilli()
+	return "((step_ms = ? AND time_ms >= ?) OR (step_ms = ? AND time_ms < ?))",
+		[]any{RawStep, folded, MinuteStep, folded}
+}
+
+// The finest step the answer may carry, which is what the caller scales by.
 func (q Query) step() int64 {
 	if q.StepMS > 0 {
 		return q.StepMS
-	}
-	if !q.From.IsZero() && time.Since(q.From) > rawRetention {
-		return MinuteStep
 	}
 	return RawStep
 }
@@ -271,7 +283,20 @@ func (q Query) predicates(step int64) (where []string, args []any) {
 }
 
 func (s *Store) Query(q Query) ([]Series, error) {
-	where, args := q.predicates(q.step())
+	clause, args := q.stepPredicate(time.Now())
+	where := []string{clause}
+	if q.Scope != "" {
+		where = append(where, "scope = ?")
+		args = append(args, q.Scope)
+	}
+	if q.Name != "" {
+		where = append(where, "name = ?")
+		args = append(args, q.Name)
+	}
+	if q.Metric != "" {
+		where = append(where, "metric = ?")
+		args = append(args, q.Metric)
+	}
 	if !q.From.IsZero() {
 		where = append(where, "time_ms >= ?")
 		args = append(args, q.From.UnixMilli())

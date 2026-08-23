@@ -1132,3 +1132,27 @@ func TestAMachineTheTreeDeclaresNothingForIsEmptied(t *testing.T) {
 		t.Fatal("a service the tree declares for another machine is still here")
 	}
 }
+
+// One client, many callers: a request owns the stream from first byte to last,
+// or two callers interleave on the pipe and each sees the other's answer — a
+// corruption whose symptom, dropped connections and machines that "stopped
+// answering", points everywhere except at the caller's own concurrency.
+func TestOneClientAnswersConcurrentCallers(t *testing.T) {
+	f := newFixture(t)
+	c := f.client()
+	var wg sync.WaitGroup
+	for range 30 {
+		wg.Go(func() {
+			var d Description
+			err := call(c, Request{Op: OpDescribe}, &d)
+			if err != nil {
+				t.Errorf("describe: %v", err)
+				return
+			}
+			if d.Protocol == 0 {
+				t.Error("an answer arrived empty, which is what a stolen response looks like")
+			}
+		})
+	}
+	wg.Wait()
+}

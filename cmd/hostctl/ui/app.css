@@ -82,10 +82,25 @@ body {
 	font-size: 13px;
 	color: var(--label);
 	background: var(--bg);
-	/* Chrome is not a document: dragging across it must not select it. */
+	/* Everything readable can be selected and copied: an error message nobody
+	   can copy is an error message nobody can act on. Only the parts that are
+	   controls rather than text opt out below. */
+	-webkit-user-select: text;
+	user-select: text;
+	cursor: default;
+}
+
+.row,
+#windows,
+#toolbar button,
+#followLabel,
+.twist,
+#grip,
+#split,
+th,
+td.actions {
 	-webkit-user-select: none;
 	user-select: none;
-	cursor: default;
 }
 
 #shell {
@@ -157,12 +172,14 @@ body {
 	font-variant-numeric: tabular-nums;
 }
 
+/* No transition on purpose: the triangle is server-rendered, and an element
+   that animates every time it is swapped in reads as the tree opening and
+   closing when nothing happened. */
 .twist {
 	width: 12px;
 	flex: none;
 	color: var(--tertiary);
 	font-size: 9px;
-	transition: transform 0.12s ease;
 	transform: rotate(0deg);
 	text-align: center;
 }
@@ -171,7 +188,11 @@ body {
 	transform: rotate(90deg);
 }
 
-.group > .row {
+.twist.closed {
+	transform: rotate(0deg);
+}
+
+.row.child {
 	padding-left: 20px;
 }
 
@@ -201,12 +222,17 @@ body {
 	padding: 7px 14px;
 	font-size: 11px;
 	color: var(--secondary);
-	white-space: nowrap;
-	overflow: hidden;
-	text-overflow: ellipsis;
+	/* A reason that is cut off is a reason nobody can act on. */
+	overflow-wrap: anywhere;
+	max-height: 5em;
+	overflow-y: auto;
 }
 
 #sidebarFoot .bad {
+	color: var(--failed);
+}
+
+#status.bad {
 	color: var(--failed);
 }
 
@@ -232,9 +258,15 @@ body {
 
 /* The detail side: toolbar, content, log. */
 
+#pane {
+	display: grid;
+	grid-template-rows: 1fr 1px var(--logHeight, 220px);
+	overflow: hidden;
+}
+
 #detail {
 	display: grid;
-	grid-template-rows: var(--toolbar) 1fr 1px var(--logHeight, 220px);
+	grid-template-rows: var(--toolbar) 1fr;
 	overflow: hidden;
 }
 
@@ -357,9 +389,17 @@ button {
 }
 
 .card > h2 {
+	display: flex;
+	align-items: center;
 	font-size: 13px;
 	font-weight: 590;
 	margin-bottom: 2px;
+}
+
+.card .headActions {
+	margin-left: auto;
+	display: flex;
+	gap: 6px;
 }
 
 .card > h2 .aside {
@@ -373,6 +413,12 @@ button {
 	display: grid;
 	grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
 	gap: 14px;
+}
+
+/* A machine or a service is one subject, so its cards are one column: the
+   fleet is the only view that is a grid of many. */
+.cards.single {
+	grid-template-columns: 1fr;
 }
 
 .machineCard {
@@ -411,6 +457,24 @@ table {
 	border-collapse: collapse;
 	margin-top: 8px;
 }
+
+/* Fixed so a cell being replaced cannot move the columns around it: with auto
+   layout every swapped cell re-negotiates the whole table's widths, which
+   reads as the table trembling. */
+table.services {
+	table-layout: fixed;
+}
+
+table.services td {
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+table.services th:nth-child(1) { width: 16%; }
+table.services th:nth-child(2) { width: 20%; }
+table.services th:nth-child(4) { width: 12%; }
+table.services th:nth-child(5) { width: 10%; }
+table.services th:nth-child(6) { width: 24%; }
 
 th {
 	text-align: left;
@@ -490,10 +554,16 @@ td.actions button {
 	height: 54px;
 }
 
-canvas {
+.plot svg {
 	width: 100%;
 	height: 100%;
 	display: block;
+}
+
+.plot .grid {
+	stroke: var(--grid);
+	stroke-width: 1;
+	vector-effect: non-scaling-stroke;
 }
 
 .plot .band {
