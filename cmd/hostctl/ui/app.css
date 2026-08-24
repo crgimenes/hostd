@@ -104,15 +104,18 @@ td.actions {
 }
 
 #shell {
+	position: relative;
 	display: grid;
 	grid-template-columns: var(--sidebarWidth, 216px) 1px 1fr;
 	height: 100%;
 }
 
-/* Hidden by the operator, or by there being no room. The sidebar keeps its
-   width so showing it again is not a re-layout of the whole window. */
+/* Hidden by the operator, or by there being no room. The track list has to
+   shrink to ONE: a hidden sidebar is not a grid item any more, so leaving
+   three tracks would put the pane in the first of them — which is zero wide,
+   and reads as the whole window going blank. */
 body.hideNav #shell {
-	grid-template-columns: 0 0 1fr;
+	grid-template-columns: 1fr;
 }
 
 body.hideNav #sidebar,
@@ -120,10 +123,32 @@ body.hideNav #grip {
 	display: none;
 }
 
-/* The hamburger appears exactly when the sidebar is not there, where one is
-   expected: the top left, before the title. */
-#reveal {
+/* Narrow and showing: the tree floats OVER the content, the way a phone does
+   it. Pushing at this width would squeeze the pane to nothing, which is the
+   same blank window by another route. */
+body.narrow #shell {
+	grid-template-columns: 1fr;
+}
+
+body.narrow #grip {
 	display: none;
+}
+
+body.narrow #sidebar {
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	left: 0;
+	width: 240px;
+	z-index: 5;
+	box-shadow: 0 0 24px rgba(0, 0, 0, 0.35);
+}
+
+/* Always there, where one is expected: the top left, before the title. It
+   hides the tree as readily as it brings it back — a gesture nobody can see
+   (a double click on a divider) is a gesture nobody finds. */
+#reveal {
+	display: inline-flex;
 	align-items: center;
 	justify-content: center;
 	width: 28px;
@@ -141,14 +166,24 @@ body.hideNav #grip {
 	color: var(--label);
 }
 
-body.hideNav #reveal {
-	display: inline-flex;
-}
-
 .icon {
 	width: 14px;
 	height: 14px;
 	flex: none;
+}
+
+/* The same button, drawn for the room it has: a panel with a sidebar when the
+   sidebar is a sidebar, three lines when the window is a phone. */
+.narrowOnly {
+	display: none;
+}
+
+body.narrow .wideOnly {
+	display: none;
+}
+
+body.narrow .narrowOnly {
+	display: inline-flex;
 }
 
 /* The source list. */

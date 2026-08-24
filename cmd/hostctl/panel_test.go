@@ -554,6 +554,33 @@ func TestEveryIconThePageAsksForIsCarried(t *testing.T) {
 	}
 }
 
+// The defect an operator sees as "I made the window smaller and everything
+// vanished": hiding the sidebar takes it out of the grid, so a track list of
+// three would put the only remaining item — the whole panel — in the first
+// track, which is zero wide. Whenever the sidebar is out, the shell must
+// declare exactly one track.
+func TestHidingTheSidebarLeavesTheShellOneTrack(t *testing.T) {
+	style, err := ui.ReadFile("ui/app.css")
+	if err != nil {
+		t.Fatalf("read app.css: %v", err)
+	}
+	sheet := string(style)
+	for _, rule := range []string{"body.hideNav #shell", "body.narrow #shell"} {
+		at := strings.Index(sheet, rule)
+		if at < 0 {
+			t.Fatalf("no rule for %s", rule)
+		}
+		block := sheet[at:min(at+120, len(sheet))]
+		if !strings.Contains(block, "grid-template-columns: 1fr;") {
+			t.Fatalf("%s does not collapse to a single track:\n%s", rule, block)
+		}
+	}
+	// The track list that would swallow the panel must not survive anywhere.
+	if strings.Contains(sheet, "grid-template-columns: 0 0 1fr") {
+		t.Fatal("a hidden sidebar still leaves zero-width tracks in front of the panel")
+	}
+}
+
 // The window has a floor, and the layout below it has a way to give the screen
 // back: a sidebar that hides and a hamburger that returns it.
 func TestTheWindowHasAFloorAndTheSidebarCanHide(t *testing.T) {
@@ -568,7 +595,7 @@ func TestTheWindowHasAFloorAndTheSidebarCanHide(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read app.js: %v", err)
 	}
-	for _, needed := range []string{"matchMedia", "hideNav", `el("reveal")`} {
+	for _, needed := range []string{"matchMedia", "hideNav", "function toggleNav()"} {
 		if !strings.Contains(string(script), needed) {
 			t.Fatalf("the narrow layout has no %s", needed)
 		}
@@ -579,6 +606,15 @@ func TestTheWindowHasAFloorAndTheSidebarCanHide(t *testing.T) {
 	}
 	if !strings.Contains(string(page), `id="reveal"`) {
 		t.Fatal("there is no way to bring the sidebar back")
+	}
+	// Always on screen: it puts the tree away as readily as it brings it back,
+	// because a gesture nobody can see is a gesture nobody finds.
+	style, err := ui.ReadFile("ui/app.css")
+	if err != nil {
+		t.Fatalf("read app.css: %v", err)
+	}
+	if strings.Contains(string(style), "#reveal {\n\tdisplay: none;") {
+		t.Fatal("the only way to hide the tree is a gesture with no button")
 	}
 }
 
@@ -647,5 +683,123 @@ func TestTheSettingsPageHasNoFleetControls(t *testing.T) {
 	watching := get(t, view, "/act/select/host/yuki").Body.String()
 	if !strings.Contains(watching, `id="windows"`) || !strings.Contains(watching, `data-log="on"`) {
 		t.Fatalf("a machine's page lost its controls: %s", watching)
+	}
+}
+
+// The defect an operator sees as "I switched a machine off and the whole
+// window went blank": the round used to wait for every machine before showing
+// any, so one that is unplugged — which ssh takes tens of seconds to give up
+// on — hid the three that answered in a tenth of a second.
+func TestAMachineThatIsOffDoesNotHideTheOnesThatAnswered(t *testing.T) {
+	view := probePanel(t)
+	view.snapMu.Lock()
+	view.snap = snapshot{}
+	view.snapMu.Unlock()
+	view.mu.Lock()
+	view.hosts = []string{"yuki", "selene", "cronos"}
+	view.mu.Unlock()
+
+	// What the fast machines say, folded in one at a time the way a round
+	// hands them over.
+	view.absorb([]fleetHost{{Host: "yuki", Services: []supervisor.Status{{Name: "caddy", State: supervisor.StateRunning}}}})
+	view.absorb([]fleetHost{{Host: "selene"}})
+
+	page := get(t, view, "/").Body.String()
+	if !strings.Contains(page, "yuki") || !strings.Contains(page, "caddy") {
+		t.Fatalf("the machines that answered are not on screen: %s", page)
+	}
+	if strings.Contains(page, "cronos") {
+		t.Fatal("a machine nobody has heard from yet is drawn as though it had answered")
+	}
+
+	// The one that is off lands last, with its reason, and takes its place in
+	// the inventory's order rather than at the end.
+	view.absorb([]fleetHost{{Host: "cronos", Error: "ssh: connect to host cronos port 22: Operation timed out"}})
+	view.snapMu.RLock()
+	order := []string{view.snap.Fleet[0].Host, view.snap.Fleet[1].Host, view.snap.Fleet[2].Host}
+	view.snapMu.RUnlock()
+	if !slices.Equal(order, []string{"yuki", "selene", "cronos"}) {
+		t.Fatalf("the machines are in the order they answered, not the order they are listed: %v", order)
+	}
+}
+
+// While a machine is being reached, the window is told WHICH one: "working"
+// with no name is indistinguishable from stuck.
+func TestTheIndicatorNamesTheMachineItIsWaitingOn(t *testing.T) {
+	view := probePanel(t)
+	view.snapMu.Lock()
+	view.snap.Busy = true
+	view.snap.Reaching = []string{"cronos"}
+	view.snapMu.Unlock()
+
+	page := get(t, view, "/").Body.String()
+	if !strings.Contains(page, "asking cronos") {
+		t.Fatalf("the indicator does not say what it is waiting on: %s", page)
+	}
+}
+
+// A machine that is switched off must fail in seconds, not in whatever the
+// kernel's default happens to be.
+func TestSSHIsGivenAConnectTimeout(t *testing.T) {
+	source, err := os.ReadFile("../../api/local.go")
+	if err != nil {
+		t.Fatalf("read local.go: %v", err)
+	}
+	if !strings.Contains(string(source), "ConnectTimeout") {
+		t.Fatal("ssh is dialled with no connect timeout, so an unplugged machine hangs for as long as the kernel allows")
+	}
+}
+
+// The defect an operator sees as "the button does nothing": an element inside
+// a fragment is REPLACED by the next push, and a handler bound straight to it
+// goes with the element it was bound to. Everything inside a fragment is
+// reached by delegation instead — this test refuses the shortcut, because the
+// symptom is silence and silence is what nobody reports.
+func TestNothingInsideAFragmentCarriesItsOwnHandler(t *testing.T) {
+	page, err := ui.ReadFile("ui/panel.tmpl")
+	if err != nil {
+		t.Fatalf("read panel.tmpl: %v", err)
+	}
+	script, err := ui.ReadFile("ui/app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+
+	// Which ids the page shell owns: those may be bound to directly, because
+	// the shell is written once and never swapped.
+	shell := string(page)[:strings.Index(string(page), `{{define "tree"}}`)]
+
+	bound := regexp.MustCompile(`el\("([a-zA-Z]+)"\)\.on[a-z]+ =`).FindAllStringSubmatch(string(script), -1)
+	if len(bound) == 0 {
+		t.Fatal("no direct handler found at all; the pattern this test matches must have changed")
+	}
+	for _, match := range bound {
+		if !strings.Contains(shell, `id="`+match[1]+`"`) {
+			t.Fatalf("%q is bound to directly but lives in a fragment, so the next push silently unbinds it", match[1])
+		}
+	}
+}
+
+// The toggle is reached by delegation and draws itself for the room it has.
+func TestTheSidebarToggleIsDelegatedAndFitsTheWidth(t *testing.T) {
+	page, err := ui.ReadFile("ui/panel.tmpl")
+	if err != nil {
+		t.Fatalf("read panel.tmpl: %v", err)
+	}
+	if !strings.Contains(string(page), `data-ui="nav"`) {
+		t.Fatal("the sidebar toggle carries no name the delegated listener knows")
+	}
+	for _, picture := range []string{"layout-sidebar", "list"} {
+		_, err = iconSVG(picture)
+		if err != nil {
+			t.Fatalf("the toggle asks for the %q icon and the binary does not carry it", picture)
+		}
+	}
+	script, err := ui.ReadFile("ui/app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	if !strings.Contains(string(script), "function toggleNav()") {
+		t.Fatal("the toggle has nothing to call")
 	}
 }

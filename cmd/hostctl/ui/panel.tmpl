@@ -64,11 +64,11 @@
 {{define "treeDot"}}<span id="{{.DotID}}" class="dot {{.Dot}}"></span>{{end}}
 {{define "treeMeta"}}<span id="{{.MetaID}}" class="meta">{{.Meta}}</span>{{end}}
 
-{{define "status"}}<span id="status" class="{{if .Bad}}bad{{end}}{{if .Busy}} busy{{end}}">{{if .Busy}}<span class="spinner" aria-hidden="true"></span>{{end}}{{.Text}}</span>{{end}}
+{{define "status"}}<span id="status" class="{{if .Busy}}busy{{end}}">{{if .Busy}}<span class="spinner" aria-hidden="true"></span>{{end}}{{.Text}}</span>{{end}}
 
 {{define "detail"}}<div id="detail" data-log="{{if .Watching}}on{{else}}off{{end}}">
   <header id="toolbar">
-    <button id="reveal" title="Show the fleet" aria-label="Show the fleet">{{icon "list"}}</button>
+    <button id="reveal" data-ui="nav" title="Show or hide the fleet" aria-label="Show or hide the fleet"><span class="wideOnly">{{icon "layout-sidebar"}}</span><span class="narrowOnly">{{icon "list"}}</span></button>
     <div id="crumb">
       <h1 id="title">{{.Title}}</h1>
       <p id="subtitle">{{.Subtitle}}</p>

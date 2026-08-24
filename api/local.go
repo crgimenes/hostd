@@ -95,8 +95,18 @@ func Stdio(socket string, in io.Reader, out io.Writer) error {
 // handshake to write: ssh authenticates, and a key restricted with a forced
 // command in authorized_keys is a permission this program did not have to
 // invent.
+// How long ssh may spend reaching a machine before giving up. The default is
+// the kernel's, which for a machine that is switched off is tens of seconds of
+// a window with nothing in it; ten is long enough for a slow link and short
+// enough that a person watching does not conclude the program hung.
+const connectTimeout = 10
+
 func DialSSH(ctx context.Context, host string, remote []string) (*Client, error) {
-	arguments := append([]string{"-o", "BatchMode=yes", host}, remote...)
+	arguments := append([]string{
+		"-o", "BatchMode=yes",
+		"-o", fmt.Sprintf("ConnectTimeout=%d", connectTimeout),
+		host,
+	}, remote...)
 	// #nosec G204 -- the host and the remote command come from the operator's
 	// own flags and configuration, which is the same trust as the shell they
 	// typed them in

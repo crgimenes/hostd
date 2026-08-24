@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"maps"
+	"slices"
 	"time"
 
 	"github.com/crgimenes/hostd/api"
@@ -29,9 +30,12 @@ type snapshot struct {
 	Fleet   []fleetHost
 	Lines   []line
 	Updated time.Time
-	Problem string
-	// A round is going and taking long enough to say so.
-	Busy bool
+	// A round is going and taking long enough to say so, and which machines it
+	// is still waiting on: "working" with no name is indistinguishable from
+	// stuck, and the machine that is switched off is exactly what somebody
+	// wants named.
+	Busy     bool
+	Reaching []string
 }
 
 // A log line with the machine that wrote it, which the answer does not carry
@@ -79,7 +83,12 @@ func (p *panel) round(ctx context.Context) {
 	go p.sayIfSlow(finished)
 
 	view := p.viewport()
-	p.absorb(p.Fleet(view.window, view.from, view.to, p.sequences()))
+	// Each machine is folded in and pushed as it answers, so the window fills
+	// up rather than appearing all at once when the last one is done.
+	p.Fleet(view.window, view.from, view.to, p.sequences(), func(answer fleetHost) {
+		p.absorb([]fleetHost{answer})
+		p.push()
+	})
 
 	close(finished)
 	p.working(false)
@@ -109,30 +118,55 @@ func (p *panel) working(busy bool) {
 	}
 }
 
-// absorb folds one round's answer into what the panel knows. Separate from the
-// asking so what it promises — a bad answer never unmakes the picture — can be
-// tested without a fleet.
+// reaching records that a machine is being asked, and answers whether the
+// window should be told again. The set is what the status names.
+func (p *panel) reaching(host string, going bool) {
+	p.snapMu.Lock()
+	at := slices.Index(p.snap.Reaching, host)
+	switch {
+	case going && at < 0:
+		p.snap.Reaching = append(p.snap.Reaching, host)
+	case !going && at >= 0:
+		p.snap.Reaching = slices.Delete(p.snap.Reaching, at, at+1)
+	}
+	busy := p.snap.Busy
+	p.snapMu.Unlock()
+	// Only worth a push while the window is already showing the indicator:
+	// otherwise this is a name nobody is reading.
+	if busy {
+		p.push()
+	}
+}
+
+// absorb folds answers into what the panel knows, one machine or many.
+// Separate from the asking so what it promises — a bad answer never unmakes
+// the picture, and a machine keeps its place — can be tested without a fleet.
 func (p *panel) absorb(fleet []fleetHost) {
 	p.snapMu.Lock()
 	defer p.snapMu.Unlock()
-	previous := p.snap.Fleet
-	p.snap.Fleet = fleet
 	p.snap.Updated = time.Now()
-	p.snap.Problem = ""
-	for at, host := range fleet {
+	for _, host := range fleet {
+		at := slices.IndexFunc(p.snap.Fleet, func(known fleetHost) bool { return known.Host == host.Host })
+		if at < 0 {
+			// New to the panel: it takes the place the inventory gives it, so
+			// the order on screen is the order in the file rather than the
+			// order the machines happened to answer in.
+			p.snap.Fleet = append(p.snap.Fleet, host)
+			p.orderFleet()
+			at = slices.IndexFunc(p.snap.Fleet, func(known fleetHost) bool { return known.Host == host.Host })
+		}
 		if host.Error != "" {
-			p.snap.Problem = host.Error
 			// One bad round must not unmake the picture: with the answer
 			// empty, the machine's services would vanish from the tree and
 			// come back next round — which reads as the tree closing and
 			// opening by itself. What was known stays, marked unanswered.
-			for _, known := range previous {
-				if known.Host == host.Host && len(known.Services) > 0 {
-					fleet[at].Services = known.Services
-					fleet[at].Metrics = known.Metrics
-				}
+			known := p.snap.Fleet[at]
+			if len(known.Services) > 0 {
+				host.Services = known.Services
+				host.Metrics = known.Metrics
 			}
 		}
+		p.snap.Fleet[at] = host
 		for _, arrived := range host.Lines {
 			// A machine numbers its own lines, so a sequence only means
 			// anything beside the machine that wrote it.
@@ -155,6 +189,19 @@ func (p *panel) absorb(fleet []fleetHost) {
 		}
 		p.snap.Lines = p.snap.Lines[len(p.snap.Lines)-maxLines:]
 	}
+}
+
+// orderFleet puts the machines in the order the inventory lists them, so a
+// slow machine does not sink to the bottom of the tree for having answered
+// last. The caller holds snapMu.
+func (p *panel) orderFleet() {
+	order := make(map[string]int, len(p.snap.Fleet))
+	for at, host := range p.hostsNow() {
+		order[host] = at
+	}
+	slices.SortStableFunc(p.snap.Fleet, func(a, b fleetHost) int {
+		return order[a.Host] - order[b.Host]
+	})
 }
 
 func (p *panel) sequences() map[string]uint64 {

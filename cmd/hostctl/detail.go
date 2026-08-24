@@ -102,7 +102,6 @@ type legendView struct {
 
 type statusView struct {
 	Text string
-	Bad  bool
 	Busy bool
 }
 
@@ -159,11 +158,17 @@ func (d detailView) volatiles(p *panel) []fragment {
 // the fleet is well the panel has nothing to say.
 func statusOf(snap snapshot) statusView {
 	if snap.Busy {
+		// Named, because "working" with nothing after it is what a hung
+		// program also looks like, and the machine still outstanding is
+		// usually the one somebody needs to hear about.
+		if len(snap.Reaching) > 0 {
+			return statusView{Text: "asking " + strings.Join(snap.Reaching, ", ") + "…", Busy: true}
+		}
 		return statusView{Text: "asking the fleet…", Busy: true}
 	}
-	if snap.Problem != "" {
-		return statusView{Text: snap.Problem, Bad: true}
-	}
+	// A machine that did not answer says so where it is: its own card, in red,
+	// beside a red dot. Repeating it down here would be the same news twice,
+	// in the corner furthest from the thing it is about.
 	if snap.Updated.IsZero() {
 		return statusView{Text: "asking the fleet…", Busy: true}
 	}

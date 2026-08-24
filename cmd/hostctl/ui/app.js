@@ -73,6 +73,16 @@ window.onerror = (message) => {
 // exist now and rows that arrive later all land here, so nothing needs wiring
 // when a fragment is swapped in.
 document.body.addEventListener("click", (event) => {
+	// Chrome the page works by itself. Delegated like everything else: an
+	// element inside a fragment is replaced by the next push, and a handler
+	// bound straight to it is lost with the element it was bound to.
+	const chrome = event.target.closest("[data-ui]");
+	if (chrome) {
+		if (chrome.dataset.ui === "nav") {
+			toggleNav();
+		}
+		return;
+	}
 	const asked = event.target.closest("[data-act]");
 	if (!asked) {
 		return;
@@ -81,7 +91,7 @@ document.body.addEventListener("click", (event) => {
 	// On a narrow window the sidebar covers what was just chosen: picking
 	// something is done with it.
 	if (NARROW.matches && asked.closest("#sidebar") && !asked.classList.contains("twist")) {
-		hiddenByHand = true;
+		awayNarrow = true;
 		showNav();
 	}
 });
@@ -305,30 +315,36 @@ function clamp(value, low, high) {
 	return Math.max(low, Math.min(high, value));
 }
 
-/* The sidebar is hidden by choice, or because there is no room for it. Which
-   of the two matters: a window that widens again gives back the sidebar the
-   operator never hid, and keeps hidden the one they did. */
+/* Where the tree is depends on how much room there is, and the operator's
+   choice is remembered per width: putting it away on a wide window says
+   nothing about what a phone-sized one should do, and the other way round. */
 
 const NARROW = window.matchMedia("(max-width: 620px)");
-let hiddenByHand = false;
+let awayWide = false;  // the operator hid it on a window with room for it
+let awayNarrow = true; // narrow starts with the tree put away, as a phone does
 
 function showNav() {
-	document.body.classList.toggle("hideNav", hiddenByHand || NARROW.matches);
+	const narrow = NARROW.matches;
+	document.body.classList.toggle("narrow", narrow);
+	document.body.classList.toggle("hideNav", narrow ? awayNarrow : awayWide);
 }
 
-el("reveal").onclick = () => {
-	hiddenByHand = false;
-	document.body.classList.remove("hideNav");
-};
-
-// Hiding is the grip's other gesture: dragged to the floor, the sidebar is
-// being put away rather than made unusably narrow.
-el("grip").ondblclick = () => {
-	hiddenByHand = true;
+function toggleNav() {
+	if (NARROW.matches) {
+		awayNarrow = !awayNarrow;
+	} else {
+		awayWide = !awayWide;
+	}
 	showNav();
-};
+}
 
-NARROW.addEventListener("change", showNav);
+NARROW.addEventListener("change", () => {
+	if (NARROW.matches) {
+		// Arriving at phone width, the tree gets out of the way on its own.
+		awayNarrow = true;
+	}
+	showNav();
+});
 showNav();
 
 settle();

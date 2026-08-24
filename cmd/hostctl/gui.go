@@ -133,7 +133,12 @@ type fleetHost struct {
 // graphs reach, unless the operator dragged a range on a chart, which arrives
 // as fromMS and toMS and is used instead. since is the last log sequence the
 // panel already has, so a round carries only what is new.
-func (p *panel) Fleet(window int, fromMS, toMS float64, since map[string]uint64) []fleetHost {
+// Fleet asks every machine at once and hands each answer over the moment it
+// arrives. It does NOT wait for the slowest: a machine that is switched off
+// takes as long as ssh takes to give up, and waiting for it would hide every
+// machine that answered — which is the whole fleet gone from the window
+// because one of them is unplugged.
+func (p *panel) Fleet(window int, fromMS, toMS float64, since map[string]uint64, arrived func(fleetHost)) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
@@ -142,16 +147,13 @@ func (p *panel) Fleet(window int, fromMS, toMS float64, since map[string]uint64)
 		toMS = 0
 	}
 
-	hosts := p.hostsNow()
-	out := make([]fleetHost, len(hosts))
 	var wg sync.WaitGroup
-	for i, host := range hosts {
+	for _, host := range p.hostsNow() {
 		wg.Go(func() {
-			out[i] = p.one(ctx, host, fromMS, toMS, since[host])
+			arrived(p.one(ctx, host, fromMS, toMS, since[host]))
 		})
 	}
 	wg.Wait()
-	return out
 }
 
 func (p *panel) hostsNow() []string {
@@ -245,7 +247,13 @@ func (p *panel) settings() settingsInfo {
 
 func (p *panel) one(ctx context.Context, host string, fromMS, toMS float64, since uint64) fleetHost {
 	answer := fleetHost{Host: host, Since: since}
+	p.reaching(host, true)
+	defer p.reaching(host, false)
 	if p.opt.debug {
+		// Said on the way OUT as well as on the way in: a machine that never
+		// answers would otherwise leave no trace at all until ssh gives up,
+		// which is exactly the case somebody is trying to diagnose.
+		fmt.Fprintf(os.Stderr, "debug reaching host=%s\n", host)
 		start := time.Now()
 		defer func() {
 			fmt.Fprintf(os.Stderr, "debug round host=%s elapsed-ms=%.0f error=%q\n",
