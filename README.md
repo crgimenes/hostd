@@ -2,7 +2,7 @@
 
 A control plane for a small fleet of Linux machines.
 
-`hostd` runs on each machine and supervises the services declared there.
+`hostd` runs on each machine and reconciles the containers declared there.
 `hostctl` runs on yours and operates the fleet: it is where you look at what
 every machine is doing, read logs, start and stop services, and apply
 configuration. The daemon is headless — it has no interface of its own.
@@ -12,23 +12,24 @@ configuration. The daemon is headless — it has no interface of its own.
 **tmux, as a way of holding a server up.** A server started inside a `tmux`
 session lives only in that session, and its output is a screen buffer: no
 search, no retention, no timestamps, gone after a reboot, and visible in full
-to anyone who gets onto the machine. Under `hostd` the process is supervised
-properly, and every line it writes to `stdout` or `stderr` becomes a log entry
-with a time, a service and a stream — readable from your own machine with
-`hostctl log`.
+to anyone who gets onto the machine. Under `hostd` the server runs in a
+container held by Docker or Podman, and every line it writes to `stdout` or
+`stderr` becomes a log entry with a time, a service and a stream — readable
+from your own machine with `hostctl log`.
 
-**crontab**, for scheduled work (coming in a later stage): a service with a
-schedule runs like any other, with a run history, logs and events in the same
-place.
+**crontab**, for scheduled work: a service with `every` runs on the wall-clock
+schedule, with run history, logs and events in the same place.
 
 The service does not have to know any of this. It keeps writing to `stdout`.
 
 ## Status
 
-Early. What works today:
+The core is running on the Linux bench. What works today:
 
-- services declared one per file in [Filo](https://github.com/crgimenes/filo);
-- supervision with restart policies and backoff;
+- one Filo declaration per container service, as a file or a directory with
+  `init.filo` and its artifacts;
+- restart policies delegated to Docker or Podman, which already survive a
+  daemon restart and a machine reboot;
 - capture of `stdout` and `stderr`, with search and follow;
 - events with stable codes, in the same timeline as the output, so a failure
   reads in order;
@@ -38,28 +39,36 @@ Early. What works today:
   carries out, so a dry run is not decoration;
 - generations, so two operators or an agent cannot overwrite each other, and an
   audit log that records refusals as well as changes;
-- a local control socket, and `hostctl` over it;
+- jobs aligned to the wall clock, with overlap policy and a parallelism ceiling;
+- host and service metrics with full detail for six hours and minute rollups
+  after that;
+- fleet operation over SSH, with no hostd port or key system of its own;
+- image transfer between runtimes, streamed and verified by SHA-256;
+- a read-only graphical panel over the same API as the command line;
 - **restarting `hostd` does not stop the services**: they keep running and the
-  new daemon adopts them, proving each process is the one it started.
+  new daemon asks the runtime what it already holds.
 
-Not built yet: the encrypted network protocol with key pairs, containers,
-scheduled services, metrics, the graphical mode, migration between machines,
-and self-update. The plan is in `TODO.md`; the full design is in `project.md`.
+Not built yet: service rollback and image cleanup, migration between machines,
+self-update, and mutation from the graphical panel. The queue is in `TODO.md`;
+the full design is in `project.md`.
 
 ## Try it
 
 ```bash
 go build -o /tmp/hostd ./cmd/hostd && go build -o /tmp/hostctl ./cmd/hostctl
+docker pull alpine:latest
 export HOSTD_ROOT=/tmp/hostd-try
 mkdir -p "$HOSTD_ROOT/etc/services"
 cat > "$HOSTD_ROOT/etc/services/ticker.filo" <<'EOF'
 (service
   (tuple "name" "ticker")
-  (tuple "command" "/bin/sh")
-  (tuple "args" (list "-c" "i=0; while true; do i=$((i+1)); echo \"tick $i\"; sleep 1; done"))
+  (tuple "image" "alpine:latest")
+  (tuple "args" (list "sh" "-c" "i=0; while true; do i=$((i+1)); echo tick-$i; sleep 1; done"))
   (tuple "restart" "always"))
 EOF
 /tmp/hostd &
+hostd_pid=$!
+trap 'kill "$hostd_pid"' EXIT
 /tmp/hostctl status
 /tmp/hostctl log -follow
 ```
@@ -119,26 +128,15 @@ like.
 ```lisp
 (service
   (tuple "name" "api")
-  (tuple "command" "/usr/local/bin/api")
-  (tuple "args" (list "--listen" ":8080"))
+  (tuple "image" "api:2026-08-24")
+  (tuple "args" (list "serve" "--listen" ":8080"))
   (tuple "restart" "always"))
 ```
 
-`name` and `command` are required; the file must be named after the service.
-`kind` defaults to `exec`, `state` to `running`, `restart` to `always`.
-`dir`, `env` and `stop-timeout` are optional.
-
-A container is the same file with another kind:
-
-```lisp
-(service
-  (tuple "name" "site")
-  (tuple "kind" "container")
-  (tuple "image" "site:2026-08-23")
-  (tuple "volumes" (list "data:/data" "/etc/hostd/site:/etc/site:ro"))
-  (tuple "memory-mb" 256)
-  (tuple "restart" "always"))
-```
+`name` and `image` are required; the file must be named after the service.
+`kind` defaults to `container`, and no other kind exists. `state` defaults to
+`running`, `restart` to `always`. `args`, `dir`, `env`, `ports`, `volumes`,
+`memory-mb`, `cpus` and `stop-timeout` are optional.
 
 The image runs its own command, so `args` only overrides what it takes. What
 the container gets from the machine is what the file names and nothing else:
@@ -170,10 +168,10 @@ be published is whatever answers the internet.
 ```lisp
 (service
   (tuple "name" "caddy")
-  (tuple "kind" "container")
   (tuple "image" "caddy:2-alpine")
   (tuple "ports" (list "0.0.0.0:80:80" "0.0.0.0:443:443"))
-  (tuple "volumes" (list "/etc/hostd/caddy:/etc/caddy:ro" "data:/data"))
+  (tuple "volumes" (list "data:/data"))
+  (tuple "config" "/etc/caddy")
   (tuple "restart" "always"))
 ```
 
@@ -214,9 +212,8 @@ runs on the operator's computer; a host that needs the client installed to be
 operated is a host you are still administering by ssh.
 
 Running it again is the upgrade path: the daemon is replaced and restarted,
-and the services under supervision keep running. The unit uses
-`KillMode=process` for exactly that reason — the default would kill every
-process in the unit's cgroup, which is every service `hostd` supervises.
+and the containers keep running because they belong to the runtime, not to the
+daemon's process tree.
 
 ## Operating a machine from your own
 
@@ -313,8 +310,9 @@ hostctl gui
 ```
 
 One window over every machine in the inventory: what each one is running, its
-CPU and memory over the last hour, and the log of the whole fleet in one place,
-refreshed every two seconds. `-host`, `-hosts` and `-tag` narrow it.
+CPU and memory over the last hour, and the log of the whole fleet in one place.
+The backend asks every two seconds off the UI thread; only changed fragments
+reach the page. `-host`, `-hosts` and `-tag` narrow it.
 
 It is **read only**. A restart or a stop is shown as the `hostctl` command that
 would do it, ready to copy — a dashboard that acts is a dashboard that acts by
@@ -391,9 +389,9 @@ code and how long it took — under the run it belongs to, which is what a
 
 ```console
 hostctl -host yuki.local log -service retry-webhooks
-2026-08-23 14:11:40 ticker * run 1787505100000 started as container 6e7d5126699a
-2026-08-23 14:11:40 ticker | working
-2026-08-23 14:11:43 ticker * run 1787505100000 finished with exit 0 after 2.626s
+2026-08-23 14:11:40 retry-webhooks * run 1787505100000 started as container 6e7d5126699a
+2026-08-23 14:11:40 retry-webhooks | working
+2026-08-23 14:11:43 retry-webhooks * run 1787505100000 finished with exit 0 after 2.626s
 ```
 
 ## Metrics
@@ -419,7 +417,8 @@ reads as 200.
 ## Build
 
 Go 1.27, `CGO_ENABLED=0`, static. Targets are `linux/amd64` and `linux/arm64`.
-The only dependencies are Filo and a pure-Go SQLite driver.
+The daemon uses Filo and a pure-Go SQLite driver. The graphical client uses
+[glaze](https://github.com/crgimenes/glaze).
 
 ```bash
 go test -race -count 1 -timeout 400s ./...
