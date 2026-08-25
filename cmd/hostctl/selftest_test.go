@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 
@@ -108,5 +109,47 @@ func TestAMachineWithNothingRunningHasNothingToLose(t *testing.T) {
 	}
 	if kept(nil) != "no service was running" {
 		t.Fatalf("the report does not say the promise went untested: %q", kept(nil))
+	}
+}
+
+// A rollback has two outcomes to tell apart, and the report has to keep them
+// apart: the binary is back, and the work is back. They are not the same event
+// and an operator acts differently on each.
+func TestARollbackSaysWhetherTheWorkCameBack(t *testing.T) {
+	var out bytes.Buffer
+	rollback{version: "v0.0.3"}.report(&out, "yuki")
+	text := out.String()
+	if !strings.Contains(text, "went back to v0.0.3") || !strings.Contains(text, "running again") {
+		t.Fatalf("a recovered machine is not reported as recovered:\n%s", text)
+	}
+
+	out.Reset()
+	rollback{version: "v0.0.3", stillLost: []string{"caddy is now stopped"}}.report(&out, "yuki")
+	text = out.String()
+	if !strings.Contains(text, "went back to v0.0.3") {
+		t.Fatalf("the report does not say what was restored:\n%s", text)
+	}
+	if !strings.Contains(text, "has not returned") || !strings.Contains(text, "caddy is now stopped") {
+		t.Fatalf("the report does not say the work is still missing:\n%s", text)
+	}
+	// Restoring a binary does not restart a container; saying which mechanism
+	// would is the difference between waiting and acting.
+	if !strings.Contains(text, "drift round") {
+		t.Fatalf("the report does not say what brings the work back:\n%s", text)
+	}
+}
+
+// A machine with no previous daemon — a first install that went wrong — has
+// nowhere to go back to, and that has to be said rather than reported as a
+// successful rollback.
+func TestARollbackThatCouldNotHappenSaysSo(t *testing.T) {
+	var out bytes.Buffer
+	rollback{problem: "there is no previous hostd on this machine"}.report(&out, "m1")
+	text := out.String()
+	if !strings.Contains(text, "could not go back") {
+		t.Fatalf("a failed rollback is not reported as one:\n%s", text)
+	}
+	if strings.Contains(text, "running again") {
+		t.Fatalf("a failed rollback claims the work is back:\n%s", text)
 	}
 }

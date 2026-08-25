@@ -102,9 +102,19 @@ func runInstall(ctx context.Context, opt options, args []string) (int, error) {
 		for _, complaint := range lost {
 			_, _ = fmt.Fprintf(out, "%s: %s\n", host, complaint)
 		}
+		// Automatic, and the argument for it is the unattended case: `-all
+		// install` at three in the morning must not leave a machine on a daemon
+		// that just lost its work while the operator is asleep. The binary that
+		// was there is the one known to have worked HERE, which is worth more
+		// than its version number. An upgrade that was in fact fine and got
+		// reverted by something unrelated costs one re-run; the other mistake
+		// costs a night.
+		_, _ = fmt.Fprintf(out, "%s: putting the previous daemon back\n", host)
+		restored := goBack(ctx, opt, host, wasRunning)
+		restored.report(out, host)
 		return exitFailed, fmt.Errorf(
-			"%s now runs %s, but %d service(s) did not survive the change; hostd is meant to be replaceable without touching them",
-			host, reported, len(lost))
+			"%s did not keep its services through the upgrade to %s, so it was put back; hostd is meant to be replaceable without touching them",
+			host, reported)
 	}
 
 	_, _ = fmt.Fprintf(out, "%s;%s;%s;%s;%s\n",
@@ -289,6 +299,13 @@ var installScript = []byte(`set -eu
 sudo=""
 if [ "$(id -u)" -ne 0 ]; then
 	sudo="sudo -n"
+fi
+# Keep what is on the machine before replacing it. It is the one binary known
+# to have worked HERE, which is worth more than any version number when the new
+# one comes up wrong. Copied rather than moved: a machine that loses power
+# between the two commands must still have a daemon.
+if [ -x /usr/local/bin/hostd ]; then
+	$sudo cp -p /usr/local/bin/hostd /usr/local/bin/hostd.previous
 fi
 $sudo install -m 0755 "$REMOTE_DIR/hostd" /usr/local/bin/hostd
 $sudo install -m 0644 "$REMOTE_DIR/hostd.service" /etc/systemd/system/hostd.service
