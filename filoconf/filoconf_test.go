@@ -108,9 +108,10 @@ func TestContextCancels(t *testing.T) {
 	}
 }
 
-// filo.Marshal renders an empty slice as "()", which its own evaluator
-// rejects. An empty result is the most ordinary result there is, so it has to
-// survive the round trip.
+// An empty result is the most ordinary result there is, so it has to survive
+// the round trip. filo once rendered an empty slice as "()", which its own
+// evaluator rejected, and hostd carried a repair for it until filo v0.0.18
+// fixed the source; this is what says the repair is not needed again.
 func TestEmptyValuesRoundTrip(t *testing.T) {
 	type row struct {
 		Name string   `filo:"name"`
@@ -137,10 +138,11 @@ func TestEmptyValuesRoundTrip(t *testing.T) {
 	}
 }
 
-// A captured log line may contain the two characters that the empty-list
-// repair looks for. Rewriting inside a string would corrupt the output hostd
-// exists to preserve.
-func TestEmptyListRepairLeavesStringsAlone(t *testing.T) {
+// A captured log line is whatever a program decided to write: parentheses,
+// backslashes and quotes included. It has to come back exactly as it went in,
+// because preserving it is what hostd is for — and text that gets rewritten on
+// the way through is the failure mode any future shortcut here would have.
+func TestACapturedLineSurvivesMarshallingUnchanged(t *testing.T) {
 	type line struct {
 		Text  string   `filo:"text"`
 		Extra []string `filo:"extra"`

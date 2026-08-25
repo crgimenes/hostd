@@ -82,32 +82,5 @@ func Marshal(v any) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimRight(repairEmptyLists(out), "\n") + "\n", nil
-}
-
-// filo.Marshal renders an empty slice as `()`, which its own evaluator rejects,
-// so an empty result would not survive a round trip. String literals are
-// skipped: a captured log line may contain those two characters.
-func repairEmptyLists(src string) string {
-	var b strings.Builder
-	b.Grow(len(src))
-	inString := false
-	for i := 0; i < len(src); i++ {
-		c := src[i]
-		switch {
-		case inString && c == '\\' && i+1 < len(src):
-			b.WriteByte(c)
-			i++
-			b.WriteByte(src[i])
-			continue
-		case c == '"':
-			inString = !inString
-		case !inString && c == '(' && i+1 < len(src) && src[i+1] == ')':
-			b.WriteString("(list)")
-			i++
-			continue
-		}
-		b.WriteByte(c)
-	}
-	return b.String()
+	return strings.TrimRight(out, "\n") + "\n", nil
 }
