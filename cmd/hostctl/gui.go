@@ -126,7 +126,12 @@ type fleetHost struct {
 	Services []supervisor.Status `json:"services"`
 	Metrics  []metrics.Series    `json:"metrics"`
 	Lines    []api.LogLine       `json:"lines"`
-	Since    uint64              `json:"since"`
+	// Only the machine whose image screen is open carries these. Asking every
+	// machine every two seconds for a list nobody is reading would spend the
+	// fleet's round on it.
+	Images      []api.ImageEntry `json:"images"`
+	ImagesError string           `json:"images-error,omitempty"`
+	Since       uint64           `json:"since"`
 }
 
 // Fleet asks every machine at once. The window in seconds is how far back the
@@ -138,7 +143,7 @@ type fleetHost struct {
 // takes as long as ssh takes to give up, and waiting for it would hide every
 // machine that answered — which is the whole fleet gone from the window
 // because one of them is unplugged.
-func (p *panel) Fleet(window int, fromMS, toMS float64, since map[string]uint64, arrived func(fleetHost)) {
+func (p *panel) Fleet(window int, fromMS, toMS float64, since map[string]uint64, imagesFor string, arrived func(fleetHost)) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
@@ -150,7 +155,7 @@ func (p *panel) Fleet(window int, fromMS, toMS float64, since map[string]uint64,
 	var wg sync.WaitGroup
 	for _, host := range p.hostsNow() {
 		wg.Go(func() {
-			arrived(p.one(ctx, host, fromMS, toMS, since[host]))
+			arrived(p.one(ctx, host, fromMS, toMS, since[host], host == imagesFor))
 		})
 	}
 	wg.Wait()
@@ -245,7 +250,7 @@ func (p *panel) settings() settingsInfo {
 	}
 }
 
-func (p *panel) one(ctx context.Context, host string, fromMS, toMS float64, since uint64) fleetHost {
+func (p *panel) one(ctx context.Context, host string, fromMS, toMS float64, since uint64, wantImages bool) fleetHost {
 	answer := fleetHost{Host: host, Since: since}
 	p.reaching(host, true)
 	defer p.reaching(host, false)
@@ -292,6 +297,15 @@ func (p *panel) one(ctx context.Context, host string, fromMS, toMS float64, sinc
 	for _, line := range answer.Lines {
 		if line.Seq > answer.Since {
 			answer.Since = line.Seq
+		}
+	}
+	if wantImages {
+		err = ask(ctx, client, api.Request{Op: api.OpImageList}, &answer.Images)
+		if err != nil {
+			// Kept apart from Error: a daemon too old to know the operation, or
+			// a machine with no runtime, must not blank the services and charts
+			// it answered perfectly well.
+			answer.ImagesError = err.Error()
 		}
 	}
 	return answer
@@ -366,6 +380,11 @@ func (p *panel) pick(rest []string) {
 		// Asking about a machine is asking what is on it. Leaving it shut
 		// would answer with the name of the machine the operator just named.
 		p.view.closed[p.view.host] = false
+	}
+	if p.view.kind == "images" {
+		// A machine's images are only fetched while their screen is open, so
+		// opening it has to ask rather than sit empty until the next tick.
+		p.wake()
 	}
 }
 

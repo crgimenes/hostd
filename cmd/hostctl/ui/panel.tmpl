@@ -112,6 +112,14 @@
           {{- if not .Rows}}<tr><td class="dim">no service is declared here</td></tr>{{end}}
         </table>
         {{- end}}
+        {{- if .GridHead}}
+        <table class="grid">
+          <tr>{{range .GridHead}}<th>{{.}}</th>{{end}}</tr>
+          {{- range .Grid}}
+          <tr{{if .Loose}} class="loose"{{end}}>{{range .Cells}}<td>{{.}}</td>{{end}}</tr>
+          {{- end}}
+        </table>
+        {{- end}}
         {{- if .Facts}}{{template "factsTable" .}}{{end}}
         {{- range .Charts}}{{template "chartHolder" .}}{{end}}
       </section>

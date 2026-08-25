@@ -655,6 +655,20 @@ td.wide {
 	width: 120px;
 }
 
+/* The name column carries a tag list that can be long; the rest are short and
+   should not be squeezed by it. */
+table.grid td:first-child {
+	white-space: normal;
+	word-break: break-all;
+}
+
+/* A row nothing on the machine is holding: the one a cleanup is about. Dimmed
+   rather than coloured — it is not a fault, it is simply unclaimed, and
+   painting it like an error would say something untrue about the machine. */
+table.grid tr.loose td {
+	color: var(--secondary);
+}
+
 td .dim, .dim {
 	color: var(--secondary);
 }

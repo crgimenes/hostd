@@ -1,13 +1,11 @@
 package main
 
 import (
-	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
-	"slices"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -57,27 +55,51 @@ func printImages(out io.Writer, target string, held []api.ImageEntry) {
 		_, _ = fmt.Fprintln(out, "this machine holds no images")
 		return
 	}
-	// Newest first: the image an operator is looking for is almost always the
-	// one a deploy just put there.
-	slices.SortFunc(held, func(a, b api.ImageEntry) int {
-		if a.Created != b.Created {
-			return cmp.Compare(b.Created, a.Created)
-		}
-		return strings.Compare(a.Digest, b.Digest)
-	})
-	var total float64
+	var total, ourTotal, free float64
+	ours, loose := 0, 0
 	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(w, "IMAGE\tSIZE\tCREATED\tDIGEST")
+	_, _ = fmt.Fprintln(w, "IMAGE\tSIZE\tCREATED\tUSED BY\tOWNER\tDIGEST")
 	for _, image := range held {
 		total += image.Bytes
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",
+		used := image.UsedBy
+		if used == "" {
+			used = "-"
+		}
+		if image.Managed {
+			ours++
+			ourTotal += image.Bytes
+			if image.UsedBy == "" {
+				loose++
+				free += image.Bytes
+			}
+		}
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
 			tagsText(image.Tags),
 			formatBytes(image.Bytes),
 			time.UnixMilli(int64(image.Created)).Format("2006-01-02 15:04"),
+			used,
+			ownerText(image.Managed),
 			shortDigest(image.Digest))
 	}
 	_ = w.Flush()
 	_, _ = fmt.Fprintf(out, "%d images, %s\n", len(held), formatBytes(total))
+	_, _ = fmt.Fprintf(out, "%d put here by hostd, %s\n", ours, formatBytes(ourTotal))
+	if loose == 0 {
+		return
+	}
+	// Only ours are ever candidates: what another system built on this machine
+	// is reported and never counted as something to reclaim. Nothing here
+	// removes anything — that is a separate command, and a destructive one.
+	_, _ = fmt.Fprintf(out, "%d of ours held by nothing, %s\n", loose, formatBytes(free))
+}
+
+// An image hostd did not put here belongs to whatever else runs on the machine.
+// Naming that plainly is the point: it is reported, not accounted for.
+func ownerText(managed bool) string {
+	if managed {
+		return "hostd"
+	}
+	return "other"
 }
 
 // An untagged image is not nameless: it is startable by digest, which is what

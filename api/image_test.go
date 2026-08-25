@@ -3,7 +3,10 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -204,4 +207,187 @@ func TestListingImagesAnswersWithWhatTheRuntimeHolds(t *testing.T) {
 		return
 	}
 	t.Fatalf("%s is on this machine and is not in the answer", image)
+}
+
+// A declaration this machine cannot read would leave the image it names looking
+// held by nothing, and "held by nothing" is the verdict that gets an image
+// deleted. Refusing to answer is the safe direction.
+func TestAnUnreadableDeclarationStopsTheVerdictOnWhatIsInUse(t *testing.T) {
+	f := newFixture(t)
+	services := filepath.Join(f.dir, "services")
+	err := os.MkdirAll(services, 0o700)
+	if err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	err = os.WriteFile(filepath.Join(services, "broken.filo"), []byte(`(service (tuple "name"`), 0o600)
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	_, err = f.server.imageHolders(context.Background())
+	if err == nil {
+		t.Fatal("a services directory that cannot be read still produced a verdict on which images are free")
+	}
+}
+
+// An image a declaration names is held even where nothing runs yet: a service
+// declared and not started still needs it at the next apply.
+func TestADeclaredImageIsNotReportedAsHeldByNothing(t *testing.T) {
+	runtime, image := requireImage(t)
+	f := newFixture(t)
+	f.server.Runtime(runtime)
+	services := filepath.Join(f.dir, "services")
+	err := os.MkdirAll(services, 0o700)
+	if err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	err = os.WriteFile(filepath.Join(services, "probe.filo"),
+		[]byte(fmt.Sprintf(`(service (tuple "name" "probe") (tuple "image" %q))`, image)), 0o600)
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	client := f.client()
+	defer func() { _ = client.Close() }()
+	resp, err := client.Do(context.Background(), Request{Op: OpImageList})
+	if err != nil {
+		t.Fatalf("image.list: %v", err)
+	}
+	if resp.Failed() {
+		t.Fatalf("listing the images failed: %v", resp.Err())
+	}
+	var held []ImageEntry
+	err = decodeBody(t, resp.Body, &held)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	for _, entry := range held {
+		if !slices.Contains(entry.Tags, image) {
+			continue
+		}
+		if entry.UsedBy == "" {
+			t.Fatalf("%s is named by a declaration and is reported as held by nothing", image)
+		}
+		return
+	}
+	t.Fatalf("%s is on this machine and is not in the answer", image)
+}
+
+// The order is part of the answer, sorted once here so the CLI, the panel and
+// an agent do not each carry a rule that can disagree with the other two.
+func TestImagesComeBackNewestFirst(t *testing.T) {
+	runtime, _ := requireImage(t)
+	f := newFixture(t)
+	f.server.Runtime(runtime)
+
+	client := f.client()
+	defer func() { _ = client.Close() }()
+	resp, err := client.Do(context.Background(), Request{Op: OpImageList})
+	if err != nil {
+		t.Fatalf("image.list: %v", err)
+	}
+	var held []ImageEntry
+	err = decodeBody(t, resp.Body, &held)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(held) < 2 {
+		t.Skip("one image cannot show an order")
+	}
+	for at := 1; at < len(held); at++ {
+		if held[at].Created > held[at-1].Created {
+			t.Fatalf("image %d is newer than the one before it: %.0f after %.0f",
+				at, held[at].Created, held[at-1].Created)
+		}
+	}
+}
+
+// The tag is derived from the bytes, not from the name they came under, so two
+// pushes of one tag are two versions and both stay nameable.
+func TestTheManagedTagNamesTheContent(t *testing.T) {
+	mark := ManagedTag("0123456789abcdef0123")
+	if mark != "hostd-0123456789ab" {
+		t.Fatalf("the mark is %q", mark)
+	}
+	// A short hash must not panic or produce a mark that is only the prefix.
+	if ManagedTag("abc") != "hostd-abc" {
+		t.Fatalf("a short content hash came out as %q", ManagedTag("abc"))
+	}
+}
+
+// A registry's host:port carries a colon that is not a tag separator. Splitting
+// on the wrong one would tag "registry.once.com" as a repository.
+func TestTheRepositoryIsFoundPastARegistryPort(t *testing.T) {
+	for reference, want := range map[string]string{
+		"site":                              "site",
+		"site:2026-08-25":                   "site",
+		"registry.once.com/campfire:latest": "registry.once.com/campfire",
+		"registry.once.com:5000/campfire":   "registry.once.com:5000/campfire",
+	} {
+		got := RepositoryOf(reference)
+		if got != want {
+			t.Errorf("RepositoryOf(%q) = %q, want %q", reference, got, want)
+		}
+	}
+}
+
+// Marking is what tells hostd's images from the ones another system on the
+// machine built, and it has to survive the trip: an image that arrives
+// unmarked is one nothing can account for later.
+func TestAPushedImageComesBackMarkedAsOurs(t *testing.T) {
+	runtime, image := requireImage(t)
+	f := newFixture(t)
+	f.server.Runtime(runtime)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	content, writer := io.Pipe()
+	go func() { _ = writer.CloseWithError(runtime.Save(ctx, image, writer)) }()
+	here, err := runtime.Image(ctx, image)
+	if err != nil {
+		t.Fatalf("Image: %v", err)
+	}
+
+	client := f.client()
+	defer func() { _ = client.Close() }()
+	resp, err := client.Push(ctx, image, here.Arch, content)
+	if err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+	if resp.Failed() {
+		t.Fatalf("the push failed: %v", resp.Err())
+	}
+	var received Image
+	err = decodeBody(t, resp.Body, &received)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// The runtime under test is this machine's own, so the mark is cleaned up
+	// rather than left on the developer's images.
+	mark := RepositoryOf(image) + ":" + ManagedTag(received.Content)
+	t.Cleanup(func() { _ = runtime.RemoveImage(context.Background(), mark) })
+
+	answer, err := client.Do(ctx, Request{Op: OpImageList})
+	if err != nil {
+		t.Fatalf("image.list: %v", err)
+	}
+	var held []ImageEntry
+	err = decodeBody(t, answer.Body, &held)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	for _, entry := range held {
+		if entry.Digest != received.Digest {
+			continue
+		}
+		if !entry.Managed {
+			t.Fatalf("the image hostd just received is not marked as ours: %v", entry.Tags)
+		}
+		if !slices.Contains(entry.Tags, mark) {
+			t.Fatalf("the mark %q is not on the image: %v", mark, entry.Tags)
+		}
+		return
+	}
+	t.Fatalf("the image hostd just received is not in the list")
 }

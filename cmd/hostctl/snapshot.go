@@ -85,7 +85,7 @@ func (p *panel) round(ctx context.Context) {
 	view := p.viewport()
 	// Each machine is folded in and pushed as it answers, so the window fills
 	// up rather than appearing all at once when the last one is done.
-	p.Fleet(view.window, view.from, view.to, p.sequences(), func(answer fleetHost) {
+	p.Fleet(view.window, view.from, view.to, p.sequences(), imagesHost(view), func(answer fleetHost) {
 		p.absorb([]fleetHost{answer})
 		p.push()
 	})
@@ -93,6 +93,15 @@ func (p *panel) round(ctx context.Context) {
 	close(finished)
 	p.working(false)
 	p.push()
+}
+
+// Which machine, if any, is being asked for its images this round: the one
+// whose image screen is open, and no other.
+func imagesHost(view viewState) string {
+	if view.kind != "images" {
+		return ""
+	}
+	return view.host
 }
 
 // sayIfSlow tells the window the panel is working, but only once the round has
@@ -164,6 +173,12 @@ func (p *panel) absorb(fleet []fleetHost) {
 			if len(known.Services) > 0 {
 				host.Services = known.Services
 				host.Metrics = known.Metrics
+			}
+			// A failed round asked for no images either, so what is on the
+			// image screen would empty itself every time ssh hiccups.
+			if len(known.Images) > 0 {
+				host.Images = known.Images
+				host.ImagesError = known.ImagesError
 			}
 		}
 		p.snap.Fleet[at] = host

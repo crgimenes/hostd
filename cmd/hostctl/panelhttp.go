@@ -367,13 +367,14 @@ func treeOf(snap snapshot, view viewState) treeView {
 		if host.Error != "" {
 			row.Meta = "!"
 		}
-		if len(services) > 0 {
-			row.Twist = "closed"
-			if open {
-				row.Twist = "open"
-			}
-			row.Toggle = "toggle/" + host.Host
+		// Always openable: even a machine that declares nothing carries the
+		// images row, so a twist that appeared only with services would leave
+		// that row with no way to fold it away.
+		row.Twist = "closed"
+		if open {
+			row.Twist = "open"
 		}
+		row.Toggle = "toggle/" + host.Host
 		out.Rows = append(out.Rows, row)
 		if !open {
 			continue
@@ -390,6 +391,15 @@ func treeOf(snap snapshot, view viewState) treeView {
 				Link: "select/service/" + host.Host + "/" + service.Name,
 			})
 		}
+		out.Rows = append(out.Rows, rowView{
+			Key:      "images:" + host.Host,
+			Label:    "Images",
+			Icon:     "stack",
+			Meta:     imagesMeta(host),
+			Child:    true,
+			Selected: view.kind == "images" && view.host == host.Host,
+			Link:     "select/images/" + host.Host,
+		})
 	}
 	out.Rows = append(out.Rows, rowView{
 		Key:    "head-panel",
@@ -403,6 +413,15 @@ func treeOf(snap snapshot, view viewState) treeView {
 		Link:     "select/settings",
 	})
 	return out
+}
+
+// Nothing until the screen has been opened once: a count of zero would say the
+// machine holds no images, when what is true is that nobody has asked yet.
+func imagesMeta(host fleetHost) string {
+	if len(host.Images) == 0 {
+		return ""
+	}
+	return strconv.Itoa(len(host.Images))
 }
 
 func running(services []supervisor.Status) int {

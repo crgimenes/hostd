@@ -393,10 +393,14 @@ func (c *Client) Inspect(ctx context.Context, id string) (Container, error) {
 
 // List answers with the containers carrying a label, running or not: a
 // supervisor that only looked at what is running would leave the dead ones
-// behind forever.
+// behind forever. An empty label asks for every container on the machine,
+// which is what a question about the machine rather than about hostd needs —
+// an image is held by any container, not only by one hostd created.
 func (c *Client) List(ctx context.Context, label string) ([]Container, error) {
-	filters := fmt.Sprintf(`{"label":[%q]}`, label)
-	query := url.Values{"all": {"true"}, "filters": {filters}}
+	query := url.Values{"all": {"true"}}
+	if label != "" {
+		query.Set("filters", fmt.Sprintf(`{"label":[%q]}`, label))
+	}
 	var raw []struct {
 		ID     string   `json:"Id"`
 		Names  []string `json:"Names"`
@@ -562,6 +566,23 @@ func (c *Client) Images(ctx context.Context) ([]ImageSummary, error) {
 		})
 	}
 	return out, nil
+}
+
+// Tag gives an image another name. It is how hostd marks what it put on a
+// machine: an image cannot be labelled after it is loaded, and a tag is the
+// only mark the runtime lets be added afterwards — which also makes it visible
+// to whoever runs `docker images` on the box.
+func (c *Client) Tag(ctx context.Context, image, repo, tag string) error {
+	query := url.Values{"repo": {repo}, "tag": {tag}}
+	return c.call(ctx, http.MethodPost, "/images/"+url.PathEscape(image)+"/tag", query, nil, nil)
+}
+
+// RemoveImage drops one reference to an image. The runtime deletes the image
+// itself only when the reference removed was its last, and refuses outright
+// while a container uses it — which is the check that makes removing an image
+// something a mistake cannot turn into an outage.
+func (c *Client) RemoveImage(ctx context.Context, reference string) error {
+	return c.call(ctx, http.MethodDelete, "/images/"+url.PathEscape(reference), nil, nil, nil)
 }
 
 // Arch is what this machine runs. An image built for another one loads

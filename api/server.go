@@ -2,6 +2,7 @@ package api
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -239,13 +241,59 @@ func (s *Server) loadImage(ctx context.Context, conn net.Conn, reader *bufio.Rea
 		return Response{Code: CodeFailed, Message: fmt.Sprintf("%s was loaded but cannot be found: %v", req.Name, err)}
 	}
 	sum := hex.EncodeToString(content.Sum(nil))
+	// Marked as ours before it is reported as arrived. Other things on this
+	// machine build images too and those are nobody's business here; what
+	// matters is that what hostd put there can always be told apart, and that
+	// every version keeps a name of its own instead of becoming untagged when
+	// the next push takes the tag it came under.
+	mark := ManagedTag(sum)
+	err = s.runtime.Tag(ctx, digest, RepositoryOf(req.Name), mark)
+	if err != nil {
+		return Response{Code: CodeFailed, Message: fmt.Sprintf("%s was loaded but could not be marked as ours: %v", req.Name, err)}
+	}
 	s.log.Append(logs.Record{
 		Service: "hostd",
 		Stream:  logs.StreamEvent,
 		Kind:    logs.EventImage,
-		Text:    fmt.Sprintf("received image %s as %s, %d bytes, content sha256:%s", req.Name, digest, total, sum),
+		Text:    fmt.Sprintf("received image %s as %s tagged %s, %d bytes, content sha256:%s", req.Name, digest, mark, total, sum),
 	})
 	return body(Image{Name: req.Name, Digest: digest, Bytes: float64(total), Content: sum})
+}
+
+// The tag hostd puts on an image it received, derived from the bytes that
+// arrived rather than from the name they came under. Two pushes of one tag are
+// two versions, and both stay nameable — which is what a rollback needs and
+// what stops a displaced version becoming anonymous.
+const ManagedTagPrefix = "hostd-"
+
+func ManagedTag(contentSHA256 string) string {
+	const shown = 12
+	if len(contentSHA256) > shown {
+		contentSHA256 = contentSHA256[:shown]
+	}
+	return ManagedTagPrefix + contentSHA256
+}
+
+// The repository half of an image reference. The tag is what follows the last
+// colon, unless that colon is inside a registry's host:port, which is what the
+// slash after it means.
+func RepositoryOf(reference string) string {
+	at := strings.LastIndex(reference, ":")
+	if at < 0 || strings.Contains(reference[at+1:], "/") {
+		return reference
+	}
+	return reference[:at]
+}
+
+// Whether hostd is the one that put this image here, by the mark it leaves.
+func managed(tags []string) bool {
+	for _, tag := range tags {
+		at := strings.LastIndex(tag, ":")
+		if at >= 0 && strings.HasPrefix(tag[at+1:], ManagedTagPrefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // What a push answers with, so the declaration can be pinned to what really
@@ -273,7 +321,23 @@ type ImageEntry struct {
 	Bytes float64  `filo:"bytes" json:"bytes"`
 	// Milliseconds, like every other time on the wire.
 	Created float64 `filo:"created-ms" json:"created-ms"`
+	// What would stop this image being removed, empty for one nothing holds.
+	// Whoever is deciding what to delete is asking exactly this.
+	UsedBy string `filo:"used-by" json:"used-by"`
+	// Put here by hostd, and so ours to account for and one day to prune.
+	// Anything else on the machine was built or pulled by something else, and
+	// is reported without ever being a candidate for removal.
+	Managed bool `filo:"managed" json:"managed"`
 }
+
+// What holds an image on this machine. A container is the stronger hold: the
+// runtime itself refuses to remove an image one references, whether hostd
+// created that container or not. A declaration is the weaker one — nothing
+// stops the removal today, and the service would fail to start next time.
+const (
+	UsedByContainer = "container"
+	UsedByDeclared  = "declared"
+)
 
 // listImages is how an operator sees what a machine's disk went to, and what a
 // rollback would still find there. Nothing removes images today, so this only
@@ -286,6 +350,13 @@ func (s *Server) listImages(ctx context.Context) Response {
 	if err != nil {
 		return Response{Code: CodeFailed, Message: err.Error()}
 	}
+	// A declaration this machine cannot read is one whose image would be
+	// reported as held by nothing, which is the answer that gets an image
+	// deleted. Refusing to answer is the safe direction.
+	holders, err := s.imageHolders(ctx)
+	if err != nil {
+		return Response{Code: CodeFailed, Message: fmt.Sprintf("cannot tell which images are in use, so none can be called free: %v", err)}
+	}
 	out := make([]ImageEntry, 0, len(held))
 	for _, image := range held {
 		out = append(out, ImageEntry{
@@ -293,9 +364,67 @@ func (s *Server) listImages(ctx context.Context) Response {
 			Tags:    image.Tags,
 			Bytes:   float64(image.Bytes),
 			Created: float64(image.Created.UnixMilli()),
+			UsedBy:  heldBy(image, holders),
+			Managed: managed(image.Tags),
 		})
 	}
+	// Newest first, here rather than in each client: the order is part of the
+	// answer, so the CLI, the panel and an agent all read the same list without
+	// three implementations of one rule. The digest breaks ties so two images
+	// of the same second do not swap places between calls.
+	slices.SortFunc(out, func(a, b ImageEntry) int {
+		if a.Created != b.Created {
+			return cmp.Compare(b.Created, a.Created)
+		}
+		return strings.Compare(a.Digest, b.Digest)
+	})
 	return body(out)
+}
+
+// imageHolders maps every name that holds an image — a digest or a tag — onto
+// what holds it.
+func (s *Server) imageHolders(ctx context.Context) (map[string]string, error) {
+	holders := make(map[string]string)
+	// Desired state, which holds an image even where nothing runs yet: a
+	// service declared and not started still needs the image it names.
+	declared, err := service.LoadDir(ctx, s.services)
+	if err != nil {
+		return nil, err
+	}
+	for _, def := range declared {
+		if def.Image == "" {
+			continue
+		}
+		holders[def.Image] = UsedByDeclared
+	}
+	// Observed state, and the stronger claim, so it is written last.
+	running, err := s.runtime.List(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	for _, container := range running {
+		if container.Digest == "" {
+			continue
+		}
+		holders[container.Digest] = UsedByContainer
+	}
+	return holders, nil
+}
+
+// A declaration names an image by tag or by digest, and both are how a service
+// would be started again, so a hold on either is a hold on the image.
+func heldBy(image docker.ImageSummary, holders map[string]string) string {
+	reason, held := holders[image.Digest]
+	if held {
+		return reason
+	}
+	for _, tag := range image.Tags {
+		reason, held = holders[tag]
+		if held {
+			return reason
+		}
+	}
+	return ""
 }
 
 // Who is on the other end, from the kernel rather than from anything the

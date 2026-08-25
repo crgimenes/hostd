@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/crgimenes/hostd/api"
 	"github.com/crgimenes/hostd/metrics"
 	"github.com/crgimenes/hostd/supervisor"
 	"github.com/crgimenes/hostd/version"
@@ -45,6 +46,17 @@ type cardView struct {
 	Facts   [][2]string
 	Charts  []chartView
 	Buttons []buttonView
+	// A plain table, for a card whose rows are not services. Head above drives
+	// the service table and its fixed columns; these two are the general one.
+	GridHead []string
+	Grid     []gridRow
+}
+
+type gridRow struct {
+	Cells []string
+	// Nothing on the machine is holding this row's subject. It is the row a
+	// cleanup is about, so it is worth seeing without reading the column.
+	Loose bool
 }
 
 func (c cardView) AsideID() string { return "aside-" + safeID(c.Key) }
@@ -119,6 +131,11 @@ func (d detailView) StructureKey() string {
 		for _, fact := range card.Facts {
 			fmt.Fprintf(&key, " f:%s\n", fact[0])
 		}
+		// Whole rows, not just their names: an image list changes by rows
+		// appearing and going, and nothing inside it repaints on its own.
+		for _, row := range card.Grid {
+			fmt.Fprintf(&key, " g:%s|%v\n", strings.Join(row.Cells, "\x1f"), row.Loose)
+		}
 		for _, button := range card.Buttons {
 			fmt.Fprintf(&key, " b:%s|%s\n", button.Command, button.Act)
 		}
@@ -182,12 +199,18 @@ func detailOf(snap snapshot, view viewState, info settingsInfo) detailView {
 		out = hostDetail(snap, view)
 	case "service":
 		out = serviceDetail(snap, view)
+	case "images":
+		out = imagesDetail(snap, view)
 	case "settings":
 		out = settingsDetail(info)
 	default:
 		out = fleetDetail(snap, view)
 	}
-	out.Watching = view.kind != "settings"
+	// The log and the window buttons belong to a view about what the machines
+	// are DOING. A page about the panel, or about what a machine is storing,
+	// governs neither, and offering a control that moves nothing is worse than
+	// not offering it.
+	out.Watching = view.kind != "settings" && view.kind != "images"
 	out.Window = view.window
 	from, to := span(snap, view)
 	out.From, out.To = int64(from), int64(to)
@@ -242,6 +265,122 @@ func fleetDetail(snap snapshot, view viewState) detailView {
 		overview.ID = "plot-" + safeID(host.Host)
 		card.Charts = []chartView{overview}
 		out.Cards = append(out.Cards, card)
+	}
+	return out
+}
+
+// The image screen for one machine: what it is holding, and how much of it
+// nothing is holding on to. Read-only like the rest of the panel — removing an
+// image is destructive and belongs to a command with a plan in front of it.
+func imagesDetail(snap snapshot, view viewState) detailView {
+	host, found := machineOf(snap, view.host)
+	if !found {
+		return detailView{Title: view.host, Single: true, Empty: "this machine is not in the fleet any more"}
+	}
+	out := detailView{Title: host.Host, Subtitle: "images", Single: true}
+	switch {
+	case host.ImagesError != "":
+		out.Empty = host.ImagesError
+		return out
+	case len(host.Images) > 0:
+	case host.Error != "":
+		out.Empty = host.Error
+		return out
+	default:
+		// Nothing has come back yet. Saying the machine holds no images would
+		// be a different, and wrong, statement.
+		out.Empty = "asking " + host.Host + " what it holds…"
+		return out
+	}
+
+	ours, others := splitManaged(host.Images)
+	out.Subtitle = fmt.Sprintf("%d of %d image(s) put here by hostd", len(ours), len(host.Images))
+
+	managed := cardView{
+		Key:      "images",
+		Heading:  "Managed by hostd",
+		GridHead: []string{"image", "size", "created", "used by", "digest"},
+		Numbers:  imageNumbers(ours, true),
+		Grid:     imageRows(ours),
+		Buttons: []buttonView{{
+			Label:   "Command",
+			Icon:    "clipboard",
+			Command: "hostctl -host " + host.Host + " image ls",
+		}},
+	}
+	if len(ours) == 0 {
+		managed.Problem = "nothing here arrived through hostctl image push"
+	}
+	out.Cards = append(out.Cards, managed)
+
+	if len(others) == 0 {
+		return out
+	}
+	// Reported, never accounted for: another system building images on this
+	// machine is not this one's business, and offering to remove them would be
+	// hostd claiming a machine it only has a corner of.
+	out.Cards = append(out.Cards, cardView{
+		Key:      "images-other",
+		Heading:  "Built or pulled by something else",
+		GridHead: []string{"image", "size", "created", "used by", "digest"},
+		Numbers:  imageNumbers(others, false),
+		Grid:     imageRows(others),
+	})
+	return out
+}
+
+func splitManaged(all []api.ImageEntry) (ours, others []api.ImageEntry) {
+	for _, image := range all {
+		if image.Managed {
+			ours = append(ours, image)
+			continue
+		}
+		others = append(others, image)
+	}
+	return ours, others
+}
+
+// countUnused only for what hostd put here: an image nothing holds is a
+// candidate for removal, and only ours are ever candidates.
+func imageNumbers(images []api.ImageEntry, countUnused bool) []numberView {
+	var total, free float64
+	loose := 0
+	for _, image := range images {
+		total += image.Bytes
+		if image.UsedBy == "" {
+			loose++
+			free += image.Bytes
+		}
+	}
+	out := []numberView{
+		{Value: strconv.Itoa(len(images)), Of: "images"},
+		{Value: formatBytes(total), Of: "on disk"},
+	}
+	if countUnused && loose > 0 {
+		out = append(out,
+			numberView{Value: strconv.Itoa(loose), Of: "held by nothing"},
+			numberView{Value: formatBytes(free), Of: "reclaimable"})
+	}
+	return out
+}
+
+func imageRows(images []api.ImageEntry) []gridRow {
+	out := make([]gridRow, 0, len(images))
+	for _, image := range images {
+		used := image.UsedBy
+		if used == "" {
+			used = "-"
+		}
+		out = append(out, gridRow{
+			Loose: image.UsedBy == "",
+			Cells: []string{
+				tagsText(image.Tags),
+				formatBytes(image.Bytes),
+				time.UnixMilli(int64(image.Created)).Format("2006-01-02 15:04"),
+				used,
+				shortDigest(image.Digest),
+			},
+		})
 	}
 	return out
 }
