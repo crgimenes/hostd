@@ -93,7 +93,7 @@ body {
 .row,
 #windows,
 #toolbar button,
-#followLabel,
+#hitButtons,
 .twist,
 #grip,
 #split,
@@ -616,7 +616,7 @@ table.services td {
 		padding: 10px 12px;
 	}
 
-	#filter {
+	#search {
 		width: 110px;
 	}
 }
@@ -792,7 +792,7 @@ td.problem {
 	color: var(--secondary);
 }
 
-#filter {
+#search {
 	font: inherit;
 	font-size: 12px;
 	margin-left: auto;
@@ -806,16 +806,41 @@ td.problem {
 	user-select: text;
 }
 
-#followLabel {
+#found {
 	font-size: 11px;
 	color: var(--secondary);
+	font-variant-numeric: tabular-nums;
+	min-width: 44px;
+	text-align: right;
+}
+
+#hitButtons {
 	display: inline-flex;
-	align-items: center;
-	gap: 4px;
+	gap: 2px;
+}
+
+#hitButtons button {
+	font-size: 9px;
+	line-height: 1;
+	padding: 4px 6px;
+	border-radius: 5px;
+	border: 0.5px solid var(--hairline);
+	background: var(--bg);
+	color: var(--label);
+}
+
+#hitButtons button:disabled {
+	color: var(--tertiary);
+}
+
+/* The scroll lives here so the list inside can be replaced whole without
+   taking the sentinel — and the reader's place — with it. */
+#lineBox {
+	overflow-y: auto;
+	position: relative;
 }
 
 #lines {
-	overflow-y: auto;
 	list-style: none;
 	padding: 6px 16px 10px;
 	font-family: var(--mono);
@@ -823,6 +848,27 @@ td.problem {
 	line-height: 1.55;
 	-webkit-user-select: text;
 	user-select: text;
+}
+
+/* The bottom of the stream, one pixel of it. Whether this is on screen is the
+   whole question "is the reader at the end", and it answers it without any
+   arithmetic on scroll offsets that rounds differently per browser and zoom. */
+#tail {
+	height: 1px;
+}
+
+/* A hit is marked where it is, never filtered to a screen of its own: the line
+   before and the line after are usually why somebody searched. */
+#lines mark {
+	background: var(--found, #ffd60022);
+	color: inherit;
+	border-radius: 2px;
+	box-shadow: inset 0 0 0 0.5px var(--failed);
+}
+
+#lines mark.current {
+	background: var(--failed);
+	color: var(--bg);
 }
 
 #lines li {

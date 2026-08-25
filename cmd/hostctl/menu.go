@@ -46,7 +46,7 @@ func install(window glaze.WebView) (*menu.Menu, error) {
 			{Title: "Paste", Shortcut: "cmd+v", Selector: "paste:"},
 			{Title: "Select All", Shortcut: "cmd+a", Selector: "selectAll:"},
 			{Separator: true},
-			{Title: "Find in Log", Shortcut: "cmd+f", OnClick: call("focusFilter()")},
+			{Title: "Find in Log", Shortcut: "cmd+f", OnClick: call("focusSearch()")},
 		}},
 		{Title: "View", Submenu: []menu.Item{
 			{Title: "Fleet", Shortcut: "cmd+1", OnClick: call("goFleet()")},

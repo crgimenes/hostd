@@ -18,6 +18,10 @@ function hostdApply(html) {
 	if (!html) {
 		return;
 	}
+	// Read BEFORE anything is appended: once a line is in, the sentinel has
+	// already moved and the question "was the reader at the end" can no longer
+	// be asked.
+	const following = atTail();
 	const parsed = document.createElement("template");
 	parsed.innerHTML = html;
 	// Frozen first: replacing a piece pulls it out of the template, and a live
@@ -31,12 +35,17 @@ function hostdApply(html) {
 			}
 			continue;
 		}
+		// The whole list arriving means the log is now ABOUT somewhere else, and
+		// a terminal opens at the end of its stream, not in the middle of it.
+		if (piece.id === "lines") {
+			movedLog = true;
+		}
 		const standing = document.getElementById(piece.id);
 		if (standing) {
 			standing.replaceWith(piece);
 		}
 	}
-	settle();
+	settle(following);
 }
 
 // act carries one operator action to the panel over the glaze binding — the
@@ -96,7 +105,7 @@ document.body.addEventListener("click", (event) => {
 	}
 });
 
-function settle() {
+function settle(following) {
 	// The log belongs to the machines: a page about the panel itself puts it
 	// away rather than showing a pane about somewhere else.
 	document.body.classList.toggle("noLog", el("detail").dataset.log === "off");
@@ -104,9 +113,17 @@ function settle() {
 	while (lines.children.length > MAX_LINES) {
 		lines.firstElementChild.remove();
 	}
-	applyFilter();
-	if (el("follow").checked) {
-		lines.scrollTop = lines.scrollHeight;
+	applySearch(movedLog);
+	// A whole new list means the log is now ABOUT somewhere else: a terminal
+	// opens at the end of its stream, and where the reader was in the previous
+	// one means nothing here.
+	if (movedLog) {
+		following = true;
+		movedLog = false;
+	}
+	if (following) {
+		const box = el("lineBox");
+		box.scrollTop = box.scrollHeight;
 	}
 	tick();
 	armPlots();
@@ -157,18 +174,152 @@ function uptime(sinceMS) {
 
 setInterval(tick, 1000);
 
-/* The filter hides what is already here rather than asking for it again: the
-   lines are in the window, and a round trip to re-filter them would be a round
-   trip to say what the window already knows. */
+/* Command+F, not a filter. What is found is marked where it stands and the
+   lines around it stay: whoever searches a log almost always wants the line
+   BEFORE the hit as much as the hit itself, and a pane that hid the rest would
+   throw away the context that made the search worth doing.
 
-function applyFilter() {
-	const filter = el("filter").value.toLowerCase();
-	for (const line of el("lines").children) {
-		line.hidden = Boolean(filter) && !line.textContent.toLowerCase().includes(filter);
+   Everything here works on the lines already in the window. They are here; a
+   round trip to ask the machine again would be a round trip to be told what
+   the window already holds. */
+
+let hits = [];
+let hitAt = -1;
+
+/* Marks one line, and leaves it completely alone when it already carries the
+   marks for this exact term. That is not an optimisation: rewriting a line is
+   what drops the text somebody is in the middle of selecting, which is the one
+   thing this pane exists to preserve. */
+function markLine(line, term) {
+	if (line.dataset.marked === term) {
+		return;
+	}
+	const cell = line.querySelector(".text");
+	if (!cell) {
+		return;
+	}
+	const raw = cell.dataset.raw ?? cell.textContent;
+	cell.dataset.raw = raw;
+	line.dataset.marked = term;
+	cell.textContent = raw;
+	if (!term) {
+		return;
+	}
+	/* Built out of text nodes and elements, never out of a string of HTML: a
+	   log line is whatever some program decided to write, and putting that
+	   through innerHTML would let a service's output write this window. */
+	cell.textContent = "";
+	const needle = term.toLowerCase();
+	const hay = raw.toLowerCase();
+	let at = 0;
+	for (;;) {
+		const found = hay.indexOf(needle, at);
+		if (found < 0) {
+			break;
+		}
+		if (found > at) {
+			cell.append(raw.slice(at, found));
+		}
+		const mark = document.createElement("mark");
+		mark.textContent = raw.slice(found, found + term.length);
+		cell.append(mark);
+		at = found + term.length;
+	}
+	if (at < raw.length) {
+		cell.append(raw.slice(at));
 	}
 }
 
-el("filter").oninput = applyFilter;
+function applySearch(all) {
+	const term = el("search").value;
+	for (const line of el("lines").children) {
+		if (all) {
+			delete line.dataset.marked;
+		}
+		markLine(line, term);
+	}
+	countHits();
+}
+
+/* The list is read back off the page rather than remembered, because lines
+   leave the top as new ones arrive: a remembered index would eventually point
+   at a line that is no longer here. Which hit is current survives as a class
+   on the element itself, which travels with it or leaves with it. */
+function countHits() {
+	hits = [...el("lines").querySelectorAll("mark")];
+	hitAt = hits.findIndex((mark) => mark.classList.contains("current"));
+	const term = el("search").value;
+	el("hitButtons").hidden = !term;
+	if (!term) {
+		el("found").textContent = "";
+		return;
+	}
+	if (hits.length === 0) {
+		el("found").textContent = "none";
+		return;
+	}
+	el("found").textContent = hitAt < 0
+		? String(hits.length)
+		: (hitAt + 1) + "/" + hits.length;
+}
+
+function jumpHit(by) {
+	if (hits.length === 0) {
+		return;
+	}
+	if (hitAt >= 0) {
+		hits[hitAt].classList.remove("current");
+	} else if (by < 0) {
+		// Coming from nowhere backwards means the last one, not the one before
+		// the first.
+		hitAt = hits.length;
+	}
+	hitAt = (hitAt + by + hits.length) % hits.length;
+	hits[hitAt].classList.add("current");
+	/* Going to a hit is leaving the end of the stream, and the sentinel says so
+	   on its own: the pane stops following until the reader comes back down. */
+	hits[hitAt].scrollIntoView({ block: "center" });
+	countHits();
+}
+
+el("search").oninput = () => applySearch(true);
+el("search").onkeydown = (event) => {
+	if (event.key === "Enter") {
+		event.preventDefault();
+		jumpHit(event.shiftKey ? -1 : 1);
+	}
+};
+el("nextHit").onclick = () => jumpHit(1);
+el("prevHit").onclick = () => jumpHit(-1);
+
+/* Whether the reader is at the end of the stream: is the sentinel at the bottom
+   of the list on screen?
+
+   Asked of the layout directly rather than through an IntersectionObserver,
+   which was the first shape of this and is wrong here for a reason worth
+   keeping: an observer does not run while the page is not being rendered, and
+   a panel whose window is minimised or behind another one is exactly that.
+   Its callback would simply never fire, the last answer would stand for as
+   long as the window stayed hidden, and nothing would say so. This is a
+   question about geometry, the geometry is there to be read, and reading it
+   costs nothing on a pane that updates once a second.
+
+   The sentinel rather than scrollHeight arithmetic because that arithmetic
+   rounds differently per browser and zoom, and is wrong by a pixel exactly
+   when somebody is sitting at the bottom waiting to be followed. */
+let movedLog = false;
+
+function atTail() {
+	const box = el("lineBox");
+	const tail = el("tail");
+	if (!box || !tail) {
+		return true;
+	}
+	// One pixel of slack: the sentinel is one pixel tall, and a fractional
+	// layout can put its top a hair past the edge while it is still the thing
+	// the reader is looking at.
+	return tail.getBoundingClientRect().top <= box.getBoundingClientRect().bottom + 1;
+}
 
 /* Dragging on a chart chooses the window every chart then follows. */
 
@@ -268,9 +419,9 @@ function goFleet() {
 	act("select/fleet");
 }
 
-function focusFilter() {
-	el("filter").focus();
-	el("filter").select();
+function focusSearch() {
+	el("search").focus();
+	el("search").select();
 }
 
 el("copy").onclick = async () => {
@@ -347,7 +498,8 @@ NARROW.addEventListener("change", () => {
 });
 showNav();
 
-settle();
+// The first paint opens at the end of the stream, the way a terminal does.
+settle(true);
 
 // The menu bar reaches the panel the same way a click does.
 function refreshNow() {

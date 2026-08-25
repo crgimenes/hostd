@@ -803,3 +803,38 @@ func TestTheSidebarToggleIsDelegatedAndFitsTheWidth(t *testing.T) {
 		t.Fatal("the toggle has nothing to call")
 	}
 }
+
+// The log pane is written in two files that have to agree: the template puts
+// the elements on the page and the script drives them by id. A rename in one
+// of them is silent — the pane simply stops following, or the search stops
+// finding, with nothing said anywhere.
+func TestTheLogPaneElementsExistForTheScriptThatDrivesThem(t *testing.T) {
+	page := get(t, probePanel(t), "/").Body.String()
+	script, err := ui.ReadFile("ui/app.js")
+	if err != nil {
+		t.Fatalf("reading app.js: %v", err)
+	}
+
+	for id, why := range map[string]string{
+		"lineBox": "the scroller, which outlives the list being replaced",
+		"tail":    "the sentinel that answers whether the reader is at the end",
+		"search":  "the search field",
+		"found":   "how many matches there are",
+		"nextHit": "moving to the next match",
+		"prevHit": "moving to the previous match",
+	} {
+		if !strings.Contains(page, `id="`+id+`"`) {
+			t.Errorf("the page has no #%s, which is %s", id, why)
+		}
+		if !strings.Contains(string(script), `"`+id+`"`) {
+			t.Errorf("app.js never names #%s, which is %s", id, why)
+		}
+	}
+
+	// The pane appends; it does not redraw. A redraw is what drops the text
+	// somebody is in the middle of selecting, which is the whole reason this
+	// pane is built the way it is.
+	if !strings.Contains(page, `data-swap="append:#lines"`) && !strings.Contains(string(script), "append:") {
+		t.Error("nothing in the page or the script appends log lines, so the pane must be redrawing them")
+	}
+}

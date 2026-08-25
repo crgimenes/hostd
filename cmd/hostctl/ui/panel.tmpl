@@ -21,10 +21,20 @@
     <section id="console">
       <header>
         <h2>Log</h2>
-        <input type="search" id="filter" placeholder="Filter" spellcheck="false">
-        <label id="followLabel"><input type="checkbox" id="follow" checked> Follow</label>
+        <input type="search" id="search" placeholder="Search" spellcheck="false">
+        <span id="found"></span>
+        <span id="hitButtons" hidden>
+          <button id="prevHit" title="Previous match" aria-label="Previous match">&#9650;</button>
+          <button id="nextHit" title="Next match" aria-label="Next match">&#9660;</button>
+        </span>
       </header>
-      <ol id="lines">{{range .lines}}<li data-seq="{{.Seq}}"{{if .Class}} class="{{.Class}}"{{end}}><span class="when">{{.When}} </span><span class="where">{{.Where}} </span><span class="text">{{.Text}}</span></li>{{end}}</ol>
+      <!-- The scroller is this box, not the list: the list is replaced whole
+           when the operator selects somewhere else, and the sentinel below it
+           has to outlive that. -->
+      <div id="lineBox">
+        <ol id="lines">{{range .lines}}<li data-seq="{{.Seq}}"{{if .Class}} class="{{.Class}}"{{end}}><span class="when">{{.When}} </span><span class="where">{{.Where}} </span><span class="text">{{.Text}}</span></li>{{end}}</ol>
+        <div id="tail"></div>
+      </div>
     </section>
   </section>
 </div>
@@ -76,7 +86,10 @@
     {{- if .Watching}}
     <div id="controls">
       <span id="range"{{if not .Frozen}} hidden{{end}}><span id="rangeText">{{.RangeText}}</span><button id="rangeReset" data-act="range/live">live</button></span>
-      <div id="windows" role="group" aria-label="window">
+      <!-- The charts, and only the charts. The log below is a terminal: it
+           carries what is arriving, and how far back the graphs reach has
+           nothing to say about it. -->
+      <div id="windows" role="group" aria-label="how far back the charts reach" title="How far back the charts reach">
         {{- $window := .Window}}{{$frozen := .Frozen}}
         <button data-act="window/300"{{if and (eq $window 300) (not $frozen)}} class="on"{{end}}>5m</button>
         <button data-act="window/3600"{{if and (eq $window 3600) (not $frozen)}} class="on"{{end}}>1h</button>
