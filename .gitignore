@@ -35,6 +35,7 @@ project.md
 diretrizes.md
 melhorias.md
 CLAUDE.md
+release.sh
 melhorias.md
 
 # The binaries, when they are built in the tree rather than into GOBIN.
