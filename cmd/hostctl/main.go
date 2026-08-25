@@ -21,6 +21,7 @@ import (
 
 	"github.com/crgimenes/hostd/api"
 	"github.com/crgimenes/hostd/config"
+	"github.com/crgimenes/hostd/daemon"
 	"github.com/crgimenes/hostd/service"
 	"github.com/crgimenes/hostd/version"
 )
@@ -129,6 +130,15 @@ func run(args []string) int {
 	}
 	if *showVersion {
 		fmt.Printf("hostctl %s (protocol %d, schema %d)\n", version.Version, version.Protocol, version.Schema)
+		// Whether this build can put a daemon on a machine by itself. A
+		// development build cannot, and finding that out here beats finding
+		// it out mid-install.
+		carried := daemon.Carried()
+		if len(carried) == 0 {
+			fmt.Println("carries no hostd (development build; make dist embeds it)")
+			return exitOK
+		}
+		fmt.Printf("carries hostd %s for linux/%s\n", daemon.Version(), strings.Join(carried, ", linux/"))
 		return exitOK
 	}
 	// No command is the command an operator gives most: watching. Asking for

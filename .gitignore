@@ -40,3 +40,6 @@ melhorias.md
 # The binaries, when they are built in the tree rather than into GOBIN.
 /hostctl
 /hostd
+dist/
+daemon/zips/*.zip
+daemon/zips/VERSION

@@ -1,0 +1,4 @@
+The hostd release zips are placed here by `make dist`, immediately before
+hostctl is built, so the released client embeds the daemon it installs. This
+placeholder keeps the directory (go:embed refuses an empty pattern); a
+development build carries only this file.
