@@ -254,6 +254,7 @@ usage:
   hostctl log -follow                  keep watching
   hostctl push                         send your declarations to that machine
                                        (and drop what the tree stopped carrying)
+  hostctl install                      put this hostctl's own hostd on it
   hostctl image ls                     the images that machine holds
   hostctl image prune                  what an image cleanup would remove
   hostctl image push <image>           send an image built here to that machine
@@ -321,6 +322,13 @@ func connect(ctx context.Context, opt options) (*api.Client, error) {
 }
 
 func dispatch(ctx context.Context, opt options, args []string) (int, error) {
+	// Installing is what makes a machine answerable, so it cannot begin by
+	// reaching the daemon. It sits inside dispatch rather than beside it so
+	// -all and -tag fan it out like any other command.
+	if args[0] == "install" {
+		return runInstall(ctx, opt, args[1:])
+	}
+
 	client, err := connect(ctx, opt)
 	if err != nil {
 		return exitComms, err

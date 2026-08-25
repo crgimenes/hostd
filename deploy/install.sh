@@ -133,7 +133,7 @@ install_host() {
 		go build -trimpath -ldflags "-s -w -X main.Version=$version" -o "$work/hostd" ./cmd/hostd
 
 	remote_dir=$(ssh -o BatchMode=yes "$host" mktemp -d) || return 1
-	scp -q "$work/hostd" deploy/hostd.service "$host:$remote_dir/" || return 1
+	scp -q "$work/hostd" daemon/hostd.service "$host:$remote_dir/" || return 1
 	rm -rf "$work"
 
 	described=$(remote_script | ssh -o BatchMode=yes "$host" "REMOTE_DIR='$remote_dir' sh -s") || return 1

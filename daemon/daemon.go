@@ -20,6 +20,18 @@ import (
 //go:embed zips
 var zips embed.FS
 
+// The unit travels with the daemon because it is not decoration: KillMode=
+// process is what makes restarting hostd safe, and the default would kill
+// every container in the unit's cgroup on restart — undoing the whole adoption
+// design. A machine installed with the wrong unit looks fine until the first
+// upgrade takes the fleet's work down with it.
+//
+//go:embed hostd.service
+var unit []byte
+
+// Unit is the systemd service that makes a machine a host.
+func Unit() []byte { return unit }
+
 // Zip answers with the hostd release archive for one architecture, the same
 // artifact the GitHub release publishes separately.
 func Zip(arch string) ([]byte, error) {
