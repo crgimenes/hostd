@@ -84,46 +84,91 @@ func (s *Supervisor) fireDue(ctx context.Context, now time.Time) {
 		s.fired[name] = slot
 		s.mu.Unlock()
 
-		s.startRun(ctx, svc, slot)
+		_, _ = s.startRun(ctx, svc, slot, "a run was due")
 	}
 }
+
+// RunNow starts one run of a job because somebody asked, not because the clock
+// did. It answers with the run's id: a job may take an hour, and holding the
+// connection until it ends would be a command that times out on exactly the
+// jobs worth watching. What it printed is then in the same timeline as every
+// scheduled run, under the same -run filter.
+//
+// The run is named for the instant it was asked for rather than for a schedule
+// slot. Two runs must never share a name, and truncating to the slot would
+// collide with the scheduled run of that same slot.
+//
+// What the declaration says about overlap and the ceiling still holds. A hand
+// asking is not a reason to run more copies than the file allows: the file is
+// where that number is decided, and a command that overruled it would be the
+// tool overruling the tree.
+func (s *Supervisor) RunNow(name string) (string, error) {
+	svc, declared := s.declaration(name)
+	if !declared {
+		return "", ErrUnknownService{Name: name}
+	}
+	if !svc.IsJob() {
+		return "", ErrNotAJob{Name: name}
+	}
+	if s.client() == nil {
+		return "", docker.ErrNoRuntime
+	}
+	ctx, cancel := runtimeContext()
+	defer cancel()
+	return s.startRun(ctx, svc, s.now(), "a run was asked for")
+}
+
+// Asking a container for a run is asking the wrong thing of the right service,
+// which is the caller's mistake and not the machine's failure. The refusal
+// names the operation that IS the right one: "this is not a job" on its own is
+// a dead end.
+type ErrNotAJob struct{ Name string }
+
+func (e ErrNotAJob) Error() string {
+	return fmt.Sprintf("%s is a container and has no runs; start it with hostctl service start %s", e.Name, e.Name)
+}
+
+// Why a run did not begin. Nothing was changed and the caller has to look
+// before asking again, which is a different outcome from a failure: a job at
+// its ceiling is a job doing what its declaration says.
+type ErrRunRefused struct{ Reason string }
+
+func (e ErrRunRefused) Error() string { return e.Reason }
 
 // startRun begins one run of a job, unless what is already running says not to.
 // Nothing here coordinates the runs with each other: they share the work
 // through whatever they read from, and a scheduler that tried to be clever
 // about it would be a second opinion about somebody else's queue.
-func (s *Supervisor) startRun(ctx context.Context, svc service.Service, slot time.Time) {
+func (s *Supervisor) startRun(ctx context.Context, svc service.Service, slot time.Time, because string) (string, error) {
 	live, err := s.runsOf(ctx, svc.Name)
 	if err != nil {
 		s.reportOnce(svc.Name, fmt.Sprintf("cannot tell what %s is already running: %v", svc.Name, err))
-		return
+		return "", err
 	}
 	if svc.Overlap == service.OverlapSkip && len(live) > 0 {
-		s.event(logs.EventJobSkipped, svc.Name, fmt.Sprintf(
-			"a run was due and the previous one is still going; this service is declared %q", service.OverlapSkip))
-		return
+		return "", s.refuseRun(svc.Name, fmt.Sprintf(
+			"%s and the previous one is still going; this service is declared %q", because, service.OverlapSkip))
 	}
 	// Losing a turn is acceptable; losing it in silence is not. The ceiling
 	// exists because a job whose runs stop finishing would start one every
 	// turn until the machine died.
 	if len(live) >= svc.Parallel() {
-		s.event(logs.EventJobSkipped, svc.Name, fmt.Sprintf(
-			"a run was due and %d are already going, which is the ceiling; raise max-parallel or find out why they are not finishing",
-			len(live)))
-		return
+		return "", s.refuseRun(svc.Name, fmt.Sprintf(
+			"%s and %d are already going, which is the ceiling; raise max-parallel or find out why they are not finishing",
+			because, len(live)))
 	}
 
 	id, err := s.createRun(ctx, svc, slot)
 	if err != nil {
 		s.reportOnce(svc.Name, fmt.Sprintf("cannot start a run of %s: %v", svc.Name, err))
-		return
+		return "", err
 	}
 	s.clearReport(svc.Name)
 	s.logRun(svc.Name, runID(slot), logs.EventJobStarted, fmt.Sprintf("run %s started as container %s", runID(slot), short(id)))
 	// The reader starts with the run, not at the next drift round: a run that
 	// lasts a second would otherwise be gone before anybody read what it said,
 	// and what a job printed is most of why anybody looks at a job.
-	s.startFollowing(ctx, held{
+	s.startFollowing(held{
 		ID: id, Name: runName(svc.Name, slot), Running: true,
 		Service: svc.Name,
 	})
@@ -131,6 +176,15 @@ func (s *Supervisor) startRun(ctx context.Context, svc service.Service, slot tim
 	s.awaiting[id] = true
 	s.mu.Unlock()
 	go s.awaitRun(svc.Name, runID(slot), id, s.now())
+	return runID(slot), nil
+}
+
+// A turn not taken belongs in the timeline whoever passed it up: the operator
+// who asked reads the answer, and the one reading the log a week later reads
+// the same sentence.
+func (s *Supervisor) refuseRun(name, reason string) error {
+	s.event(logs.EventJobSkipped, name, reason)
+	return ErrRunRefused{Reason: reason}
 }
 
 // killAfter is how long a run has left before its limit.

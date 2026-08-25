@@ -96,7 +96,7 @@ func TestTheJSONNamesMatchTheFiloNames(t *testing.T) {
 	for _, sample := range []any{
 		api.Description{}, api.ImageEntry{}, api.ImagePrune{}, api.ImageChange{},
 		api.Image{}, api.LogLine{},
-		api.ServiceVersions{}, api.ServiceVersion{},
+		api.ServiceVersions{}, api.ServiceVersion{}, api.JobRun{},
 		supervisor.Status{}, supervisor.Change{},
 		state.Entry{}, metrics.Series{}, metrics.Point{},
 	} {

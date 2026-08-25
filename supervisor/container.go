@@ -240,7 +240,7 @@ func (s *Supervisor) follow(ctx context.Context, running []held) {
 		if already {
 			continue
 		}
-		s.startFollowing(ctx, container)
+		s.startFollowing(container)
 	}
 
 	s.mu.Lock()
@@ -254,7 +254,7 @@ func (s *Supervisor) follow(ctx context.Context, running []held) {
 	}
 }
 
-func (s *Supervisor) startFollowing(ctx context.Context, container held) {
+func (s *Supervisor) startFollowing(container held) {
 	// Where this machine's own log store stopped is the only record of it that
 	// matters: asking the runtime for everything since then replays nothing
 	// and skips nothing.
@@ -263,7 +263,10 @@ func (s *Supervisor) startFollowing(ctx context.Context, container held) {
 		s.reportOnce(container.Service, fmt.Sprintf("cannot tell where the log of %s stopped: %v", container.Service, err))
 		return
 	}
-	streamCtx, cancel := context.WithCancel(ctx)
+	// Bounded by the supervisor's life rather than by whatever context the
+	// caller happened to hold: a reader must outlive the call that started it,
+	// and a run asked for by hand is started from a call that returns at once.
+	streamCtx, cancel := s.streamContext()
 	s.mu.Lock()
 	s.following[container.ID] = cancel
 	s.mu.Unlock()

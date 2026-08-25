@@ -98,6 +98,17 @@ func (f *fakeSupervisor) Restart(name string) (bool, error) {
 	return err == nil && !f.unchanged, err
 }
 
+// The run id the real supervisor answers with is the instant it was asked for,
+// so the fake answers with a fixed one: what the tests check is which outcome
+// came back, not what the clock said.
+func (f *fakeSupervisor) RunNow(name string) (string, error) {
+	err := f.act("run", name)
+	if err != nil {
+		return "", err
+	}
+	return "1787000000000", nil
+}
+
 func (f *fakeSupervisor) Plan(declared []service.Service) []supervisor.Change {
 	f.mu.Lock()
 	defer f.mu.Unlock()

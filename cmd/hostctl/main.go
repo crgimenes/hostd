@@ -253,6 +253,7 @@ usage:
   hostctl describe                     versions and capabilities of the daemon
   hostctl service list                 same as status, by service
   hostctl service versions <name>      which versions it could be put back on
+  hostctl job run <name>               run a job now, without waiting for it
   hostctl service start <name>         ask a service to run
   hostctl service stop <name>          ask a service to stop
   hostctl service restart <name>       stop and start a service
@@ -369,6 +370,8 @@ func dispatch(ctx context.Context, opt options, args []string) (int, error) {
 		return runMetrics(ctx, client, opt)
 	case "image":
 		return runImage(ctx, client, opt, args[1:])
+	case "job":
+		return runJob(ctx, client, opt, args[1:])
 	case "push":
 		return runPush(ctx, client, opt, args[1:])
 	default:
@@ -388,7 +391,7 @@ func codeFor(err error) int {
 		return exitUsage
 	case api.CodeUnavailable:
 		return exitComms
-	case api.CodeConflict, api.CodeDestructive:
+	case api.CodeConflict, api.CodeDestructive, api.CodeRefused:
 		// Nothing was changed. The caller is meant to look and decide, which
 		// is a different outcome from an operation that tried and failed.
 		return exitRefused

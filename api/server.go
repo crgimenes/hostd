@@ -48,6 +48,7 @@ type Supervisor interface {
 	Start(name string) (bool, error)
 	Stop(name string) (bool, error)
 	Restart(name string) (bool, error)
+	RunNow(name string) (string, error)
 	Plan(declared []service.Service) []supervisor.Change
 	Apply(declared []service.Service) []supervisor.Change
 }
@@ -656,6 +657,8 @@ func (s *Server) dispatch(ctx context.Context, req Request, actor string) Respon
 		return s.stamp(s.listImages(ctx))
 	case OpServiceVersions:
 		return s.stamp(s.serviceVersions(ctx, req))
+	case OpJobRun:
+		return s.stamp(s.runJob(req, actor))
 	case OpImagePrune:
 		return s.stamp(s.pruneImages(ctx, req, actor))
 	case OpServiceStart:
@@ -812,7 +815,7 @@ func (s *Server) describe(ctx context.Context) Response {
 			OpServiceStart, OpServiceStop, OpServiceRestrt,
 			OpPlan, OpApply, OpAudit, OpLogSearch, OpLogFollow, OpMetrics,
 			OpImagePush, OpImageList, OpImagePrune, OpServicePut, OpServicePrune,
-			OpServiceVersions,
+			OpServiceVersions, OpJobRun,
 		},
 	})
 }

@@ -38,6 +38,7 @@ const (
 	OpServiceVersions = "service.versions"
 	OpServicePut      = "service.put"
 	OpServicePrune    = "service.prune"
+	OpJobRun          = "job.run"
 )
 
 // Codes are what programs read; messages are for people and may be rewritten.
@@ -52,6 +53,10 @@ const (
 	// retrying, which is a different outcome from a failure.
 	CodeConflict    = "generation-conflict"
 	CodeDestructive = "destructive-refused"
+	// The machine is doing what its declaration says and that is why the ask
+	// was turned down — a job already at its ceiling, say. Asking again
+	// unchanged gets the same answer.
+	CodeRefused = "refused"
 )
 
 // A daemon that reads until the client stops talking is one a single client

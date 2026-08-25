@@ -107,3 +107,29 @@ func TestAnImageTheMachineDoesNotHoldIsCalledOut(t *testing.T) {
 		t.Fatalf("the declared image is not here and the output must say so:\n%s", out.String())
 	}
 }
+
+// The exit status is the interface for whatever is not a person. Refused has to
+// stay distinct from failed: an agent that reads "the ceiling is full" as a
+// failure retries until the ceiling clears, and one that reads a conflict as
+// success acts on a machine that did not do what it asked.
+func TestTheExitStatusSeparatesRefusedFromFailed(t *testing.T) {
+	for _, this := range []struct {
+		code string
+		want int
+	}{
+		{api.CodeOK, exitFailed},
+		{api.CodeInvalid, exitUsage},
+		{api.CodeUnknownOp, exitUsage},
+		{api.CodeUnavailable, exitComms},
+		{api.CodeConflict, exitRefused},
+		{api.CodeDestructive, exitRefused},
+		{api.CodeRefused, exitRefused},
+		{api.CodeFailed, exitFailed},
+		{api.CodeNotFound, exitFailed},
+	} {
+		got := codeFor(api.Error{Code: this.code})
+		if got != this.want {
+			t.Errorf("%s exits %d, want %d", this.code, got, this.want)
+		}
+	}
+}
