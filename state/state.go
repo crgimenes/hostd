@@ -29,18 +29,18 @@ const (
 const ActorLocal = "local"
 
 type Entry struct {
-	Seq    uint64  `filo:"seq"`
-	TimeMS float64 `filo:"time-ms"`
-	Actor  string  `filo:"actor"`
+	Seq    uint64  `filo:"seq" json:"seq"`
+	TimeMS float64 `filo:"time-ms" json:"time-ms"`
+	Actor  string  `filo:"actor" json:"actor"`
 	// The identity that delegated the work. Agents are not part of the root
 	// of trust, so delegation is recorded rather than flattened away.
-	OnBehalfOf string `filo:"on-behalf-of"`
-	Operation  string `filo:"operation"`
-	Target     string `filo:"target"`
-	Before     uint64 `filo:"generation-before"`
-	After      uint64 `filo:"generation-after"`
-	Result     string `filo:"result"`
-	Detail     string `filo:"detail"`
+	OnBehalfOf string `filo:"on-behalf-of" json:"on-behalf-of"`
+	Operation  string `filo:"operation" json:"operation"`
+	Target     string `filo:"target" json:"target"`
+	Before     uint64 `filo:"generation-before" json:"generation-before"`
+	After      uint64 `filo:"generation-after" json:"generation-after"`
+	Result     string `filo:"result" json:"result"`
+	Detail     string `filo:"detail" json:"detail"`
 }
 
 const (

@@ -305,15 +305,15 @@ func markedRepository(tags []string) (string, bool) {
 // What a push answers with, so the declaration can be pinned to what really
 // arrived rather than to the tag it was called by.
 type Image struct {
-	Name string `filo:"name"`
+	Name string `filo:"name" json:"name"`
 	// What this machine now calls it. Two machines loading the same archive
 	// arrive at different ids, so this is the one to declare here and nowhere
 	// else.
-	Digest string  `filo:"digest"`
-	Bytes  float64 `filo:"bytes"`
+	Digest string  `filo:"digest" json:"digest"`
+	Bytes  float64 `filo:"bytes" json:"bytes"`
 	// The hash of what crossed the wire, which is the same on both sides and
 	// is what proves the transfer.
-	Content string `filo:"content-sha256"`
+	Content string `filo:"content-sha256" json:"content-sha256"`
 }
 
 // One image this machine holds. The digest is the id this runtime gave it and

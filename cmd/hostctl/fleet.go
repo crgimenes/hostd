@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -144,8 +145,15 @@ func fanOut(ctx context.Context, opt options, hosts []string, args []string) int
 	}
 	wg.Wait()
 
+	// A machine-readable answer for several machines is ONE document, never a
+	// document per machine with a heading between them: whatever parses it
+	// reads stdout once.
 	if opt.filoOut {
 		printFleetFilo(opt.out, results)
+		return fleetCode(results)
+	}
+	if opt.jsonOut {
+		printFleetJSON(opt.out, results)
 		return fleetCode(results)
 	}
 	// A machine that did not answer belongs in the picture, in the picture's
@@ -201,6 +209,35 @@ func fleetCode(results []hostResult) int {
 	default:
 		return exitPartial
 	}
+}
+
+// What one machine answered, inside the fleet's single document. Body is raw
+// on purpose: the per-host answer is already JSON, and quoting it into a string
+// would make every reader parse twice.
+type fleetAnswer struct {
+	Host    string          `json:"host"`
+	Exit    int             `json:"exit"`
+	Message string          `json:"message"`
+	Body    json.RawMessage `json:"body"`
+}
+
+func printFleetJSON(out io.Writer, results []hostResult) {
+	answers := make([]fleetAnswer, 0, len(results))
+	for _, result := range results {
+		one := fleetAnswer{Host: result.host, Exit: result.code, Body: json.RawMessage("null")}
+		if result.err != nil {
+			one.Message = result.err.Error()
+		}
+		body := strings.TrimSpace(result.answer)
+		// A machine that did not answer, or answered something no reader
+		// accepts, carries null rather than breaking the whole document for
+		// the machines that did answer.
+		if json.Valid([]byte(body)) {
+			one.Body = json.RawMessage(body)
+		}
+		answers = append(answers, one)
+	}
+	writeJSON(out, answers)
 }
 
 // One expression carrying every machine's answer, so a program reads the fleet

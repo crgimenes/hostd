@@ -60,7 +60,7 @@ func runImagePrune(ctx context.Context, client *api.Client, opt options) (int, e
 	if decodeErr != nil {
 		return exitFailed, decodeErr
 	}
-	emit(opt, resp.Body, func() { printPrune(opt.out, client.Target(), plan) })
+	emit(opt, resp.Body, plan, func() { printPrune(opt.out, client.Target(), plan) })
 	if resp.Failed() {
 		return codeFor(resp.Err()), resp.Err()
 	}
@@ -118,7 +118,7 @@ func runImageList(ctx context.Context, client *api.Client, opt options) (int, er
 	if err != nil {
 		return exitFailed, err
 	}
-	emit(opt, resp.Body, func() { printImages(opt.out, client.Target(), held) })
+	emit(opt, resp.Body, held, func() { printImages(opt.out, client.Target(), held) })
 	return exitOK, nil
 }
 
@@ -246,7 +246,7 @@ func runImagePush(ctx context.Context, client *api.Client, opt options, args []s
 	}
 	// The id to declare is the one that machine now has: it is the machine
 	// that will run it.
-	emit(opt, resp.Body, func() {
+	emit(opt, resp.Body, received, func() {
 		_, _ = fmt.Fprintf(opt.out, "%s;%s;%.0f;sha256:%s\n",
 			client.Target(), received.Digest, received.Bytes, received.Content)
 	})

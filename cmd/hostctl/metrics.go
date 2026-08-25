@@ -43,7 +43,7 @@ func runMetrics(ctx context.Context, client *api.Client, opt options) (int, erro
 	if err != nil {
 		return exitFailed, err
 	}
-	emit(opt, resp.Body, func() {
+	emit(opt, resp.Body, series, func() {
 		_, _ = fmt.Fprintf(out, "host %s, generation %d\n", client.Target(), resp.Generation)
 		if len(series) == 0 {
 			_, _ = fmt.Fprintln(out, "nothing has been sampled yet; hostd samples every "+metrics.SampleInterval.String())

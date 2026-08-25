@@ -56,6 +56,7 @@ func main() {
 type options struct {
 	socket     string
 	filoOut    bool
+	jsonOut    bool
 	limit      int
 	keep       int
 	stream     string
@@ -98,6 +99,7 @@ func run(args []string) int {
 	flags.StringVar(&opt.remote, "remote-command", "hostd -stdio", "what ssh runs on the machine to reach its daemon")
 	flags.StringVar(&opt.socket, "socket", "", "path to the hostd control socket")
 	flags.BoolVar(&opt.filoOut, "filo", false, "write the result as Filo and nothing else")
+	flags.BoolVar(&opt.jsonOut, "json", false, "write the result as JSON and nothing else")
 	flags.IntVar(&opt.limit, "limit", 200, "maximum number of log lines")
 	flags.IntVar(&opt.keep, "keep", api.DefaultImageKeep, "versions of each image a prune leaves behind")
 	flags.StringVar(&opt.stream, "stream", "", "only stdout, stderr or event")
@@ -157,6 +159,13 @@ func run(args []string) int {
 	}
 	if *hosts != "" {
 		opt.hosts = strings.Split(*hosts, ",")
+	}
+	// Two answers to "what shape is the output" is a question with no answer.
+	// Guessing which one wins is the kind of thing a script inherits and nobody
+	// notices until the parser on the other end changes.
+	if opt.filoOut && opt.jsonOut {
+		fmt.Fprintln(os.Stderr, "hostctl: choose -filo or -json, not both")
+		return exitUsage
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -267,7 +276,9 @@ flags:
 	_, _ = fmt.Fprint(w, `
 output:
   the requested result goes to stdout, diagnostics to stderr.
-  -filo makes stdout a Filo expression and nothing else.
+  -filo makes stdout a Filo expression and nothing else, and -json the same
+  answer as JSON. Filo is what the daemon speaks; JSON is rendered here, from
+  the same values, for whatever reads it more easily.
 
 exit status:
   0 success   1 failed   2 bad arguments   3 no connection

@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"slices"
 	"strings"
 	"text/tabwriter"
@@ -15,15 +17,49 @@ import (
 	"github.com/crgimenes/hostd/supervisor"
 )
 
-// With -filo, stdout carries a Filo expression and nothing else: a caller
-// parsing it must not have to skip a heading.
-func emit(opt options, filoBody string, human func()) {
+// emit writes the answer in whichever shape the caller asked for. With -filo or
+// -json, stdout carries that and nothing else: a caller parsing it must not
+// have to skip a heading.
+//
+// filoBody is what the daemon sent, passed through untouched — re-rendering it
+// here would be a second implementation of the wire format. JSON is rendered
+// from `structured`, the same answer already decoded for the human path, so
+// what an agent reads is the same values the person reads rather than a
+// translation of the Filo text. Filo stays the language between the two
+// programs; JSON is only a way out.
+func emit(opt options, filoBody string, structured any, human func()) {
 	out := opt.out
-	if opt.filoOut {
+	switch {
+	case opt.filoOut:
 		_, _ = fmt.Fprintln(out, strings.TrimRight(filoBody, "\n"))
-		return
+	case opt.jsonOut:
+		writeJSON(out, structured)
+	default:
+		human()
 	}
-	human()
+}
+
+// writeJSONLine renders one value on one line, for output that streams. The
+// indented form below would break a reader that takes a line at a time, which
+// is what every log tool does.
+func writeJSONLine(out io.Writer, value any) {
+	err := json.NewEncoder(out).Encode(value)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "hostctl: cannot render a log line as JSON: %v\n", err)
+	}
+}
+
+// Indented because a person reads this too — an agent does not care, and the
+// one who is debugging why the agent did something does.
+func writeJSON(out io.Writer, value any) {
+	encoder := json.NewEncoder(out)
+	encoder.SetIndent("", "  ")
+	err := encoder.Encode(value)
+	if err != nil {
+		// stdout carries the answer and nothing else, so a failure to render it
+		// goes to stderr rather than leaving half an object on the pipe.
+		fmt.Fprintf(os.Stderr, "hostctl: cannot render the answer as JSON: %v\n", err)
+	}
 }
 
 func runDescribe(ctx context.Context, client *api.Client, opt options) (int, error) {
@@ -40,7 +76,7 @@ func runDescribe(ctx context.Context, client *api.Client, opt options) (int, err
 	if err != nil {
 		return exitFailed, err
 	}
-	emit(opt, resp.Body, func() {
+	emit(opt, resp.Body, d, func() {
 		_, _ = fmt.Fprintf(out, "host      %s\n", client.Target())
 		_, _ = fmt.Fprintf(out, "version   %s\n", d.Version)
 		_, _ = fmt.Fprintf(out, "protocol  %d\n", d.Protocol)
@@ -105,7 +141,7 @@ func showStatus(ctx context.Context, client *api.Client, opt options, req api.Re
 	if err != nil {
 		return exitFailed, err
 	}
-	emit(opt, resp.Body, func() { printStatuses(opt.out, client.Target(), resp.Generation, statuses) })
+	emit(opt, resp.Body, statuses, func() { printStatuses(opt.out, client.Target(), resp.Generation, statuses) })
 	return exitOK, nil
 }
 
@@ -194,7 +230,7 @@ func showPlan(ctx context.Context, client *api.Client, opt options, req api.Requ
 			return exitFailed, err
 		}
 	}
-	emit(opt, resp.Body, func() {
+	emit(opt, resp.Body, changes, func() {
 		_, _ = fmt.Fprintf(out, "host %s, generation %d\n", client.Target(), resp.Generation)
 		if len(changes) == 0 {
 			_, _ = fmt.Fprintln(out, empty)
@@ -241,7 +277,7 @@ func runAudit(ctx context.Context, client *api.Client, opt options) (int, error)
 	if err != nil {
 		return exitFailed, err
 	}
-	emit(opt, resp.Body, func() {
+	emit(opt, resp.Body, entries, func() {
 		_, _ = fmt.Fprintf(out, "host %s, generation %d\n", client.Target(), resp.Generation)
 		if len(entries) == 0 {
 			_, _ = fmt.Fprintln(out, "nothing has changed this host yet")
@@ -314,6 +350,13 @@ func runLog(ctx context.Context, client *api.Client, opt options, args []string)
 
 func printLine(opt options, l api.LogLine) error {
 	out := opt.out
+	// One object per line, never one array: a follower has no last line, and a
+	// reader that waited for the closing bracket would wait forever. This is
+	// the shape every log-reading tool already expects of a stream.
+	if opt.jsonOut {
+		writeJSONLine(out, l)
+		return nil
+	}
 	if !opt.filoOut {
 		// A line from a job says which run wrote it: several runs of one job
 		// write at the same time on purpose.
