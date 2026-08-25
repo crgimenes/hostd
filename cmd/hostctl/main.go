@@ -56,6 +56,7 @@ type options struct {
 	socket     string
 	filoOut    bool
 	limit      int
+	keep       int
 	stream     string
 	kind       string
 	run        string
@@ -97,6 +98,7 @@ func run(args []string) int {
 	flags.StringVar(&opt.socket, "socket", "", "path to the hostd control socket")
 	flags.BoolVar(&opt.filoOut, "filo", false, "write the result as Filo and nothing else")
 	flags.IntVar(&opt.limit, "limit", 200, "maximum number of log lines")
+	flags.IntVar(&opt.keep, "keep", api.DefaultImageKeep, "versions of each image a prune leaves behind")
 	flags.StringVar(&opt.stream, "stream", "", "only stdout, stderr or event")
 	flags.StringVar(&opt.service, "service", "", "only this service")
 	flags.StringVar(&opt.kind, "kind", "", "only events of this kind, e.g. service.exited")
@@ -231,6 +233,7 @@ usage:
   hostctl push                         send your declarations to that machine
                                        (and drop what the tree stopped carrying)
   hostctl image ls                     the images that machine holds
+  hostctl image prune                  what an image cleanup would remove
   hostctl image push <image>           send an image built here to that machine
   hostctl metrics                      what the host and its services are using
   hostctl metrics -window 1h           the same, over a window

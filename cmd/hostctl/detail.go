@@ -299,13 +299,17 @@ func imagesDetail(snap snapshot, view viewState) detailView {
 	managed := cardView{
 		Key:      "images",
 		Heading:  "Managed by hostd",
+		Aside:    fmt.Sprintf("a cleanup keeps %d of each", api.DefaultImageKeep),
 		GridHead: []string{"image", "size", "created", "used by", "digest"},
 		Numbers:  imageNumbers(ours, true),
 		Grid:     imageRows(ours),
+		// The plan, not the removal: what the panel hands over is the command
+		// that shows what would go. Authorising it is a word the operator adds
+		// themselves, which is the point at which they have read the plan.
 		Buttons: []buttonView{{
-			Label:   "Command",
+			Label:   "Clean up",
 			Icon:    "clipboard",
-			Command: "hostctl -host " + host.Host + " image ls",
+			Command: "hostctl -host " + host.Host + " image prune",
 		}},
 	}
 	if len(ours) == 0 {

@@ -391,3 +391,145 @@ func TestAPushedImageComesBackMarkedAsOurs(t *testing.T) {
 	}
 	t.Fatalf("the image hostd just received is not in the list")
 }
+
+// An image marked as ours, for the policy tests. The content hash stands in for
+// the digest: what matters is that the mark is there and names a repository.
+func markedImage(digest, repo string, created time.Time, bytes int64) docker.ImageSummary {
+	return docker.ImageSummary{
+		Digest:  digest,
+		Tags:    []string{repo + ":" + ManagedTag(digest)},
+		Bytes:   bytes,
+		Created: created,
+	}
+}
+
+// The policy, which is the part a mistake cannot be taken back from: the newest
+// few of each repository stay, and each repository is its own line of versions.
+func TestPruneKeepsTheNewestFewOfEachRepository(t *testing.T) {
+	now := time.Now()
+	held := []docker.ImageSummary{
+		markedImage("site4", "site", now.Add(-3*time.Hour), 40),
+		markedImage("site1", "site", now, 10),
+		markedImage("site3", "site", now.Add(-2*time.Hour), 30),
+		markedImage("site2", "site", now.Add(-time.Hour), 20),
+		markedImage("api1", "api", now, 50),
+	}
+	remove, kept := imagesToPrune(held, nil, 3)
+
+	if len(remove) != 1 {
+		t.Fatalf("removing %d image(s), want the one oldest of site: %+v", len(remove), remove)
+	}
+	if remove[0].Digest != "site4" {
+		t.Fatalf("removing %q, want the oldest version site4", remove[0].Digest)
+	}
+	if remove[0].Repository != "site" {
+		t.Fatalf("the removal is attributed to %q, not to site", remove[0].Repository)
+	}
+	// Three of site plus the only one of api: a repository with fewer versions
+	// than the policy keeps loses nothing.
+	if kept != 4 {
+		t.Fatalf("kept %d, want 4", kept)
+	}
+}
+
+// What another system on this machine built is never a candidate, whatever its
+// age and however many of them there are. Removing one would be hostd claiming
+// a machine it only has a corner of.
+func TestPruneNeverTouchesWhatHostdDidNotMark(t *testing.T) {
+	now := time.Now()
+	held := []docker.ImageSummary{
+		{Digest: "theirs1", Tags: []string{"compose-thing:latest"}, Created: now},
+		{Digest: "theirs2", Created: now.Add(-time.Hour)},
+		{Digest: "theirs3", Created: now.Add(-2 * time.Hour)},
+		{Digest: "theirs4", Created: now.Add(-3 * time.Hour)},
+	}
+	remove, kept := imagesToPrune(held, nil, 1)
+
+	if len(remove) != 0 {
+		t.Fatalf("a prune offered up images hostd did not put here: %+v", remove)
+	}
+	// Not ours to keep either: they are simply not in this accounting.
+	if kept != 0 {
+		t.Fatalf("kept %d images that are not ours", kept)
+	}
+}
+
+// Age does not outrank use. An old version something is still running has to
+// survive, or a prune is an outage with a delay on it.
+func TestPruneKeepsAnOldVersionThatIsStillHeld(t *testing.T) {
+	now := time.Now()
+	held := []docker.ImageSummary{
+		markedImage("v1", "site", now, 10),
+		markedImage("v2", "site", now.Add(-time.Hour), 10),
+		markedImage("v3", "site", now.Add(-2*time.Hour), 10),
+	}
+	holders := map[string]string{"v3": UsedByContainer}
+	remove, kept := imagesToPrune(held, holders, 1)
+
+	for _, image := range remove {
+		if image.Digest == "v3" {
+			t.Fatal("a prune offered up the image a container is running")
+		}
+	}
+	if len(remove) != 1 || remove[0].Digest != "v2" {
+		t.Fatalf("removing %+v, want only v2", remove)
+	}
+	if kept != 2 {
+		t.Fatalf("kept %d, want the newest plus the held one", kept)
+	}
+}
+
+// A declaration holds an image the same way: the service is not running yet,
+// and removing what it names would break the next apply.
+func TestPruneKeepsWhatADeclarationNames(t *testing.T) {
+	now := time.Now()
+	held := []docker.ImageSummary{
+		markedImage("v1", "site", now, 10),
+		markedImage("v2", "site", now.Add(-time.Hour), 10),
+	}
+	holders := map[string]string{"site:" + ManagedTag("v2"): UsedByDeclared}
+	remove, _ := imagesToPrune(held, holders, 1)
+
+	if len(remove) != 0 {
+		t.Fatalf("a prune offered up an image a declaration names: %+v", remove)
+	}
+}
+
+// Without the authorisation the answer is a plan and nothing else happened.
+func TestAPruneWithoutAuthorisationRemovesNothing(t *testing.T) {
+	runtime, _ := requireImage(t)
+	f := newFixture(t)
+	f.server.Runtime(runtime)
+
+	before, err := runtime.Images(context.Background())
+	if err != nil {
+		t.Fatalf("Images: %v", err)
+	}
+	client := f.client()
+	defer func() { _ = client.Close() }()
+	resp, err := client.Do(context.Background(), Request{Op: OpImagePrune})
+	if err != nil {
+		t.Fatalf("image.prune: %v", err)
+	}
+	if resp.Failed() {
+		t.Fatalf("planning a prune failed: %v", resp.Err())
+	}
+	var plan ImagePrune
+	err = decodeBody(t, resp.Body, &plan)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if plan.Applied {
+		t.Fatal("a prune nobody authorised reported itself as carried out")
+	}
+	if plan.Keep != DefaultImageKeep {
+		t.Fatalf("the default policy came back as %d, want %d", plan.Keep, DefaultImageKeep)
+	}
+	after, err := runtime.Images(context.Background())
+	if err != nil {
+		t.Fatalf("Images: %v", err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("the machine held %d images and now holds %d", len(before), len(after))
+	}
+}

@@ -21,11 +21,84 @@ func runImage(ctx context.Context, client *api.Client, opt options, args []strin
 	switch args[0] {
 	case "ls", "list":
 		return runImageList(ctx, client, opt)
+	case "prune":
+		return runImagePrune(ctx, client, opt)
 	case "push":
 		return runImagePush(ctx, client, opt, args[1:])
 	default:
-		return exitUsage, fmt.Errorf("unknown image subcommand %q; expected ls or push", args[0])
+		return exitUsage, fmt.Errorf("unknown image subcommand %q; expected ls, prune or push", args[0])
 	}
+}
+
+// runImagePrune shows what would go, and removes it only when authorised. The
+// plan and the removal are one computation on the daemon, so what is printed
+// here without the flag is exactly what goes with it.
+func runImagePrune(ctx context.Context, client *api.Client, opt options) (int, error) {
+	// A request that carries no keep means "your default"; a person who typed
+	// zero means something else entirely, and quietly giving them three would
+	// hide that the machine did not do what they asked.
+	if opt.keep < 1 {
+		return exitUsage, fmt.Errorf("-keep is how many versions survive, so it is at least 1; got %d", opt.keep)
+	}
+	resp, err := client.Do(ctx, api.Request{
+		Op:               api.OpImagePrune,
+		Keep:             opt.keep,
+		AllowDestructive: opt.allowDestr,
+		OnBehalfOf:       opt.onBehalfOf,
+	})
+	if err != nil {
+		return exitComms, err
+	}
+	var plan api.ImagePrune
+	// A partial failure still carries the plan: which images went and which
+	// would not is the whole answer, and dropping it would leave the operator
+	// with a count and no names.
+	decodeErr := decode(ctx, resp.Body, &plan)
+	if resp.Failed() && decodeErr != nil {
+		return codeFor(resp.Err()), resp.Err()
+	}
+	if decodeErr != nil {
+		return exitFailed, decodeErr
+	}
+	emit(opt, resp.Body, func() { printPrune(opt.out, client.Target(), plan) })
+	if resp.Failed() {
+		return codeFor(resp.Err()), resp.Err()
+	}
+	return exitOK, nil
+}
+
+func printPrune(out io.Writer, target string, plan api.ImagePrune) {
+	_, _ = fmt.Fprintf(out, "host %s, keeping %d version(s) of each image\n", target, plan.Keep)
+	if len(plan.Remove) == 0 {
+		_, _ = fmt.Fprintf(out, "nothing to remove; %d image(s) of ours are held or within the %d kept\n", plan.Kept, plan.Keep)
+		return
+	}
+	var freed float64
+	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(w, "IMAGE\tSIZE\tDIGEST\tRESULT")
+	for _, image := range plan.Remove {
+		result := "would remove"
+		switch {
+		case image.Problem != "":
+			result = image.Problem
+		case image.Removed:
+			result = "removed"
+			freed += image.Bytes
+		}
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",
+			tagsText(image.Tags), formatBytes(image.Bytes), shortDigest(image.Digest), result)
+	}
+	_ = w.Flush()
+	if !plan.Applied {
+		var wouldFree float64
+		for _, image := range plan.Remove {
+			wouldFree += image.Bytes
+		}
+		_, _ = fmt.Fprintf(out, "%d image(s), %s; nothing was removed\n", len(plan.Remove), formatBytes(wouldFree))
+		_, _ = fmt.Fprintln(out, "run it again with -allow-destructive to remove them")
+		return
+	}
+	_, _ = fmt.Fprintf(out, "%d image(s) removed, %s freed; %d kept\n", len(plan.Remove), formatBytes(freed), plan.Kept)
 }
 
 // The images belong to the host, so the host is asked: hostctl runs on the

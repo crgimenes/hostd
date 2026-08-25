@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -372,4 +373,80 @@ func TestEnsureNetworkAcceptsLosingTheRace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("losing the race was reported as a failure: %v", err)
 	}
+}
+
+// Marking is a tag, and taking a tag back must not take the image with it while
+// another name still points there. The image borrowed here is one that already
+// has a name of its own, so the reference removed is only ever ours.
+func TestATagCanBeAddedAndTakenBackWithoutLosingTheImage(t *testing.T) {
+	client, err := Open()
+	if errors.Is(err, ErrNoRuntime) {
+		t.Skip("this machine has no container runtime")
+	}
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	err = client.Ping(ctx)
+	if err != nil {
+		t.Skipf("the runtime socket is there but does not answer: %v", err)
+	}
+	held, err := client.Images(ctx)
+	if err != nil {
+		t.Fatalf("Images: %v", err)
+	}
+	var source ImageSummary
+	for _, image := range held {
+		if len(image.Tags) > 0 {
+			source = image
+			break
+		}
+	}
+	if source.Digest == "" {
+		t.Skip("this machine holds no already-named image to borrow")
+	}
+
+	const probe = "hostd-tag-probe:1"
+	err = client.Tag(ctx, source.Digest, "hostd-tag-probe", "1")
+	if err != nil {
+		t.Fatalf("Tag: %v", err)
+	}
+	t.Cleanup(func() { _ = client.RemoveImage(context.Background(), probe) })
+
+	after, err := client.Images(ctx)
+	if err != nil {
+		t.Fatalf("Images: %v", err)
+	}
+	if !slices.Contains(tagsOf(after, source.Digest), probe) {
+		t.Fatalf("the mark is not on the image: %v", tagsOf(after, source.Digest))
+	}
+
+	err = client.RemoveImage(ctx, probe)
+	if err != nil {
+		t.Fatalf("RemoveImage: %v", err)
+	}
+	again, err := client.Images(ctx)
+	if err != nil {
+		t.Fatalf("Images: %v", err)
+	}
+	names := tagsOf(again, source.Digest)
+	if names == nil {
+		t.Fatal("removing our own tag took the whole image with it")
+	}
+	if slices.Contains(names, probe) {
+		t.Fatalf("the mark is still there: %v", names)
+	}
+}
+
+func tagsOf(held []ImageSummary, digest string) []string {
+	for _, image := range held {
+		if image.Digest == digest {
+			if image.Tags == nil {
+				return []string{}
+			}
+			return image.Tags
+		}
+	}
+	return nil
 }

@@ -209,3 +209,59 @@ func TestAnImageFailureDoesNotBlankTheRestOfTheMachine(t *testing.T) {
 		t.Fatalf("the machine lost its services to an image failure:\n%s", back)
 	}
 }
+
+// A dry run has to be unmistakable: an operator who reads it as "done" goes
+// away believing a disk was freed that was not.
+func TestAPrunePlanSaysNothingHappened(t *testing.T) {
+	var out bytes.Buffer
+	printPrune(&out, "yuki.local", api.ImagePrune{
+		Keep: 3,
+		Kept: 6,
+		Remove: []api.ImageChange{
+			{Digest: "sha256:1111111111111111", Repository: "site", Tags: []string{"site:hostd-111"}, Bytes: 2048},
+		},
+	})
+	text := out.String()
+	if !strings.Contains(text, "nothing was removed") {
+		t.Fatalf("a plan does not say it changed nothing:\n%s", text)
+	}
+	if !strings.Contains(text, "-allow-destructive") {
+		t.Fatalf("a plan does not say how to go ahead:\n%s", text)
+	}
+	if !strings.Contains(text, "would remove") {
+		t.Fatalf("the row does not say it is a proposal:\n%s", text)
+	}
+}
+
+// What the runtime refused belongs on its own row: counting it as freed would
+// report a disk that did not move.
+func TestAPruneReportsWhatWouldNotGo(t *testing.T) {
+	var out bytes.Buffer
+	printPrune(&out, "yuki.local", api.ImagePrune{
+		Keep:    3,
+		Kept:    2,
+		Applied: true,
+		Remove: []api.ImageChange{
+			{Digest: "sha256:1111111111111111", Bytes: 2048, Removed: true},
+			{Digest: "sha256:2222222222222222", Bytes: 4096, Problem: "image is being used by running container abc"},
+		},
+	})
+	text := out.String()
+	if !strings.Contains(text, "being used by running container") {
+		t.Fatalf("the refusal is not reported:\n%s", text)
+	}
+	// 2048 freed, not 6144: what did not go did not free anything.
+	if !strings.Contains(text, "2.0 KiB freed") {
+		t.Fatalf("the freed total counts an image that is still there:\n%s", text)
+	}
+}
+
+// A machine with nothing to clean says so plainly rather than printing an empty
+// table an operator has to interpret.
+func TestAPruneWithNothingToDoSaysSo(t *testing.T) {
+	var out bytes.Buffer
+	printPrune(&out, "yuki.local", api.ImagePrune{Keep: 3, Kept: 5})
+	if !strings.Contains(out.String(), "nothing to remove") {
+		t.Fatalf("an empty plan prints nothing readable:\n%s", out.String())
+	}
+}

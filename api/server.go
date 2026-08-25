@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"os"
 	"os/user"
@@ -285,15 +286,19 @@ func RepositoryOf(reference string) string {
 	return reference[:at]
 }
 
-// Whether hostd is the one that put this image here, by the mark it leaves.
-func managed(tags []string) bool {
+// The repository hostd marked this image under, and whether hostd marked it at
+// all. The mark carries the grouping a prune needs: every version pushed under
+// one repository is one line of versions, however the moving tag has since
+// travelled.
+func markedRepository(tags []string) (string, bool) {
 	for _, tag := range tags {
 		at := strings.LastIndex(tag, ":")
-		if at >= 0 && strings.HasPrefix(tag[at+1:], ManagedTagPrefix) {
-			return true
+		if at < 0 || !strings.HasPrefix(tag[at+1:], ManagedTagPrefix) {
+			continue
 		}
+		return tag[:at], true
 	}
-	return false
+	return "", false
 }
 
 // What a push answers with, so the declaration can be pinned to what really
@@ -359,13 +364,14 @@ func (s *Server) listImages(ctx context.Context) Response {
 	}
 	out := make([]ImageEntry, 0, len(held))
 	for _, image := range held {
+		_, marked := markedRepository(image.Tags)
 		out = append(out, ImageEntry{
 			Digest:  image.Digest,
 			Tags:    image.Tags,
 			Bytes:   float64(image.Bytes),
 			Created: float64(image.Created.UnixMilli()),
 			UsedBy:  heldBy(image, holders),
-			Managed: managed(image.Tags),
+			Managed: marked,
 		})
 	}
 	// Newest first, here rather than in each client: the order is part of the
@@ -425,6 +431,136 @@ func heldBy(image docker.ImageSummary, holders map[string]string) string {
 		}
 	}
 	return ""
+}
+
+// How many versions of one image survive a prune by default. Enough to go back
+// from a bad deploy more than once; few enough that a machine deployed to daily
+// is not storing a month of them.
+const DefaultImageKeep = 3
+
+// One image a prune would remove, or did.
+type ImageChange struct {
+	Digest     string   `filo:"digest" json:"digest"`
+	Repository string   `filo:"repository" json:"repository"`
+	Tags       []string `filo:"tags" json:"tags"`
+	Bytes      float64  `filo:"bytes" json:"bytes"`
+	Removed    bool     `filo:"removed" json:"removed"`
+	// What the runtime said when it would not go. Reporting a removal that did
+	// not happen is worse than reporting a failure.
+	Problem string `filo:"problem" json:"problem"`
+}
+
+type ImagePrune struct {
+	Keep    int           `filo:"keep" json:"keep"`
+	Kept    int           `filo:"kept" json:"kept"`
+	Remove  []ImageChange `filo:"remove" json:"remove"`
+	Applied bool          `filo:"applied" json:"applied"`
+}
+
+// imagesToPrune is the whole policy, in one function, so the plan and the
+// removal cannot drift apart: only what hostd marked is ever a candidate, the
+// newest few of each repository stay, and anything a container or a declaration
+// holds stays whatever its age. Kept counts only marked images — what something
+// else on this machine built is neither kept nor removed by us, it is simply
+// not ours.
+func imagesToPrune(held []docker.ImageSummary, holders map[string]string, keep int) (remove []ImageChange, kept int) {
+	lines := make(map[string][]docker.ImageSummary)
+	for _, image := range held {
+		repo, marked := markedRepository(image.Tags)
+		if !marked {
+			continue
+		}
+		lines[repo] = append(lines[repo], image)
+	}
+	for _, repo := range slices.Sorted(maps.Keys(lines)) {
+		versions := lines[repo]
+		// Newest first, the same order the list answers in, so what an operator
+		// saw at the top of the screen is what survives.
+		slices.SortFunc(versions, func(a, b docker.ImageSummary) int {
+			if !a.Created.Equal(b.Created) {
+				return b.Created.Compare(a.Created)
+			}
+			return strings.Compare(a.Digest, b.Digest)
+		})
+		for at, image := range versions {
+			if at < keep || heldBy(image, holders) != "" {
+				kept++
+				continue
+			}
+			remove = append(remove, ImageChange{
+				Digest:     image.Digest,
+				Repository: repo,
+				Tags:       image.Tags,
+				Bytes:      float64(image.Bytes),
+			})
+		}
+	}
+	return remove, kept
+}
+
+// pruneImages plans, and carries the plan out only when told to. It is one
+// computation either way: a dry run that ran different code would be
+// decoration.
+func (s *Server) pruneImages(ctx context.Context, req Request, actor string) Response {
+	if s.runtime == nil {
+		return Response{Code: CodeUnavailable, Message: "this machine has no container runtime to remove images from"}
+	}
+	keep := req.Keep
+	if keep <= 0 {
+		keep = DefaultImageKeep
+	}
+	held, err := s.runtime.Images(ctx)
+	if err != nil {
+		return Response{Code: CodeFailed, Message: err.Error()}
+	}
+	holders, err := s.imageHolders(ctx)
+	if err != nil {
+		return Response{Code: CodeFailed, Message: fmt.Sprintf("cannot tell which images are in use, so none can be removed: %v", err)}
+	}
+	remove, kept := imagesToPrune(held, holders, keep)
+	out := ImagePrune{Keep: keep, Kept: kept, Remove: remove}
+	if !req.AllowDestructive {
+		return body(out)
+	}
+
+	entry := state.Entry{Operation: req.Op, Target: fmt.Sprintf("keep %d", keep), Actor: actor, OnBehalfOf: req.OnBehalfOf}
+	failed := 0
+	for at := range out.Remove {
+		// By digest, never by tag: removing a tag from an image that has
+		// several only drops the name, and the disk would not move.
+		err = s.runtime.RemoveImage(ctx, out.Remove[at].Digest)
+		if err != nil {
+			out.Remove[at].Problem = err.Error()
+			failed++
+			continue
+		}
+		out.Remove[at].Removed = true
+		s.log.Append(logs.Record{
+			Service: "hostd",
+			Stream:  logs.StreamEvent,
+			Kind:    logs.EventImage,
+			Text: fmt.Sprintf("removed image %s of %s, %.0f bytes",
+				out.Remove[at].Digest, out.Remove[at].Repository, out.Remove[at].Bytes),
+		})
+	}
+	out.Applied = true
+	entry.Result = state.ResultOK
+	entry.Detail = fmt.Sprintf("removed %d of %d, kept %d", len(out.Remove)-failed, len(out.Remove), kept)
+	if failed > 0 {
+		entry.Result = state.ResultFailed
+	}
+	// Audited but not a new generation: what a generation guards is the desired
+	// state two operators could overwrite for each other, and no image was ever
+	// part of that. Bumping here would refuse somebody's apply for a reason
+	// that has nothing to do with their apply.
+	s.store.Record(entry, false)
+	if failed > 0 {
+		resp := body(out)
+		resp.Code = CodeFailed
+		resp.Message = fmt.Sprintf("%d image(s) could not be removed", failed)
+		return resp
+	}
+	return body(out)
 }
 
 // Who is on the other end, from the kernel rather than from anything the
@@ -501,6 +637,8 @@ func (s *Server) dispatch(ctx context.Context, req Request, actor string) Respon
 		return s.stamp(s.readMetrics(req))
 	case OpImageList:
 		return s.stamp(s.listImages(ctx))
+	case OpImagePrune:
+		return s.stamp(s.pruneImages(ctx, req, actor))
 	case OpServiceStart:
 		return s.mutate(req, actor, req.Name, s.sup.Start)
 	case OpServiceStop:
@@ -635,7 +773,7 @@ func (s *Server) describe() Response {
 			OpDescribe, OpStatus, OpServiceList,
 			OpServiceStart, OpServiceStop, OpServiceRestrt,
 			OpPlan, OpApply, OpAudit, OpLogSearch, OpLogFollow, OpMetrics,
-			OpImagePush, OpImageList, OpServicePut, OpServicePrune,
+			OpImagePush, OpImageList, OpImagePrune, OpServicePut, OpServicePrune,
 		},
 	})
 }

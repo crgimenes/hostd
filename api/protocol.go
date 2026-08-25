@@ -34,6 +34,7 @@ const (
 	OpMetrics       = "metrics"
 	OpImagePush     = "image.push"
 	OpImageList     = "image.list"
+	OpImagePrune    = "image.prune"
 	OpServicePut    = "service.put"
 	OpServicePrune  = "service.prune"
 )
@@ -66,6 +67,10 @@ type Request struct {
 	Run     string `filo:"run"`
 	Limit   int    `filo:"limit"`
 	Since   uint64 `filo:"since"`
+	// How many versions of one image a prune leaves behind. Not Limit: that
+	// bounds how much of an answer comes back, and this decides what stops
+	// existing.
+	Keep int `filo:"keep"`
 	// A metric query: the window in milliseconds, and what to answer it with.
 	// Zero From asks for the newest value of every series instead.
 	// What an image was built to run on, so a machine that cannot run it says
