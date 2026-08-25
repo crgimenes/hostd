@@ -110,6 +110,7 @@ func (s *Supervisor) describe(ctx context.Context, status *Status, svc service.S
 		return
 	}
 	status.PID = observed.PID
+	status.Digest = observed.Digest
 	status.Restarts = observed.Restarts
 	status.LastExit = observed.Exit
 	if !observed.Started.IsZero() {

@@ -252,6 +252,7 @@ usage:
   hostctl status                       what every service is doing
   hostctl describe                     versions and capabilities of the daemon
   hostctl service list                 same as status, by service
+  hostctl service versions <name>      which versions it could be put back on
   hostctl service start <name>         ask a service to run
   hostctl service stop <name>          ask a service to stop
   hostctl service restart <name>       stop and start a service

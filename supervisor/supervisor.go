@@ -52,6 +52,10 @@ type Status struct {
 	LastExit  int    `filo:"last-exit" json:"last-exit"`
 	LastError string `filo:"last-error" json:"last-error"`
 	Image     string `filo:"image" json:"image"`
+	// The image the container is actually on, which is not what Image says: a
+	// declaration names a tag, and a tag is what the next push moves. Asking
+	// which version is running is asking this.
+	Digest string `filo:"digest" json:"digest"`
 	// How often a job runs, as the file says it.
 	Every string `filo:"every" json:"every"`
 }

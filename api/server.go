@@ -292,12 +292,22 @@ func RepositoryOf(reference string) string {
 // one repository is one line of versions, however the moving tag has since
 // travelled.
 func markedRepository(tags []string) (string, bool) {
+	tag, marked := managedTag(tags)
+	if !marked {
+		return "", false
+	}
+	return tag[:strings.LastIndex(tag, ":")], true
+}
+
+// The stamp itself, whole. It is the name a rollback writes down, because it is
+// the one a later push of the same image cannot take away.
+func managedTag(tags []string) (string, bool) {
 	for _, tag := range tags {
 		at := strings.LastIndex(tag, ":")
 		if at < 0 || !strings.HasPrefix(tag[at+1:], ManagedTagPrefix) {
 			continue
 		}
-		return tag[:at], true
+		return tag, true
 	}
 	return "", false
 }
@@ -644,6 +654,8 @@ func (s *Server) dispatch(ctx context.Context, req Request, actor string) Respon
 		return s.stamp(s.readMetrics(req))
 	case OpImageList:
 		return s.stamp(s.listImages(ctx))
+	case OpServiceVersions:
+		return s.stamp(s.serviceVersions(ctx, req))
 	case OpImagePrune:
 		return s.stamp(s.pruneImages(ctx, req, actor))
 	case OpServiceStart:
@@ -800,6 +812,7 @@ func (s *Server) describe(ctx context.Context) Response {
 			OpServiceStart, OpServiceStop, OpServiceRestrt,
 			OpPlan, OpApply, OpAudit, OpLogSearch, OpLogFollow, OpMetrics,
 			OpImagePush, OpImageList, OpImagePrune, OpServicePut, OpServicePrune,
+			OpServiceVersions,
 		},
 	})
 }

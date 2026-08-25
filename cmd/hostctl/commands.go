@@ -103,11 +103,13 @@ func runStatus(ctx context.Context, client *api.Client, opt options) (int, error
 
 func runService(ctx context.Context, client *api.Client, opt options, args []string) (int, error) {
 	if len(args) == 0 {
-		return exitUsage, fmt.Errorf("service needs a subcommand: list, start, stop or restart")
+		return exitUsage, fmt.Errorf("service needs a subcommand: list, versions, start, stop or restart")
 	}
 	switch args[0] {
 	case "list":
 		return showStatus(ctx, client, opt, api.Request{Op: api.OpServiceList})
+	case "versions":
+		return runServiceVersions(ctx, client, opt, args[1:])
 	case "start", "stop", "restart":
 		if len(args) < 2 {
 			return exitUsage, fmt.Errorf("service %s needs a service name", args[0])
@@ -124,7 +126,7 @@ func runService(ctx context.Context, client *api.Client, opt options, args []str
 			OnBehalfOf:       opt.onBehalfOf,
 		})
 	default:
-		return exitUsage, fmt.Errorf("unknown service subcommand %q; expected list, start, stop or restart", args[0])
+		return exitUsage, fmt.Errorf("unknown service subcommand %q; expected list, versions, start, stop or restart", args[0])
 	}
 }
 
