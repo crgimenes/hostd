@@ -262,6 +262,42 @@ type Image struct {
 	Content string `filo:"content-sha256"`
 }
 
+// One image this machine holds. The digest is the id this runtime gave it and
+// means nothing on another machine, which is why it is the thing to declare
+// here and the thing a rollback checks for here.
+type ImageEntry struct {
+	Digest string `filo:"digest" json:"digest"`
+	// Empty for an image no tag names any more: a version displaced by a later
+	// push, still on the disk and still startable by digest.
+	Tags  []string `filo:"tags" json:"tags"`
+	Bytes float64  `filo:"bytes" json:"bytes"`
+	// Milliseconds, like every other time on the wire.
+	Created float64 `filo:"created-ms" json:"created-ms"`
+}
+
+// listImages is how an operator sees what a machine's disk went to, and what a
+// rollback would still find there. Nothing removes images today, so this only
+// grows — reporting it is the first half of being able to prune it.
+func (s *Server) listImages(ctx context.Context) Response {
+	if s.runtime == nil {
+		return Response{Code: CodeUnavailable, Message: "this machine has no container runtime to list images from"}
+	}
+	held, err := s.runtime.Images(ctx)
+	if err != nil {
+		return Response{Code: CodeFailed, Message: err.Error()}
+	}
+	out := make([]ImageEntry, 0, len(held))
+	for _, image := range held {
+		out = append(out, ImageEntry{
+			Digest:  image.Digest,
+			Tags:    image.Tags,
+			Bytes:   float64(image.Bytes),
+			Created: float64(image.Created.UnixMilli()),
+		})
+	}
+	return body(out)
+}
+
 // Who is on the other end, from the kernel rather than from anything the
 // caller said. Over ssh that is the unix account the operator logged in as,
 // which is what "who stopped the service at three in the morning" needs.
@@ -334,6 +370,8 @@ func (s *Server) dispatch(ctx context.Context, req Request, actor string) Respon
 		return s.stamp(s.searchLogs(req))
 	case OpMetrics:
 		return s.stamp(s.readMetrics(req))
+	case OpImageList:
+		return s.stamp(s.listImages(ctx))
 	case OpServiceStart:
 		return s.mutate(req, actor, req.Name, s.sup.Start)
 	case OpServiceStop:
@@ -468,7 +506,7 @@ func (s *Server) describe() Response {
 			OpDescribe, OpStatus, OpServiceList,
 			OpServiceStart, OpServiceStop, OpServiceRestrt,
 			OpPlan, OpApply, OpAudit, OpLogSearch, OpLogFollow, OpMetrics,
-			OpImagePush, OpServicePut, OpServicePrune,
+			OpImagePush, OpImageList, OpServicePut, OpServicePrune,
 		},
 	})
 }

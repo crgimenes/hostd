@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -146,4 +147,61 @@ func TestAnImageForAnotherArchitectureIsRefused(t *testing.T) {
 	if !strings.Contains(resp.Message, "--platform") {
 		t.Fatalf("the refusal does not say how to fix it: %s", resp.Message)
 	}
+}
+
+// A machine with no container runtime cannot answer what it holds, and that is
+// not the same answer as holding nothing: an empty list would read as a clean
+// machine and invite a deploy onto one that cannot run it.
+func TestListingImagesWithoutARuntimeSaysSo(t *testing.T) {
+	f := newFixture(t)
+	client := f.client()
+	defer func() { _ = client.Close() }()
+
+	resp, err := client.Do(context.Background(), Request{Op: OpImageList})
+	if err != nil {
+		t.Fatalf("image.list: %v", err)
+	}
+	if resp.Code != CodeUnavailable {
+		t.Fatalf("a machine with no runtime answered %q, wanted %q", resp.Code, CodeUnavailable)
+	}
+}
+
+// What a machine holds is what a rollback can still start, and the daemon is
+// the only one who can say: hostctl runs on the operator's machine and reads
+// no remote runtime of its own.
+func TestListingImagesAnswersWithWhatTheRuntimeHolds(t *testing.T) {
+	runtime, image := requireImage(t)
+	f := newFixture(t)
+	f.server.Runtime(runtime)
+
+	client := f.client()
+	defer func() { _ = client.Close() }()
+	resp, err := client.Do(context.Background(), Request{Op: OpImageList})
+	if err != nil {
+		t.Fatalf("image.list: %v", err)
+	}
+	if resp.Failed() {
+		t.Fatalf("listing the images failed: %v", resp.Err())
+	}
+	var held []ImageEntry
+	err = decodeBody(t, resp.Body, &held)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	for _, entry := range held {
+		if !slices.Contains(entry.Tags, image) {
+			continue
+		}
+		// The digest is what a declaration pins to on this machine, and the
+		// time is what tells two versions of one tag apart.
+		if entry.Digest == "" {
+			t.Errorf("%s is listed without the digest a declaration would pin to", image)
+		}
+		if entry.Created == 0 {
+			t.Errorf("%s is listed without a creation time", image)
+		}
+		return
+	}
+	t.Fatalf("%s is on this machine and is not in the answer", image)
 }

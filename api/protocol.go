@@ -33,6 +33,7 @@ const (
 	OpLogFollow     = "log.follow"
 	OpMetrics       = "metrics"
 	OpImagePush     = "image.push"
+	OpImageList     = "image.list"
 	OpServicePut    = "service.put"
 	OpServicePrune  = "service.prune"
 )

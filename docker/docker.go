@@ -516,6 +516,54 @@ func (c *Client) Image(ctx context.Context, image string) (ImageInfo, error) {
 	return ImageInfo{Digest: raw.ID, Arch: raw.Architecture}, nil
 }
 
+// What the runtime holds under an id of its own making. Nothing here is ever
+// removed by hostd, so a machine that has been deployed to for a year holds a
+// year of images: this is what tells an operator that, and what a rollback
+// consults to know the version it wants is still on the machine.
+type ImageSummary struct {
+	Digest string
+	// Empty for an image no tag points at any more — typically a version a
+	// later push of the same tag displaced. Those are what a cleanup is after.
+	Tags    []string
+	Bytes   int64
+	Created time.Time
+}
+
+// Images answers with the top-level images, the same set `docker images` shows:
+// intermediate layers are not versions of anything and would bury the ones that
+// are.
+func (c *Client) Images(ctx context.Context) ([]ImageSummary, error) {
+	var raw []struct {
+		ID       string   `json:"Id"`
+		RepoTags []string `json:"RepoTags"`
+		Size     int64    `json:"Size"`
+		Created  int64    `json:"Created"`
+	}
+	err := c.call(ctx, http.MethodGet, "/images/json", nil, nil, &raw)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ImageSummary, 0, len(raw))
+	for _, item := range raw {
+		tags := make([]string, 0, len(item.RepoTags))
+		for _, tag := range item.RepoTags {
+			// What the runtime writes for an image nothing names; passing it on
+			// would print a tag that cannot be used to refer to anything.
+			if tag == "<none>:<none>" {
+				continue
+			}
+			tags = append(tags, tag)
+		}
+		out = append(out, ImageSummary{
+			Digest:  item.ID,
+			Tags:    tags,
+			Bytes:   item.Size,
+			Created: time.Unix(item.Created, 0),
+		})
+	}
+	return out, nil
+}
+
 // Arch is what this machine runs. An image built for another one loads
 // perfectly well and then fails to start with "exec format error", which is a
 // sentence that explains nothing to whoever deployed it.

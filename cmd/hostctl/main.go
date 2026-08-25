@@ -230,6 +230,7 @@ usage:
   hostctl log -follow                  keep watching
   hostctl push                         send your declarations to that machine
                                        (and drop what the tree stopped carrying)
+  hostctl image ls                     the images that machine holds
   hostctl image push <image>           send an image built here to that machine
   hostctl metrics                      what the host and its services are using
   hostctl metrics -window 1h           the same, over a window

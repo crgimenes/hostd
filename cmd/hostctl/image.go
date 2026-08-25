@@ -1,28 +1,113 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
+	"slices"
+	"strings"
+	"text/tabwriter"
+	"time"
 
 	"github.com/crgimenes/hostd/api"
 	"github.com/crgimenes/hostd/docker"
 )
 
-// runImage pushes an image built on this machine to another one, over the same
-// ssh the commands travel on. There is no registry in the middle: the host
+func runImage(ctx context.Context, client *api.Client, opt options, args []string) (int, error) {
+	if len(args) == 0 {
+		return exitUsage, fmt.Errorf("image needs a subcommand: ls, or push <image>")
+	}
+	switch args[0] {
+	case "ls", "list":
+		return runImageList(ctx, client, opt)
+	case "push":
+		return runImagePush(ctx, client, opt, args[1:])
+	default:
+		return exitUsage, fmt.Errorf("unknown image subcommand %q; expected ls or push", args[0])
+	}
+}
+
+// The images belong to the host, so the host is asked: hostctl runs on the
+// operator's machine and never on the one it operates. The only runtime it
+// opens itself is the local one in push below, and only to read the image it
+// is about to send.
+func runImageList(ctx context.Context, client *api.Client, opt options) (int, error) {
+	resp, err := client.Do(ctx, api.Request{Op: api.OpImageList})
+	if err != nil {
+		return exitComms, err
+	}
+	if resp.Failed() {
+		return codeFor(resp.Err()), resp.Err()
+	}
+	var held []api.ImageEntry
+	err = decode(ctx, resp.Body, &held)
+	if err != nil {
+		return exitFailed, err
+	}
+	emit(opt, resp.Body, func() { printImages(opt.out, client.Target(), held) })
+	return exitOK, nil
+}
+
+func printImages(out io.Writer, target string, held []api.ImageEntry) {
+	_, _ = fmt.Fprintf(out, "host %s\n", target)
+	if len(held) == 0 {
+		_, _ = fmt.Fprintln(out, "this machine holds no images")
+		return
+	}
+	// Newest first: the image an operator is looking for is almost always the
+	// one a deploy just put there.
+	slices.SortFunc(held, func(a, b api.ImageEntry) int {
+		if a.Created != b.Created {
+			return cmp.Compare(b.Created, a.Created)
+		}
+		return strings.Compare(a.Digest, b.Digest)
+	})
+	var total float64
+	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(w, "IMAGE\tSIZE\tCREATED\tDIGEST")
+	for _, image := range held {
+		total += image.Bytes
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",
+			tagsText(image.Tags),
+			formatBytes(image.Bytes),
+			time.UnixMilli(int64(image.Created)).Format("2006-01-02 15:04"),
+			shortDigest(image.Digest))
+	}
+	_ = w.Flush()
+	_, _ = fmt.Fprintf(out, "%d images, %s\n", len(held), formatBytes(total))
+}
+
+// An untagged image is not nameless: it is startable by digest, which is what
+// a declaration pinned to one does. Saying "untagged" rather than printing
+// nothing says the row is a version, not a defect.
+func tagsText(tags []string) string {
+	if len(tags) == 0 {
+		return "<untagged>"
+	}
+	return strings.Join(tags, ", ")
+}
+
+func shortDigest(digest string) string {
+	const shown = 12
+	trimmed := strings.TrimPrefix(digest, "sha256:")
+	if len(trimmed) <= shown {
+		return trimmed
+	}
+	return trimmed[:shown]
+}
+
+// runImagePush sends an image built on this machine to another one, over the
+// same ssh the commands travel on. There is no registry in the middle: the host
 // fetches nothing by itself, which is what keeps the install to a binary and
 // the machine free of credentials for a service it never asked for.
-func runImage(ctx context.Context, client *api.Client, opt options, args []string) (int, error) {
-	if len(args) == 0 || args[0] != "push" {
-		return exitUsage, fmt.Errorf("image needs a subcommand: push <image>")
-	}
-	if len(args) < 2 {
+func runImagePush(ctx context.Context, client *api.Client, opt options, args []string) (int, error) {
+	if len(args) == 0 {
 		return exitUsage, fmt.Errorf("image push needs the image to send, as it is named here")
 	}
-	image := args[1]
+	image := args[0]
 
 	local, err := docker.Open()
 	if err != nil {
