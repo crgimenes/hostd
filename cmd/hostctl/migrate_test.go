@@ -23,7 +23,7 @@ func reachable(host string, wanted, holds bool) placement {
 // The move the whole command exists for: the tree now says one machine, another
 // one is still running it.
 func TestAMoveIsTheTreeDisagreeingWithTheFleet(t *testing.T) {
-	plan, err := planMove("api", []placement{
+	plan, _, err := planMove("api", []placement{
 		reachable("yuki", false, true),
 		reachable("m1", true, false),
 		reachable("selene", false, false),
@@ -40,12 +40,18 @@ func TestAMoveIsTheTreeDisagreeingWithTheFleet(t *testing.T) {
 // picture is how a service ends up running in two places at once, which for
 // anything holding data is the worst outcome of the three.
 func TestASilentMachineStopsTheMoveRatherThanBeingReadAsEmpty(t *testing.T) {
-	_, err := planMove("api", []placement{
+	_, code, err := planMove("api", []placement{
 		{host: "yuki", answered: false, problem: "connection timed out"},
 		reachable("m1", true, false),
 	})
 	if err == nil {
 		t.Fatal("a migration went ahead without knowing where the service runs")
+	}
+	// The fleet could not be read; nothing was wrong with the request. An agent
+	// that reads this as bad arguments never retries, when retrying once the
+	// machine is back is exactly the right move.
+	if code != exitComms {
+		t.Fatalf("an unreachable machine came back as exit %d, want %d", code, exitComms)
 	}
 	if !strings.Contains(err.Error(), "yuki") {
 		t.Fatalf("the refusal does not name the machine that went quiet: %v", err)
@@ -73,9 +79,13 @@ func TestEveryRefusalNamesTheRightOperation(t *testing.T) {
 	}
 	for name, one := range cases {
 		t.Run(name, func(t *testing.T) {
-			_, err := planMove("api", one.found)
+			_, code, err := planMove("api", one.found)
 			if err == nil {
 				t.Fatal("this is not a migration and was accepted as one")
+			}
+			// The fleet answered; what was asked for is not a migration.
+			if code != exitUsage {
+				t.Fatalf("came back as exit %d, want %d", code, exitUsage)
 			}
 			if !strings.Contains(err.Error(), one.says) {
 				t.Fatalf("the refusal does not say what to do instead: %v", err)
@@ -87,7 +97,7 @@ func TestEveryRefusalNamesTheRightOperation(t *testing.T) {
 // Two copies running is a state to sort out by hand: choosing which one is real
 // is not a decision a tool should make silently.
 func TestTwoCopiesRunningIsRefused(t *testing.T) {
-	_, err := planMove("api", []placement{
+	_, _, err := planMove("api", []placement{
 		reachable("yuki", false, true),
 		reachable("selene", false, true),
 		reachable("m1", true, false),

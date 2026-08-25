@@ -53,9 +53,9 @@ func runMigrate(ctx context.Context, opt options, args []string) (int, error) {
 	_, _ = fmt.Fprintf(out, "asking %d machine(s) where %s is\n", len(fleet), name)
 	found := survey(ctx, opt, fleet, name, declared)
 
-	move, err := planMove(name, found)
+	move, code, err := planMove(name, found)
 	if err != nil {
-		return exitUsage, err
+		return code, err
 	}
 	err = destinationCanHostIt(move.to, declared.Service)
 	if err != nil {
@@ -263,7 +263,7 @@ type move struct {
 // planMove reads the survey and refuses everything that is not a migration.
 // Each refusal names the operation that IS the right one, because "this is not
 // a migration" without that is a dead end.
-func planMove(name string, found []placement) (move, error) {
+func planMove(name string, found []placement) (move, int, error) {
 	var wants, holds, silent []placement
 	for _, one := range found {
 		if !one.answered {
@@ -280,23 +280,26 @@ func planMove(name string, found []placement) (move, error) {
 	// A machine that did not answer may be the one running it. Moving on that
 	// picture risks a second copy of a service that never stopped.
 	if len(silent) > 0 {
-		return move{}, fmt.Errorf("%s did not answer, so where %s runs is not known; a migration decided on a partial picture can start a second copy",
+		// Not a bad request: the fleet could not be read. An agent that reads
+		// this as bad arguments never retries, when retrying once the machine
+		// is back is exactly the right move.
+		return move{}, exitComms, fmt.Errorf("%s did not answer, so where %s runs is not known; a migration decided on a partial picture can start a second copy",
 			strings.Join(hostsOf(silent), ", "), name)
 	}
 	switch {
 	case len(wants) == 0:
-		return move{}, fmt.Errorf("the tree places %s on no machine; removing a service is push and apply -allow-destructive, not a migration", name)
+		return move{}, exitUsage, fmt.Errorf("the tree places %s on no machine; removing a service is push and apply -allow-destructive, not a migration", name)
 	case len(wants) > 1:
-		return move{}, fmt.Errorf("the tree places %s on %s; a service on several machines is not something to migrate, it is already where it belongs",
+		return move{}, exitUsage, fmt.Errorf("the tree places %s on %s; a service on several machines is not something to migrate, it is already where it belongs",
 			name, strings.Join(hostsOf(wants), ", "))
 	case len(holds) == 0:
-		return move{}, fmt.Errorf("no machine outside %s is running %s; putting it there for the first time is push and apply",
+		return move{}, exitUsage, fmt.Errorf("no machine outside %s is running %s; putting it there for the first time is push and apply",
 			wants[0].host, name)
 	case len(holds) > 1:
-		return move{}, fmt.Errorf("%s is on %s at once; sort that out before moving it, because this would have to choose which copy is the real one",
+		return move{}, exitUsage, fmt.Errorf("%s is on %s at once; sort that out before moving it, because this would have to choose which copy is the real one",
 			name, strings.Join(hostsOf(holds), ", "))
 	}
-	return move{from: holds[0], to: wants[0]}, nil
+	return move{from: holds[0], to: wants[0]}, exitOK, nil
 }
 
 func hostsOf(found []placement) []string {
