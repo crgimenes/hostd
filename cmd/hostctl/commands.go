@@ -45,9 +45,20 @@ func runDescribe(ctx context.Context, client *api.Client, opt options) (int, err
 		_, _ = fmt.Fprintf(out, "version   %s\n", d.Version)
 		_, _ = fmt.Fprintf(out, "protocol  %d\n", d.Protocol)
 		_, _ = fmt.Fprintf(out, "schema    %d\n", d.Schema)
+		_, _ = fmt.Fprintf(out, "runtime   %s\n", runtimeText(d))
+		_, _ = fmt.Fprintf(out, "hardware  %d cpu(s), %s\n", d.CPUs, formatBytes(d.MemoryBytes))
 		_, _ = fmt.Fprintf(out, "supports  %s\n", strings.Join(d.Operations, " "))
 	})
 	return exitOK, nil
+}
+
+// A machine with no container runtime can hold declarations and run nothing.
+// Printing an empty field would read as a machine that failed to answer.
+func runtimeText(d api.Description) string {
+	if d.Arch == "" {
+		return "none on this machine"
+	}
+	return fmt.Sprintf("%s on %s", d.Runtime, d.Arch)
 }
 
 func runStatus(ctx context.Context, client *api.Client, opt options) (int, error) {

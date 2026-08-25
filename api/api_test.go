@@ -1156,3 +1156,62 @@ func TestOneClientAnswersConcurrentCallers(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// A heterogeneous fleet cannot place a service without knowing what a machine
+// is. Finding out by watching a container fail to start is finding out too
+// late, so the answer to "what are you" carries it.
+func TestDescribeSaysWhatTheMachineCanRun(t *testing.T) {
+	f := newFixture(t)
+	client := f.client()
+	defer func() { _ = client.Close() }()
+
+	resp, err := client.Do(context.Background(), Request{Op: OpDescribe})
+	if err != nil {
+		t.Fatalf("describe: %v", err)
+	}
+	var d Description
+	err = decodeBody(t, resp.Body, &d)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if d.CPUs < 1 {
+		t.Fatalf("the machine reports %d cpus", d.CPUs)
+	}
+	// This fixture has no runtime attached, and saying nothing is the honest
+	// answer: claiming the daemon binary's architecture would be a confident
+	// wrong answer to "can this service live here".
+	if d.Arch != "" {
+		t.Fatalf("a machine with no runtime claimed the architecture %q", d.Arch)
+	}
+}
+
+// With a runtime, the architecture is the runtime's own: a hostd built for one
+// can perfectly well talk to a runtime on another, and what has to execute the
+// image is the container.
+func TestDescribeTakesTheArchitectureFromTheRuntime(t *testing.T) {
+	runtime, _ := requireImage(t)
+	f := newFixture(t)
+	f.server.Runtime(runtime)
+	client := f.client()
+	defer func() { _ = client.Close() }()
+
+	resp, err := client.Do(context.Background(), Request{Op: OpDescribe})
+	if err != nil {
+		t.Fatalf("describe: %v", err)
+	}
+	var d Description
+	err = decodeBody(t, resp.Body, &d)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	here, err := runtime.Arch(context.Background())
+	if err != nil {
+		t.Fatalf("Arch: %v", err)
+	}
+	if d.Arch != here {
+		t.Fatalf("describe says %q and the runtime says %q", d.Arch, here)
+	}
+	if d.Runtime == "" {
+		t.Fatal("a machine with a runtime does not say which")
+	}
+}

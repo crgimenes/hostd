@@ -162,6 +162,17 @@ func run(args []string) int {
 		return code
 	}
 
+	// A migration is about two machines at once, so it is not something to fan
+	// out one host at a time: it opens its own connections, in an order the
+	// whole operation depends on.
+	if len(rest) > 1 && rest[0] == "service" && rest[1] == "migrate" {
+		code, migrateErr := runMigrate(ctx, opt, rest[2:])
+		if migrateErr != nil {
+			fmt.Fprintf(os.Stderr, "hostctl: %v\n", migrateErr)
+		}
+		return code
+	}
+
 	chosen, err := opt.selection(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "hostctl: %v\n", err)
@@ -225,6 +236,7 @@ usage:
   hostctl service start <name>         ask a service to run
   hostctl service stop <name>          ask a service to stop
   hostctl service restart <name>       stop and start a service
+  hostctl service migrate <name>       move it to where your tree now says
   hostctl plan                         what an apply would do, without doing it
   hostctl apply                        re-read the services directory and converge
   hostctl audit                        who changed what, and when

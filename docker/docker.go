@@ -585,18 +585,30 @@ func (c *Client) RemoveImage(ctx context.Context, reference string) error {
 	return c.call(ctx, http.MethodDelete, "/images/"+url.PathEscape(reference), nil, nil, nil)
 }
 
-// Arch is what this machine runs. An image built for another one loads
-// perfectly well and then fails to start with "exec format error", which is a
-// sentence that explains nothing to whoever deployed it.
-func (c *Client) Arch(ctx context.Context) (string, error) {
+// What the runtime on the other end of the socket says it is. Arch is the one
+// that decides whether a service can live on a machine: an image built for
+// another one loads perfectly well and then fails to start with "exec format
+// error", a sentence that explains nothing to whoever deployed it.
+type ServerInfo struct {
+	Version string
+	Arch    string
+}
+
+func (c *Client) Server(ctx context.Context) (ServerInfo, error) {
 	var version struct {
-		Arch string `json:"Arch"`
+		Version string `json:"Version"`
+		Arch    string `json:"Arch"`
 	}
 	err := c.call(ctx, http.MethodGet, "/version", nil, nil, &version)
 	if err != nil {
-		return "", err
+		return ServerInfo{}, err
 	}
-	return version.Arch, nil
+	return ServerInfo{Version: version.Version, Arch: version.Arch}, nil
+}
+
+func (c *Client) Arch(ctx context.Context) (string, error) {
+	info, err := c.Server(ctx)
+	return info.Arch, err
 }
 
 // Line is one thing a container wrote, with the runtime's own timestamp: a

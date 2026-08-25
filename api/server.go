@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	goruntime "runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -590,10 +591,6 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 			}
 			return
 		}
-		err = conn.SetWriteDeadline(time.Now().Add(requestTimeout))
-		if err != nil {
-			return
-		}
 		// Follow owns the connection for as long as the client watches.
 		if req.Op == OpLogFollow {
 			s.follow(ctx, conn, req)
@@ -612,6 +609,16 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		opCtx, cancel := context.WithTimeout(ctx, requestTimeout)
 		resp := s.dispatch(opCtx, req, actor)
 		cancel()
+		// The write budget starts when there is something to write. Set before
+		// the operation, it would be spent by the operation itself: stopping a
+		// container whose process ignores SIGTERM costs the runtime's whole
+		// grace period, and the answer would then be dropped on a connection
+		// the client is still holding open — which reads, at the far end, as a
+		// daemon that did nothing, for work it in fact finished.
+		err = conn.SetWriteDeadline(time.Now().Add(requestTimeout))
+		if err != nil {
+			return
+		}
 		err = WriteMessage(conn, resp)
 		if err != nil {
 			return
@@ -624,7 +631,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 func (s *Server) dispatch(ctx context.Context, req Request, actor string) Response {
 	switch req.Op {
 	case OpDescribe:
-		return s.stamp(s.describe())
+		return s.stamp(s.describe(ctx))
 	case OpStatus, OpServiceList:
 		return s.stamp(body(s.sup.Status()))
 	case OpPlan:
@@ -758,17 +765,36 @@ func (s *Server) refuse(entry state.Entry, code string, cause error) Response {
 
 // What a client needs before it trusts an answer from an unknown release.
 type Description struct {
-	Version    string   `filo:"version"`
-	Protocol   int      `filo:"protocol"`
-	Schema     int      `filo:"schema"`
-	Operations []string `filo:"operations"`
+	Version    string   `filo:"version" json:"version"`
+	Protocol   int      `filo:"protocol" json:"protocol"`
+	Schema     int      `filo:"schema" json:"schema"`
+	Operations []string `filo:"operations" json:"operations"`
+	// What this machine can actually run. A fleet where every machine is the
+	// same does not need these; one where they differ cannot place a service
+	// without them, and finding out by watching a container fail to start is
+	// finding out too late.
+	//
+	// Arch is the runtime's own, never the daemon binary's: what has to execute
+	// the image is the container, and a hostd built for one architecture can
+	// perfectly well talk to a runtime on another.
+	Arch string `filo:"arch" json:"arch"`
+	// Empty where no container runtime answers, which is a machine that can
+	// hold declarations and run nothing.
+	Runtime     string  `filo:"runtime" json:"runtime"`
+	CPUs        int     `filo:"cpus" json:"cpus"`
+	MemoryBytes float64 `filo:"memory-bytes" json:"memory-bytes"`
 }
 
-func (s *Server) describe() Response {
+func (s *Server) describe(ctx context.Context) Response {
+	info := s.runtimeInfo(ctx)
 	return body(Description{
-		Version:  version.Version,
-		Protocol: version.Protocol,
-		Schema:   version.Schema,
+		Version:     version.Version,
+		Protocol:    version.Protocol,
+		Schema:      version.Schema,
+		Arch:        info.Arch,
+		Runtime:     info.Version,
+		CPUs:        goruntime.NumCPU(),
+		MemoryBytes: s.hostMemory(),
 		Operations: []string{
 			OpDescribe, OpStatus, OpServiceList,
 			OpServiceStart, OpServiceStop, OpServiceRestrt,
@@ -776,6 +802,42 @@ func (s *Server) describe() Response {
 			OpImagePush, OpImageList, OpImagePrune, OpServicePut, OpServicePrune,
 		},
 	})
+}
+
+// A machine with no runtime says so by saying nothing, rather than by claiming
+// the daemon binary's architecture — which would be a confident wrong answer to
+// "can this service live here".
+func (s *Server) runtimeInfo(ctx context.Context) docker.ServerInfo {
+	if s.runtime == nil {
+		return docker.ServerInfo{}
+	}
+	info, err := s.runtime.Server(ctx)
+	if err != nil {
+		return docker.ServerInfo{}
+	}
+	return info
+}
+
+// The sampler already reads this every round, so describe asks the store rather
+// than the kernel: one reader of /proc, and an answer that is missing on a
+// machine whose sampler has not run rather than invented.
+func (s *Server) hostMemory() float64 {
+	if s.metrics == nil {
+		return 0
+	}
+	series, err := s.metrics.Latest(metrics.Query{
+		Scope:  metrics.ScopeHost,
+		Metric: metrics.MetricMemoryTotal,
+	}, latestWindow)
+	if err != nil {
+		return 0
+	}
+	for _, one := range series {
+		for _, point := range one.Points {
+			return point.Value
+		}
+	}
+	return 0
 }
 
 func (s *Server) statusList(name string) []supervisor.Status {

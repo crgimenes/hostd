@@ -31,28 +31,11 @@ func runPush(ctx context.Context, client *api.Client, opt options, args []string
 
 	out := opt.out
 	sent := 0
-	belongs := make([]service.Declaration, 0, len(declarations))
-	for _, declaration := range declarations {
-		if !declaration.Service.BelongsTo(machine.Name, machine.Tags) {
-			continue
-		}
-		belongs = append(belongs, declaration)
-	}
+	belongs := belongingTo(declarations, machine)
 	for _, declaration := range belongs {
-		payload, err := filoconf.Marshal(api.Send(declaration))
+		err := putDeclaration(ctx, client, opt, declaration)
 		if err != nil {
-			return exitFailed, err
-		}
-		resp, err := client.Do(ctx, api.Request{
-			Op:         api.OpServicePut,
-			Body:       payload,
-			OnBehalfOf: opt.onBehalfOf,
-		})
-		if err != nil {
-			return exitComms, err
-		}
-		if resp.Failed() {
-			return codeFor(resp.Err()), fmt.Errorf("%s: %w", declaration.Service.Name, resp.Err())
+			return codeFor(err), err
 		}
 		sent++
 		_, _ = fmt.Fprintf(out, "%s;%s;%d\n", client.Target(), declaration.Service.Name, len(declaration.Artifacts))
@@ -76,6 +59,39 @@ func runPush(ctx context.Context, client *api.Client, opt options, args []string
 		return exitPartial, loadErr
 	}
 	return exitOK, nil
+}
+
+// What a tree shared by a heterogeneous fleet declares for one machine.
+func belongingTo(declarations []service.Declaration, machine inventoryEntry) []service.Declaration {
+	out := make([]service.Declaration, 0, len(declarations))
+	for _, declaration := range declarations {
+		if !declaration.Service.BelongsTo(machine.Name, machine.Tags) {
+			continue
+		}
+		out = append(out, declaration)
+	}
+	return out
+}
+
+// putDeclaration sends one declaration and whatever travels with it. Sending is
+// not applying: the machine holds the file and runs what it ran before.
+func putDeclaration(ctx context.Context, client *api.Client, opt options, declaration service.Declaration) error {
+	payload, err := filoconf.Marshal(api.Send(declaration))
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(ctx, api.Request{
+		Op:         api.OpServicePut,
+		Body:       payload,
+		OnBehalfOf: opt.onBehalfOf,
+	})
+	if err != nil {
+		return err
+	}
+	if resp.Failed() {
+		return fmt.Errorf("%s: %w", declaration.Service.Name, resp.Err())
+	}
+	return nil
 }
 
 // prune tells the machine which services the tree carries, so the ones deleted
