@@ -107,6 +107,11 @@ type Service struct {
 	// it is a machine dying slowly while a new instance starts every two
 	// minutes for ever.
 	MaxParallel float64 `filo:"max-parallel"`
+	// How long one run may take before it is stopped. Without it a run that
+	// hangs holds its place for ever: the ceiling above fills with runs that
+	// will never finish, every turn after that is skipped, and the job quietly
+	// stops happening while the service still reads as scheduled.
+	RunTimeout string `filo:"run-timeout"`
 
 	// The hash of the files that travel with this declaration, computed where
 	// they are read and never declared. It is what makes editing a Caddyfile a
@@ -243,6 +248,21 @@ func (s Service) Interval() time.Duration {
 	return every
 }
 
+// RunLimit is how long one run of this job may take, zero when the declaration
+// sets no bound. Not to be confused with StopGrace above, which is how long a
+// container gets to end AFTER something decided to stop it — this is what
+// decides.
+//
+// Validation has already refused anything that does not parse, so a failure
+// here is a service that never got that far.
+func (s Service) RunLimit() time.Duration {
+	limit, err := time.ParseDuration(s.RunTimeout)
+	if err != nil {
+		return 0
+	}
+	return limit
+}
+
 func (s Service) Parallel() int {
 	if s.MaxParallel <= 0 {
 		return DefaultMaxParallel
@@ -355,8 +375,8 @@ func (s *Service) normalizeContainer() error {
 // service that stays up, or a service pretend to be a job.
 func (s *Service) normalizeSchedule() error {
 	if !s.IsJob() {
-		if s.Overlap != "" || s.MaxParallel != 0 {
-			return invalid("%s: overlap and max-parallel belong to a job, which is a service with every", s.Name)
+		if s.Overlap != "" || s.MaxParallel != 0 || s.RunTimeout != "" {
+			return invalid("%s: overlap, max-parallel and run-timeout belong to a job, which is a service with every", s.Name)
 		}
 		return nil
 	}
@@ -379,6 +399,15 @@ func (s *Service) normalizeSchedule() error {
 	}
 	if s.MaxParallel < 0 {
 		return invalid("%s: max-parallel must not be negative", s.Name)
+	}
+	if s.RunTimeout != "" {
+		limit, timeoutErr := time.ParseDuration(s.RunTimeout)
+		if timeoutErr != nil {
+			return invalid("%s: run-timeout %q is not a duration, like 30s or 2m: %v", s.Name, s.RunTimeout, timeoutErr)
+		}
+		if limit <= 0 {
+			return invalid("%s: run-timeout %s would stop every run before it began", s.Name, limit)
+		}
 	}
 	// The runtime must not bring a job back: it ended because it was done.
 	if s.Restart != "" && s.Restart != RestartNever {

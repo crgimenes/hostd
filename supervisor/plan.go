@@ -141,10 +141,31 @@ func definitionDiff(old, updated service.Service) string {
 	if old.StopTimeout != updated.StopTimeout {
 		parts = append(parts, fmt.Sprintf("stop timeout %gs -> %gs", old.StopTimeout, updated.StopTimeout))
 	}
+	if old.Every != updated.Every {
+		parts = append(parts, fmt.Sprintf("every %s -> %s", old.Every, updated.Every))
+	}
+	if old.Overlap != updated.Overlap {
+		parts = append(parts, fmt.Sprintf("overlap %s -> %s", old.Overlap, updated.Overlap))
+	}
+	if old.MaxParallel != updated.MaxParallel {
+		parts = append(parts, fmt.Sprintf("max-parallel %g -> %g", old.MaxParallel, updated.MaxParallel))
+	}
+	if old.RunTimeout != updated.RunTimeout {
+		parts = append(parts, fmt.Sprintf("run-timeout %s -> %s", orNone(old.RunTimeout), orNone(updated.RunTimeout)))
+	}
 	if len(parts) == 0 {
 		return "definition changed"
 	}
 	return strings.Join(parts, ", ")
+}
+
+// An absent bound reads as a word, not as an empty pair of quotes: "-> 30s"
+// with nothing before the arrow says less than "none -> 30s".
+func orNone(value string) string {
+	if value == "" {
+		return "none"
+	}
+	return value
 }
 
 func HasDestructive(changes []Change) bool {

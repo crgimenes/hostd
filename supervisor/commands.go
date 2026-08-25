@@ -350,6 +350,16 @@ func sameDefinition(a, b service.Service) bool {
 	if a.Config != b.Config || a.ConfigHash != b.ConfigHash {
 		return false
 	}
+	// The schedule is part of what a job IS. The apply stores every
+	// declaration at the end whether it changed or not, so the machine picks
+	// these up regardless — what was missing was the plan SAYING so, and a
+	// plan that answers "nothing to change" to an edit that changes when a job
+	// runs, or whether a hung run is ever stopped, is a dry run nobody should
+	// trust twice.
+	if a.Every != b.Every || a.Overlap != b.Overlap ||
+		a.MaxParallel != b.MaxParallel || a.RunTimeout != b.RunTimeout {
+		return false
+	}
 	return slices.Equal(a.Args, b.Args) && slices.Equal(a.Env, b.Env) &&
 		slices.Equal(a.Ports, b.Ports) && slices.Equal(a.Volumes, b.Volumes)
 }

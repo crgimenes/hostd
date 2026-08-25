@@ -133,6 +133,61 @@ func (s *Supervisor) startRun(ctx context.Context, svc service.Service, slot tim
 	go s.awaitRun(svc.Name, runID(slot), id, s.now())
 }
 
+// killAfter is how long a run has left before its limit.
+//
+// Measured from when the container STARTED, never from when this daemon began
+// watching it. A run adopted from a previous daemon has already spent part of
+// its allowance, and restarting the clock on every upgrade would hand a hung
+// run a fresh hour each time hostd is replaced — which is the one case a
+// timeout exists for. A run already past its limit gets zero and is stopped at
+// once.
+func killAfter(started, now time.Time, limit time.Duration) time.Duration {
+	left := limit - now.Sub(started)
+	if left < 0 {
+		return 0
+	}
+	return left
+}
+
+// The limit as the declaration reads when the run is picked up — at its start,
+// or when a later daemon adopts it. An edit made mid-run reaches the run after
+// it, not this one, which is the same way `every` behaves. A run whose service
+// is no longer declared keeps no bound, which is the same answer the ceiling
+// gives it.
+func (s *Supervisor) runLimitOf(name string) time.Duration {
+	svc, found := s.declarations()[name]
+	if !found {
+		return 0
+	}
+	return svc.RunLimit()
+}
+
+// stopOverrun ends a run that passed its limit. It says so before stopping:
+// the exit code that follows is whatever the kill produced, and on its own it
+// would read as the job failing rather than as this deciding it had had long
+// enough.
+func (s *Supervisor) stopOverrun(name, run, id string, limit time.Duration) {
+	client := s.client()
+	if client == nil {
+		return
+	}
+	s.logRun(name, run, logs.EventJobOverran, fmt.Sprintf(
+		"run %s passed its run-timeout of %s and is being stopped", run, limit))
+	ctx, cancel := runtimeContext()
+	defer cancel()
+	// The service's own grace, the same one an operator gets when they stop it
+	// by hand: a job that cleans up after itself is given the chance to.
+	grace := service.DefaultStopTimeout
+	svc, found := s.declarations()[name]
+	if found {
+		grace = svc.StopGrace()
+	}
+	err := client.Stop(ctx, id, grace)
+	if err != nil {
+		s.reportOnce(name, fmt.Sprintf("run %s passed its run-timeout and could not be stopped: %v", run, err))
+	}
+}
+
 // awaitRun records what a run did. The container is kept until its output has
 // been read: removing it first would take the log with it, and a job whose
 // output disappears when it fails is a job nobody can debug.
@@ -148,6 +203,18 @@ func (s *Supervisor) awaitRun(name, run, id string, started time.Time) {
 	}
 	ctx, cancel := s.streamContext()
 	defer cancel()
+
+	// A run that hangs would otherwise hold its place for ever: the ceiling
+	// fills with runs that will never finish, every turn after that is skipped,
+	// and the job quietly stops happening while the service still reads as
+	// scheduled. Nothing else in the system notices that.
+	limit := s.runLimitOf(name)
+	if limit > 0 {
+		timer := time.AfterFunc(killAfter(started, s.now(), limit), func() {
+			s.stopOverrun(name, run, id, limit)
+		})
+		defer timer.Stop()
+	}
 
 	code, err := client.Wait(ctx, id)
 	if errors.Is(err, context.Canceled) || s.leaving() {
