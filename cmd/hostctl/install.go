@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/crgimenes/hostd/daemon"
+	"github.com/crgimenes/hostd/supervisor"
 )
 
 // Putting hostd on a machine is copying a binary and activating a service.
@@ -45,6 +46,11 @@ func runInstall(ctx context.Context, opt options, args []string) (int, error) {
 	// bare success. A machine with no hostd yet answers nothing, which is the
 	// honest before-state of a first install.
 	before := strings.TrimSpace(remoteOutput(ctx, host, "/usr/local/bin/hostd -version 2>/dev/null || true"))
+
+	// And what it is DOING now, which is what the upgrade must not change. A
+	// machine with no daemon yet has nothing to lose, and says so by answering
+	// nothing here.
+	wasRunning := runningServices(ctx, opt, host)
 
 	answer, err := remoteOutputErr(ctx, host, "mktemp -d", nil)
 	if err != nil {
@@ -84,11 +90,52 @@ func runInstall(ctx context.Context, opt options, args []string) (int, error) {
 	// Group membership is decided at login, and a multiplexed connection keeps
 	// the groups of the session that opened it — with ControlPersist that can be
 	// ten minutes of "permission denied" nobody can explain. Ending the master
-	// makes the next command a fresh login.
+	// makes the next command a fresh login. It happens BEFORE the check below,
+	// which is the first thing to need the group on a first install.
 	_ = exec.CommandContext(ctx, "ssh", "-O", "exit", host).Run() // #nosec G204 -- the host is the operator's own flag
 
-	_, _ = fmt.Fprintf(out, "%s;%s;%s;%s\n", host, machine, reported, transition(before, reported))
+	// The version that came up is not the whole question. A daemon that came
+	// back having lost the work it was supervising is not a good upgrade, and
+	// until this check existed it was reported as one.
+	lost := servicesSurvived(ctx, opt, host, wasRunning)
+	if len(lost) > 0 {
+		for _, complaint := range lost {
+			_, _ = fmt.Fprintf(out, "%s: %s\n", host, complaint)
+		}
+		return exitFailed, fmt.Errorf(
+			"%s now runs %s, but %d service(s) did not survive the change; hostd is meant to be replaceable without touching them",
+			host, reported, len(lost))
+	}
+
+	_, _ = fmt.Fprintf(out, "%s;%s;%s;%s;%s\n",
+		host, machine, reported, transition(before, reported), kept(wasRunning))
 	return exitOK, nil
+}
+
+// What the upgrade carried through untouched. Saying "nothing was running" out
+// loud matters: it is the difference between a promise kept and a promise never
+// tested on this machine.
+func kept(wasRunning []supervisor.Status) string {
+	if len(wasRunning) == 0 {
+		return "no service was running"
+	}
+	return fmt.Sprintf("%d service(s) kept running", len(wasRunning))
+}
+
+// runningServices asks the daemon that is there now what it is doing. A machine
+// being installed for the first time has none, and that is not an error: it is
+// a machine with nothing to lose.
+func runningServices(ctx context.Context, opt options, host string) []supervisor.Status {
+	client, err := connectTo(ctx, opt, host)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = client.Close() }()
+	statuses, err := fetchStatuses(ctx, client)
+	if err != nil {
+		return nil
+	}
+	return runningIn(statuses)
 }
 
 // What changed, in the words an operator is asking in: a first install, an

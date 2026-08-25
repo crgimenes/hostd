@@ -9,11 +9,19 @@ ExecStart=/usr/local/bin/hostd
 Restart=always
 RestartSec=1s
 
-# KillMode=process is what makes restarting hostd safe. The default,
-# control-group, would kill every process in the unit's cgroup on stop or
-# restart — which is every service hostd supervises. The whole adoption design
-# exists so that updating the daemon does not interrupt the work of the host;
-# with the default kill mode, systemd would undo it.
+# A belt that no longer holds anything up, kept because it costs nothing and
+# because taking it out is a decision about a machine that is running.
+#
+# It was load-bearing when hostd supervised processes itself: they were its
+# children, in this unit's cgroup, and the default kill mode would have taken
+# them down with it. Supervision moved to the runtime, and containers are now
+# dockerd's — measured on yuki, hostd's cgroup holds one process, its own, and
+# a container sits in /system.slice/docker-<id>.scope. Restarting this unit
+# cannot reach them whatever the kill mode says.
+#
+# What actually keeps the work alive across an upgrade is that nothing here
+# owns it: the runtime does. `hostctl install` checks that, rather than
+# trusting this line to mean what it used to.
 KillMode=process
 KillSignal=SIGTERM
 TimeoutStopSec=30s

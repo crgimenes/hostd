@@ -528,16 +528,25 @@ func waitForService(ctx context.Context, client *api.Client, name string) error 
 	}
 }
 
-func serviceStatus(ctx context.Context, client *api.Client, name string) (supervisor.Status, error) {
+// What a machine says every service on it is doing.
+func fetchStatuses(ctx context.Context, client *api.Client) ([]supervisor.Status, error) {
 	resp, err := client.Do(ctx, api.Request{Op: api.OpStatus})
 	if err != nil {
-		return supervisor.Status{}, err
+		return nil, err
 	}
 	if resp.Failed() {
-		return supervisor.Status{}, resp.Err()
+		return nil, resp.Err()
 	}
 	var statuses []supervisor.Status
 	err = decode(ctx, resp.Body, &statuses)
+	if err != nil {
+		return nil, err
+	}
+	return statuses, nil
+}
+
+func serviceStatus(ctx context.Context, client *api.Client, name string) (supervisor.Status, error) {
+	statuses, err := fetchStatuses(ctx, client)
 	if err != nil {
 		return supervisor.Status{}, err
 	}

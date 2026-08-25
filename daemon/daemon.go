@@ -20,11 +20,10 @@ import (
 //go:embed zips
 var zips embed.FS
 
-// The unit travels with the daemon because it is not decoration: KillMode=
-// process is what makes restarting hostd safe, and the default would kill
-// every container in the unit's cgroup on restart — undoing the whole adoption
-// design. A machine installed with the wrong unit looks fine until the first
-// upgrade takes the fleet's work down with it.
+// The unit travels with the daemon so a machine's unit is never older than its
+// binary: the directories it declares (StateDirectory, RuntimeDirectory,
+// ConfigurationDirectory) are what the daemon expects systemd to have made
+// before it starts, and those move with the code that reads them.
 //
 //go:embed hostd.service
 var unit []byte
