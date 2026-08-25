@@ -181,6 +181,17 @@ func run(args []string) int {
 		return code
 	}
 
+	// Generating a Caddyfile reads the tree and nothing else: no machine has to
+	// be reachable, and -host only says whose proxy this is, so it must not go
+	// through the fan-out that would ask every machine the same question.
+	if rest[0] == "caddyfile" {
+		code, caddyErr := runCaddyfile(ctx, opt, rest[1:])
+		if caddyErr != nil {
+			fmt.Fprintf(os.Stderr, "hostctl: %v\n", caddyErr)
+		}
+		return code
+	}
+
 	// A migration is about two machines at once, so it is not something to fan
 	// out one host at a time: it opens its own connections, in an order the
 	// whole operation depends on.
@@ -263,6 +274,8 @@ usage:
   hostctl audit                        who changed what, and when
   hostctl log [pattern]                what the services wrote
   hostctl log -follow                  keep watching
+  hostctl caddyfile                    write a Caddyfile from what the tree
+                                       declares, to stdout
   hostctl push                         send your declarations to that machine
                                        (and drop what the tree stopped carrying)
   hostctl install                      put this hostctl's own hostd on it

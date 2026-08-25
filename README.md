@@ -192,20 +192,27 @@ files, network or processes in a configuration.
 
 ## Install on a machine
 
-Installing is copying a binary and activating the service:
+`hostctl` carries the daemon inside it, one build per architecture, so
+installing needs no toolchain at either end — not on the machine, and not on
+yours:
 
 ```bash
-deploy/install.sh yuki.local
+hostctl -host yuki.local install
+hostctl -all install
 ```
 
-It reads the machine's architecture over ssh, cross-compiles `hostd` for it,
-installs it in `/usr/local/bin` with the systemd unit, enables the service and
-checks that the daemon which came up reports the version just installed — any
-other version means the restart did not take. It needs ssh access and either
-root or passwordless sudo, and installs nothing else.
+It copies the `hostd` that this `hostctl` was built with, installs it in
+`/usr/local/bin` with the systemd unit, enables the service and checks that the
+daemon which came up reports the version just installed — any other version
+means the restart did not take. It needs ssh access and either root or
+passwordless sudo, and installs nothing else. `hostctl -version` says which
+daemon a given client carries.
 
 It also puts the account you ssh in as into the `hostd` group, which is the
 permission to operate that machine.
+
+From a clone, `make dist` builds a `hostctl` with the daemon embedded, and that
+binary installs the machine the same way.
 
 Only the daemon goes on the machine. `hostctl` is the operator's client and
 runs on the operator's computer; a host that needs the client installed to be
@@ -213,7 +220,39 @@ operated is a host you are still administering by ssh.
 
 Running it again is the upgrade path: the daemon is replaced and restarted,
 and the containers keep running because they belong to the runtime, not to the
-daemon's process tree.
+daemon's process tree. The install checks that for itself — it records which
+services were running and with which process before the restart, waits for the
+new daemon to settle, and puts the previous binary back if anything it was
+carrying did not survive.
+
+## Putting a service behind a proxy
+
+A declaration can say what a reverse proxy answers on its behalf, and `hostctl`
+writes the Caddyfile from it:
+
+```bash
+hostctl -host yuki.local caddyfile > ~/.config/hostd/caddy/Caddyfile
+```
+
+```
+(service
+  (tuple "name" "site")
+  (tuple "image" "site:laptop")
+  (tuple "domain" (list "example.com" "www.example.com")))
+```
+
+The address does not have to be a public name: a bare port (`:80`) is for a
+machine that serves one thing and matches no name, and `http://name.internal`
+serves a name on a network with no public DNS without the proxy going after a
+certificate it can never obtain. `upstream-port` says which port the container
+listens on, defaulting to 80; the proxy is sent to the container's alias on the
+managed network, because a service behind a proxy usually publishes nothing to
+the machine at all.
+
+It goes to stdout and stops there. Nothing installs it, nothing regenerates it,
+and hostd renders nothing at runtime — the file lives beside the declaration,
+travels in `push` like any other artifact, and is yours to edit afterwards.
+What runs is a file somebody looked at and committed.
 
 ## Operating a machine from your own
 

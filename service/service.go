@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -87,6 +88,18 @@ type Service struct {
 	// tree is shared, and the database does not belong on the web machines.
 	Hosts []string `filo:"hosts"`
 	Tags  []string `filo:"tags"`
+	// What a reverse proxy answers on this service's behalf: a name, or a bare
+	// port like ":80" for a machine that serves one thing and matches no name.
+	// Nothing in hostd reads them at runtime — they are what `hostctl caddyfile`
+	// reads to write a Caddyfile the operator then keeps beside the
+	// declaration, like any other artifact. Saying it here rather than only in
+	// that file is what makes "a new service with a proxy" one file instead of
+	// two.
+	Domain []string `filo:"domain"`
+	// The port the container itself listens on, which is where the proxy sends.
+	// Not "ports": that publishes a port to the machine, and a service behind a
+	// proxy usually publishes nothing at all.
+	UpstreamPort float64 `filo:"upstream-port"`
 	// Where the files that travel with this declaration are mounted, read
 	// only. Without it a service directory with artifacts has nowhere to put
 	// them, which is a mistake worth naming rather than ignoring.
@@ -118,6 +131,49 @@ type Service struct {
 	// change the plan can see: without it, an apply would say there is nothing
 	// to do and the container would keep the old configuration.
 	ConfigHash string
+}
+
+// A domain is written into a Caddyfile, so what is wrong with it has to be
+// caught where the declaration is read. A scheme or a path pasted in from a
+// browser is the mistake to expect, and it would render a file that fails to
+// load with the proxy already down.
+func (s *Service) normalizeProxy() error {
+	for _, domain := range s.Domain {
+		if domain == "" {
+			return invalid("%s: a domain cannot be empty", s.Name)
+		}
+		// An http:// prefix is not decoration: it is how a name is served
+		// without the proxy trying to obtain a certificate for it, which is
+		// what a network with no public DNS needs. What is never an address is
+		// a path.
+		bare := strings.TrimPrefix(strings.TrimPrefix(domain, "https://"), "http://")
+		if bare == "" || strings.ContainsAny(bare, " \t/{}") {
+			return invalid("%s: domain %q is what a proxy answers on — a name, a name with http:// to keep it off TLS, or a bare port like \":80\" — never a URL with a path", s.Name, domain)
+		}
+	}
+	if s.UpstreamPort == 0 {
+		return nil
+	}
+	if len(s.Domain) == 0 {
+		// It would do nothing, silently, and the operator would go looking for
+		// why the proxy never picked the service up.
+		return invalid("%s: upstream-port says where a proxy should send, and nothing here declares a domain", s.Name)
+	}
+	if s.UpstreamPort != math.Trunc(s.UpstreamPort) || s.UpstreamPort < 1 || s.UpstreamPort > 65535 {
+		return invalid("%s: upstream-port %v is not a port", s.Name, s.UpstreamPort)
+	}
+	return nil
+}
+
+// Where a proxy sends for this service: the container's own alias on the
+// managed network, and the port it listens on. Eighty is the default because it
+// is what an image that serves a site listens on unless it says otherwise.
+func (s Service) Upstream() string {
+	port := 80
+	if s.UpstreamPort > 0 {
+		port = int(s.UpstreamPort)
+	}
+	return fmt.Sprintf("%s:%d", s.Name, port)
 }
 
 // Mount is a volume as the runtime needs it. A source with no slash is named
@@ -360,6 +416,10 @@ func (s *Service) normalizeContainer() error {
 	}
 	if s.Config != "" && !filepath.IsAbs(s.Config) {
 		return invalid("%s: config %q must be an absolute path inside the container", s.Name, s.Config)
+	}
+	err = s.normalizeProxy()
+	if err != nil {
+		return err
 	}
 	err = s.normalizeSchedule()
 	if err != nil {

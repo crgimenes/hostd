@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -360,5 +361,62 @@ func TestWhereADeclarationBelongs(t *testing.T) {
 				t.Fatalf("BelongsTo = %v, want %v", got, c.want)
 			}
 		})
+	}
+}
+
+// A domain is written straight into a Caddyfile, so what is wrong with it has
+// to be caught where the declaration is read. Pasting a URL out of a browser is
+// the mistake to expect, and it would render a file that fails to load with the
+// proxy already down.
+func TestADomainIsANameAndNotAURL(t *testing.T) {
+	cases := []struct {
+		why string
+		src string
+	}{
+		{"a pasted URL", `(service (tuple "name" "api") (tuple "image" "api:1") (tuple "domain" (list "https://api.example.com/v1")))`},
+		{"an empty name", `(service (tuple "name" "api") (tuple "image" "api:1") (tuple "domain" (list "")))`},
+		{"a Caddy block pasted in", `(service (tuple "name" "api") (tuple "image" "api:1") (tuple "domain" (list "api.example.com {")))`},
+		{"a port with nowhere to send", `(service (tuple "name" "api") (tuple "image" "api:1") (tuple "upstream-port" 8080))`},
+		{"not a port", `(service (tuple "name" "api") (tuple "image" "api:1") (tuple "domain" (list "a.example.com")) (tuple "upstream-port" 99999))`},
+		{"a fractional port", `(service (tuple "name" "api") (tuple "image" "api:1") (tuple "domain" (list "a.example.com")) (tuple "upstream-port" 80.5))`},
+	}
+	for _, c := range cases {
+		_, err := Parse(context.Background(), "api.filo", c.src)
+		if err == nil {
+			t.Errorf("%s was accepted", c.why)
+		}
+	}
+}
+
+// Eighty is the default because it is what an image serving a site listens on
+// unless it says otherwise, and the alias is the service's own name on the
+// managed network.
+func TestWhereAProxyIsSentDefaultsToPortEighty(t *testing.T) {
+	plain := Service{Name: "site"}
+	if plain.Upstream() != "site:80" {
+		t.Fatalf("Upstream() = %q, want site:80", plain.Upstream())
+	}
+	other := Service{Name: "api", UpstreamPort: 8080}
+	if other.Upstream() != "api:8080" {
+		t.Fatalf("Upstream() = %q, want api:8080", other.Upstream())
+	}
+}
+
+// Not every fleet is on the public internet. A machine serving one thing
+// matches no name at all — a bare port, which is what the bench has run since
+// before any of this existed — and a network with no public DNS serves names
+// over http:// so the proxy does not go looking for certificates it can never
+// obtain. Refusing either would leave the internal case unable to say itself.
+func TestAnAddressDoesNotHaveToBeAPublicDomain(t *testing.T) {
+	for _, address := range []string{":80", ":8081", "http://site.internal", "https://api.example.com"} {
+		src := fmt.Sprintf(`(service (tuple "name" "site") (tuple "image" "site:1") (tuple "domain" (list %q)))`, address)
+		svc, err := Parse(context.Background(), "site.filo", src)
+		if err != nil {
+			t.Errorf("%s was refused: %v", address, err)
+			continue
+		}
+		if len(svc.Domain) != 1 || svc.Domain[0] != address {
+			t.Errorf("%s came back as %v", address, svc.Domain)
+		}
 	}
 }
