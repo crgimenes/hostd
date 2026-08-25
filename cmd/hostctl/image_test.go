@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/crgimenes/hostd/api"
+	"github.com/crgimenes/hostd/service"
 )
 
 func rowOf(t *testing.T, out string, want string) int {
@@ -263,5 +264,35 @@ func TestAPruneWithNothingToDoSaysSo(t *testing.T) {
 	printPrune(&out, "yuki.local", api.ImagePrune{Keep: 3, Kept: 5})
 	if !strings.Contains(out.String(), "nothing to remove") {
 		t.Fatalf("an empty plan prints nothing readable:\n%s", out.String())
+	}
+}
+
+// A push moves bytes and moves a tag, and changes nothing about what is
+// running. Nothing else in the system says so — the next apply reports
+// "nothing to change" because the declaration reads exactly as it did — so the
+// command that just pushed has to say it, with the line that would.
+func TestAPushSaysItIsNotADeploy(t *testing.T) {
+	var out bytes.Buffer
+	printNotADeploy(&out, api.Image{Name: "site:laptop", Ref: "site:hostd-325279faa69a", Digest: "sha256:1640bc"})
+	text := out.String()
+	for _, want := range []string{
+		"not a deploy",
+		service.Extension,
+		`(tuple "image" "site:hostd-325279faa69a")`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("the push output does not carry %q:\n%s", want, text)
+		}
+	}
+}
+
+// An older daemon answers without the stamp. Inventing one from the tag it came
+// under would print a declaration that pins the wrong thing, which is worse
+// than printing less.
+func TestAPushWithoutAStampSaysNothingRatherThanGuessing(t *testing.T) {
+	var out bytes.Buffer
+	printNotADeploy(&out, api.Image{Name: "site:laptop", Digest: "sha256:1640bc"})
+	if out.Len() != 0 {
+		t.Fatalf("a push with no stamp advised anyway:\n%s", out.String())
 	}
 }

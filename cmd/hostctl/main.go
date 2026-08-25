@@ -269,6 +269,8 @@ usage:
   hostctl image ls                     the images that machine holds
   hostctl image prune                  what an image cleanup would remove
   hostctl image push <image>           send an image built here to that machine
+                                       (sending is not deploying: a service runs
+                                       what its declaration names)
   hostctl metrics                      what the host and its services are using
   hostctl metrics -window 1h           the same, over a window
 

@@ -12,6 +12,7 @@ import (
 
 	"github.com/crgimenes/hostd/api"
 	"github.com/crgimenes/hostd/docker"
+	"github.com/crgimenes/hostd/service"
 )
 
 func runImage(ctx context.Context, client *api.Client, opt options, args []string) (int, error) {
@@ -249,6 +250,25 @@ func runImagePush(ctx context.Context, client *api.Client, opt options, args []s
 	emit(opt, resp.Body, received, func() {
 		_, _ = fmt.Fprintf(opt.out, "%s;%s;%.0f;sha256:%s\n",
 			client.Target(), received.Digest, received.Bytes, received.Content)
+		printNotADeploy(opt.out, received)
 	})
 	return exitOK, nil
+}
+
+// A push moves bytes and moves a tag. It does not change what any service is
+// running, and nothing else says so: the next apply reports "nothing to change"
+// because the declaration still reads exactly as it did, and a restart brings
+// the container back on the image it was created from. Whoever just pushed is
+// the person who needs to know that, at the moment they need it.
+func printNotADeploy(out io.Writer, received api.Image) {
+	if received.Ref == "" {
+		// An older daemon did not answer with the stamp. Guessing one would be
+		// worse than saying less.
+		return
+	}
+	_, _ = fmt.Fprintf(out, "marked as %s\n", received.Ref)
+	_, _ = fmt.Fprintln(out, "a push is not a deploy: what a service runs does not change until its")
+	_, _ = fmt.Fprintf(out, "declaration names this version. Put this in the service's %s, then push\n", service.Extension)
+	_, _ = fmt.Fprintln(out, "and apply:")
+	_, _ = fmt.Fprintf(out, "  (tuple \"image\" %q)\n", received.Ref)
 }

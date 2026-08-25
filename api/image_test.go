@@ -87,6 +87,13 @@ func TestPushingAnImageLandsItOnTheOtherMachine(t *testing.T) {
 	if received.Bytes <= 0 {
 		t.Fatalf("an image of %v bytes crossed the wire", received.Bytes)
 	}
+	// The answer has to carry what to DECLARE, not only what arrived: the name
+	// it came under is a moving tag, and pinning that is what does not pin
+	// anything. Without this the operator has to go and look it up.
+	want := RepositoryOf(image) + ":" + ManagedTag(received.Content)
+	if received.Ref != want {
+		t.Fatalf("ref = %q, want the stamp %q", received.Ref, want)
+	}
 
 	// What arrived is worth a line in the timeline: an image nobody can trace
 	// to a moment is an image nobody can explain later.

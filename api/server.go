@@ -260,7 +260,13 @@ func (s *Server) loadImage(ctx context.Context, conn net.Conn, reader *bufio.Rea
 		Kind:    logs.EventImage,
 		Text:    fmt.Sprintf("received image %s as %s tagged %s, %d bytes, content sha256:%s", req.Name, digest, mark, total, sum),
 	})
-	return body(Image{Name: req.Name, Digest: digest, Bytes: float64(total), Content: sum})
+	return body(Image{
+		Name:    req.Name,
+		Ref:     RepositoryOf(req.Name) + ":" + mark,
+		Digest:  digest,
+		Bytes:   float64(total),
+		Content: sum,
+	})
 }
 
 // The tag hostd puts on an image it received, derived from the bytes that
@@ -317,6 +323,10 @@ func managedTag(tags []string) (string, bool) {
 // arrived rather than to the tag it was called by.
 type Image struct {
 	Name string `filo:"name" json:"name"`
+	// What to write in the declaration to pin this exact version: the stamp
+	// this machine put on it, derived from the bytes that arrived. The name it
+	// came under is a moving tag, and a later push takes it away.
+	Ref string `filo:"ref" json:"ref"`
 	// What this machine now calls it. Two machines loading the same archive
 	// arrive at different ids, so this is the one to declare here and nowhere
 	// else.
