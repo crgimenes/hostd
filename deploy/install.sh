@@ -83,7 +83,17 @@ $sudo install -m 0644 "$REMOTE_DIR/hostd.service" /etc/systemd/system/hostd.serv
 # that same account operate the machine afterwards without sudo.
 $sudo groupadd -f hostd
 $sudo usermod -aG hostd "$(id -un)"
-rm -rf "$REMOTE_DIR"
+
+# By name, never recursively: these two files are exactly what was sent, and a
+# recursive delete of a path this script did not choose is a way to lose a
+# machine over a mktemp that answered something unexpected. rmdir then refuses
+# if anything else is in there, which surfaces the surprise instead of removing
+# it — and is not worth failing a finished install over.
+rm -f "$REMOTE_DIR/hostd" "$REMOTE_DIR/hostd.service"
+if ! rmdir "$REMOTE_DIR"; then
+	echo "left $REMOTE_DIR behind: something else is in it" >&2
+fi
+
 $sudo systemctl daemon-reload
 $sudo systemctl enable hostd >/dev/null
 $sudo systemctl restart hostd
@@ -134,7 +144,11 @@ install_host() {
 
 	remote_dir=$(ssh -o BatchMode=yes "$host" mktemp -d) || return 1
 	scp -q "$work/hostd" daemon/hostd.service "$host:$remote_dir/" || return 1
-	rm -rf "$work"
+	# The one file this function put there, by name. mktemp gave the directory,
+	# but a recursive delete of a variable is a habit, and habits outlive the
+	# place they were safe in.
+	rm -f "$work/hostd"
+	rmdir "$work" || echo "left $work behind: something else is in it" >&2
 
 	described=$(remote_script | ssh -o BatchMode=yes "$host" "REMOTE_DIR='$remote_dir' sh -s") || return 1
 	# Group membership is decided at login, and a multiplexed connection keeps

@@ -94,3 +94,47 @@ func TestTheEmbeddedDaemonIsAWholeBinaryOrAClearRefusal(t *testing.T) {
 		t.Fatalf("the carried daemon is not an ELF binary (%d bytes)", len(binary))
 	}
 }
+
+// The scratch directory is the one string this command takes from the far
+// machine and then interpolates into a shell command running there. Everything
+// refused here is refused rather than repaired: a value that has to be cleaned
+// up is a value nobody can reason about.
+func TestTheScratchPathIsRefusedRatherThanRepaired(t *testing.T) {
+	accepted := map[string]string{
+		"/tmp/tmp.AbC123\n":      "/tmp/tmp.AbC123",
+		"  /var/tmp/tmp.xyz  \n": "/var/tmp/tmp.xyz",
+		"/tmp/tmp.a-b_c":         "/tmp/tmp.a-b_c",
+	}
+	for answer, want := range accepted {
+		got, err := scratchPath(answer)
+		if err != nil {
+			t.Errorf("scratchPath(%q): %v", answer, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("scratchPath(%q) = %q, want %q", answer, got, want)
+		}
+	}
+
+	refused := map[string]string{
+		"":                         "nothing",
+		"   ":                      "nothing",
+		"tmp/relative":             "absolute",
+		"/tmp/../etc":              "back up",
+		"Welcome!\n/tmp/tmp.a":     "more than one line",
+		"/tmp/tmp.a'; rm -rf /; #": "characters",
+		"/tmp/tmp.$(id)":           "characters",
+		"/tmp/tmp.a b":             "characters",
+		"/tmp/tmp.`whoami`":        "characters",
+	}
+	for answer, because := range refused {
+		_, err := scratchPath(answer)
+		if err == nil {
+			t.Errorf("scratchPath(%q) was accepted; it goes into a shell command on that machine", answer)
+			continue
+		}
+		if !strings.Contains(err.Error(), because) {
+			t.Errorf("scratchPath(%q) refused with %q, which does not say %q", answer, err, because)
+		}
+	}
+}

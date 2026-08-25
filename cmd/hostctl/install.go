@@ -46,11 +46,14 @@ func runInstall(ctx context.Context, opt options, args []string) (int, error) {
 	// honest before-state of a first install.
 	before := strings.TrimSpace(remoteOutput(ctx, host, "/usr/local/bin/hostd -version 2>/dev/null || true"))
 
-	remoteDir, err := remoteOutputErr(ctx, host, "mktemp -d", nil)
+	answer, err := remoteOutputErr(ctx, host, "mktemp -d", nil)
 	if err != nil {
 		return exitComms, fmt.Errorf("%s: %w", host, err)
 	}
-	remoteDir = strings.TrimSpace(remoteDir)
+	remoteDir, err := scratchPath(answer)
+	if err != nil {
+		return exitFailed, fmt.Errorf("%s: %w", host, err)
+	}
 
 	err = sendFile(ctx, host, remoteDir+"/hostd", binary)
 	if err != nil {
@@ -138,6 +141,40 @@ func daemonBinary(arch string) ([]byte, error) {
 // Far above any real daemon; something over it is a mistake, not a build.
 const maxDaemonBytes = 256 << 20
 
+// scratchPath is the trust boundary this command has: everything else it sends
+// is its own, but the scratch directory is a string the far machine chose, and
+// it goes on to be interpolated into a shell command there.
+//
+// A single quote in it would end the quoting and hand the rest of the line to
+// that shell; a login banner or a shell that echoes would pollute it with a
+// second line. What a mktemp answers is one absolute path of ordinary
+// characters, so anything else is refused rather than repaired — a value that
+// has to be cleaned up is a value nobody can reason about.
+func scratchPath(answer string) (string, error) {
+	path := strings.TrimSpace(answer)
+	switch {
+	case path == "":
+		return "", fmt.Errorf("mktemp -d answered nothing, so there is nowhere to put the daemon")
+	case strings.ContainsAny(path, "\n\r"):
+		return "", fmt.Errorf("mktemp -d answered more than one line, which is a shell that says something on login: %q", answer)
+	case !strings.HasPrefix(path, "/"):
+		return "", fmt.Errorf("mktemp -d answered %q, which is not an absolute path", path)
+	case strings.Contains(path, ".."):
+		return "", fmt.Errorf("mktemp -d answered %q, which walks back up a tree", path)
+	}
+	// Deliberately narrower than what a filesystem allows: this is a path a
+	// mktemp just made, not a path a person chose, and every character outside
+	// this set is a sign something else answered.
+	for _, r := range path {
+		ok := r == '/' || r == '.' || r == '-' || r == '_' ||
+			(r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+		if !ok {
+			return "", fmt.Errorf("mktemp -d answered %q, which carries characters a scratch directory has no reason to: %q", path, r)
+		}
+	}
+	return path, nil
+}
+
 // What hostd targets, from what the machine says it is.
 func remoteArch(ctx context.Context, host string) (string, error) {
 	machine, err := remoteOutputErr(ctx, host, "uname -m", nil)
@@ -214,7 +251,17 @@ $sudo install -m 0644 "$REMOTE_DIR/hostd.service" /etc/systemd/system/hostd.serv
 # that same account operate the machine afterwards without sudo.
 $sudo groupadd -f hostd
 $sudo usermod -aG hostd "$(id -un)"
-rm -rf "$REMOTE_DIR"
+
+# By name, never recursively: these two files are exactly what was sent, and a
+# recursive delete of a path this script did not choose is a way to lose a
+# machine over a mktemp that answered something unexpected. rmdir then refuses
+# if anything else is in there, which surfaces the surprise instead of removing
+# it — and is not worth failing a finished install over.
+rm -f "$REMOTE_DIR/hostd" "$REMOTE_DIR/hostd.service"
+if ! rmdir "$REMOTE_DIR"; then
+	echo "left $REMOTE_DIR behind: something else is in it" >&2
+fi
+
 $sudo systemctl daemon-reload
 $sudo systemctl enable hostd >/dev/null
 $sudo systemctl restart hostd
