@@ -209,7 +209,7 @@ func runImagePush(ctx context.Context, client *api.Client, opt options, args []s
 	if err != nil {
 		return exitFailed, fmt.Errorf("no container runtime on this machine to read %s from: %w", image, err)
 	}
-	received, err := pushImage(ctx, client, local, image)
+	received, err := pushImage(ctx, client, local, image, nil)
 	if errors.Is(err, errComms) {
 		return exitComms, err
 	}
@@ -235,7 +235,7 @@ var errComms = errors.New("could not reach the machine")
 // disk on either side, and what proves the transfer is the hash of the bytes —
 // two daemons reading the same archive arrive at different image ids, because
 // an id is of the config each one writes.
-func pushImage(ctx context.Context, client *api.Client, local *docker.Client, image string) (pushedImage, error) {
+func pushImage(ctx context.Context, client *api.Client, local *docker.Client, image string, progress func(int64)) (pushedImage, error) {
 	built, err := local.Image(ctx, image)
 	if err != nil {
 		return pushedImage{}, fmt.Errorf("%s is not on this machine; build it first: %w", image, err)
@@ -247,7 +247,13 @@ func pushImage(ctx context.Context, client *api.Client, local *docker.Client, im
 	}()
 	sent := sha256.New()
 
-	resp, err := client.Push(ctx, image, built.Arch, io.TeeReader(content, sent))
+	body := io.Reader(io.TeeReader(content, sent))
+	if progress != nil {
+		// A gigabyte crossing an ssh pipe in silence is the wait that makes
+		// somebody click again.
+		body = docker.Progress(body, progress)
+	}
+	resp, err := client.Push(ctx, image, built.Arch, body)
 	if err != nil {
 		return pushedImage{}, fmt.Errorf("%w: %v", errComms, err)
 	}

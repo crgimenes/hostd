@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/crgimenes/hostd/filoconf"
 	"github.com/crgimenes/hostd/service"
@@ -183,6 +184,10 @@ func writeAtomic(path string, content []byte, mode os.FileMode) error {
 	return os.Rename(name, path)
 }
 
+// Long enough for a local socket call that only untags an image, short enough
+// that a wedged runtime does not hold the answer.
+const releaseTimeout = 20 * time.Second
+
 // What a removal did, piece by piece: the pieces have different owners and can
 // end differently, and one word for the three would hide the one that stayed.
 type Removal struct {
@@ -235,7 +240,14 @@ func (s *Server) removeService(ctx context.Context, req Request, actor string) R
 		return Response{Code: CodeFailed, Message: err.Error()}
 	}
 
-	report.Image = s.releaseImage(ctx, image)
+	// Its own budget, deliberately: stopping the container can legitimately
+	// spend the service's whole grace period, and the request's 30 seconds are
+	// the SAME number as the default grace — so an image release that inherited
+	// what was left always lost, and every removal of a container that ignores
+	// SIGTERM left its image behind saying "context deadline exceeded".
+	imageCtx, cancel := context.WithTimeout(context.Background(), releaseTimeout)
+	defer cancel()
+	report.Image = s.releaseImage(imageCtx, image)
 
 	entry := state.Entry{Operation: OpServiceRemove, Target: name, Actor: actor,
 		OnBehalfOf: req.OnBehalfOf, Result: state.ResultOK,

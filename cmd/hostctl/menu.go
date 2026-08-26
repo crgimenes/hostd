@@ -1,12 +1,8 @@
 package main
 
 import (
-	"encoding/json"
-	"fmt"
-
 	"github.com/crgimenes/glaze"
 	"github.com/crgimenes/glaze/menu"
-	"github.com/crgimenes/hostd/version"
 )
 
 // The menu bar is what makes this an application rather than a page in a frame.
@@ -21,15 +17,11 @@ func install(window glaze.WebView) (*menu.Menu, error) {
 	call := func(js string) func() {
 		return func() { window.Eval(js) }
 	}
-	about, err := json.Marshal(fmt.Sprintf("hostctl %s · protocol %d · schema %d",
-		version.Version, version.Protocol, version.Schema))
-	if err != nil {
-		return nil, err
-	}
-
 	return menu.Set([]menu.Item{
 		{Title: "hostctl", Submenu: []menu.Item{
-			{Title: "About hostctl", OnClick: call("about(" + string(about) + ")")},
+			// The Settings screen is where the versions already are; a dialog
+			// saying the same thing would be a second place to keep it true.
+			{Title: "About hostctl", OnClick: call("about()")},
 			{Separator: true},
 			{Title: "Hide hostctl", Shortcut: "cmd+h", Selector: "hide:"},
 			{Title: "Hide Others", Shortcut: "cmd+alt+h", Selector: "hideOtherApplications:"},

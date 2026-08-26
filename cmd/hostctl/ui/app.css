@@ -97,8 +97,7 @@ body {
 .twist,
 #grip,
 #split,
-th,
-td.actions {
+th {
 	-webkit-user-select: none;
 	user-select: none;
 }
@@ -315,59 +314,8 @@ body.narrow .narrowOnly {
 	gap: 6px;
 }
 
-/* A ring that turns while the fleet is being reached. A window that sits
-   perfectly still during a four-second first round reads as a frozen one. */
-.spinner {
-	width: 11px;
-	height: 11px;
-	flex: none;
-	border-radius: 50%;
-	border: 1.5px solid var(--tertiary);
-	border-top-color: var(--accent);
-	animation: turn 0.7s linear infinite;
-}
-
-@keyframes turn {
-	to {
-		transform: rotate(360deg);
-	}
-}
-
-@media (prefers-reduced-motion: reduce) {
-	.spinner {
-		animation-duration: 2.4s;
-	}
-}
-
 #status.bad {
 	color: var(--failed);
-}
-
-/* The status again, where the eyes are: floating under the toolbar, because on
-   a narrow window the sidebar — and the only other indicator — is put away. */
-#working {
-	position: fixed;
-	top: calc(var(--toolbar) + 10px);
-	right: 14px;
-	z-index: 30;
-	display: inline-flex;
-	align-items: center;
-	gap: 6px;
-	max-width: min(60vw, 340px);
-	padding: 4px 10px;
-	font-size: 11px;
-	color: var(--secondary);
-	white-space: nowrap;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	background: var(--bg);
-	border: 1px solid var(--separator);
-	border-radius: 20px;
-	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
-}
-
-#working[hidden] {
-	display: none;
 }
 
 /* The two things that can be dragged: the sidebar's edge and the log's top. */
@@ -507,48 +455,24 @@ button {
 	background: var(--hover);
 }
 
-/* The ⋯ beside a service: every operation in one place, so the row and the
-   heading stay one size while the list of operations grows. */
-.menu {
-	position: relative;
-	display: inline-flex;
-}
-
-/* Fixed and placed by the script when it opens: absolute would sit inside the
-   card, and the card clips what overflows it. */
-.menuList {
-	position: fixed;
-	z-index: 40;
-	min-width: 150px;
-	display: flex;
-	flex-direction: column;
-	padding: 4px;
-	background: var(--card);
-	border: 0.5px solid var(--hairline);
-	border-radius: 8px;
-	box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
-}
-
-.menuList[hidden] {
-	display: none;
-}
-
-.menuList button {
-	display: flex;
-	align-items: center;
-	gap: 7px;
-	padding: 5px 9px;
-	font-size: 12px;
-	color: var(--label);
-	background: none;
-	border: none;
-	border-radius: 5px;
-	text-align: left;
-	white-space: nowrap;
-}
-
-.menuList button:hover {
+/* Held down while its action runs: the same button, plainly busy, and a second
+   click on it does nothing. */
+.push:disabled {
+	color: var(--secondary);
 	background: var(--hover);
+	box-shadow: none;
+}
+
+/* The catalog's machine chooser, beside the deploy it feeds. */
+select.where {
+	font: inherit;
+	font-size: 12px;
+	max-width: 150px;
+	padding: 2px 6px;
+	border-radius: 6px;
+	border: 0.5px solid var(--hairline);
+	background: var(--card);
+	color: var(--label);
 }
 
 #rangeReset {
@@ -742,15 +666,6 @@ table.grid tr.loose td {
 
 td .dim, .dim {
 	color: var(--secondary);
-}
-
-td.actions {
-	text-align: right;
-	width: 1%;
-}
-
-td.actions button {
-	margin-left: 6px;
 }
 
 .pill {
@@ -961,175 +876,6 @@ td.problem {
 
 #lines li.err .text {
 	color: var(--failed);
-}
-
-/* Two dialogs: #command shows a command the operator runs themselves;
-   #action confirms and performs one — the plan first, the button after. */
-
-dialog {
-	border: 0;
-	border-radius: 12px;
-	padding: 20px;
-	max-width: 460px;
-	/* The global reset above takes the margin that centres a <dialog>; without
-	   this the modal sits in the corner, beside the buttons that close the
-	   whole app — which is what people then click. */
-	margin: auto;
-	background: var(--card);
-	color: var(--label);
-	box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
-}
-
-dialog::backdrop {
-	background: rgba(0, 0, 0, 0.25);
-}
-
-dialog h3 {
-	font-size: 13px;
-	font-weight: 590;
-}
-
-dialog p {
-	font-size: 12px;
-	color: var(--secondary);
-	margin: 4px 0 12px;
-}
-
-#commandText,
-#action code {
-	display: block;
-	font-family: var(--mono);
-	font-size: 12px;
-	background: var(--hover);
-	border-radius: 8px;
-	padding: 10px 12px;
-	-webkit-user-select: text;
-	user-select: text;
-	word-break: break-all;
-}
-
-/* A reference for whoever prefers the terminal, never a step: the button does
-   it. Smaller than everything above it on purpose. */
-#action code {
-	font-size: 11px;
-	color: var(--secondary);
-}
-
-#action {
-	min-width: 340px;
-	max-width: 560px;
-}
-
-#action table.plan {
-	width: 100%;
-	border-collapse: collapse;
-	font-size: 12px;
-	margin: 8px 0 12px;
-}
-
-#action table.plan th {
-	text-align: left;
-	font-size: 10px;
-	font-weight: 500;
-	text-transform: uppercase;
-	letter-spacing: 0.04em;
-	color: var(--secondary);
-	padding: 4px 10px 4px 0;
-	border-bottom: 1px solid var(--separator);
-}
-
-#action table.plan td {
-	padding: 5px 10px 5px 0;
-	border-bottom: 1px solid var(--separator);
-	vertical-align: top;
-}
-
-/* The row the red button is about. */
-#action table.plan tr.stops td {
-	color: var(--failed);
-}
-
-#action .outcome {
-	font-size: 12px;
-	color: var(--label);
-}
-
-#action .outcome.bad {
-	color: var(--failed);
-}
-
-#action .asking {
-	display: flex;
-	align-items: center;
-	gap: 8px;
-	margin: 4px 0;
-}
-
-/* A run reports from the corner, above the log that is painting what it
-   causes; nothing is covered and nothing is modal. */
-#action[data-corner] {
-	position: fixed;
-	right: 14px;
-	bottom: calc(var(--logHeight, 220px) + 20px);
-	left: auto;
-	top: auto;
-	margin: 0;
-	max-width: 400px;
-	z-index: 45;
-	border: 0.5px solid var(--hairline);
-}
-
-/* The catalog: one button per service the tree describes. */
-#action .choices {
-	display: flex;
-	flex-direction: column;
-	gap: 6px;
-	margin: 10px 0;
-}
-
-#action .choices button {
-	display: flex;
-	align-items: center;
-	gap: 8px;
-	padding: 8px 12px;
-	font-size: 12px;
-	text-align: left;
-	color: var(--label);
-	background: var(--hover);
-	border: 0.5px solid var(--hairline);
-	border-radius: 8px;
-}
-
-#action .choices button:hover {
-	background: var(--separator);
-}
-
-dialog button.danger {
-	background: var(--failed);
-	color: #fff;
-}
-
-dialog .actions {
-	display: flex;
-	justify-content: flex-end;
-	gap: 8px;
-	margin-top: 16px;
-}
-
-dialog button {
-	font-size: 13px;
-	padding: 4px 14px;
-	border-radius: 6px;
-	border: 0.5px solid var(--hairline);
-	background: var(--card);
-	color: var(--label);
-}
-
-dialog button.default {
-	background: var(--accent);
-	color: var(--onAccent);
-	border-color: transparent;
-	font-weight: 500;
 }
 
 ::-webkit-scrollbar {

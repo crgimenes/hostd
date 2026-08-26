@@ -233,7 +233,9 @@ func (s *Supervisor) Stop(name string) (bool, error) {
 		return false, nil
 	}
 	// The runtime asks, waits and kills what did not go; the grace is the
-	// service's own, so a database gets the patience it was declared with.
+	// service's own, so a database gets the patience it was declared with —
+	// and the wait is said before it is waited out.
+	s.sayStopping(svc)
 	err = client.Stop(ctx, observed.ID, svc.StopGrace())
 	if err != nil {
 		return false, err

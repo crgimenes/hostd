@@ -54,12 +54,7 @@ type panel struct {
 	// one decision.
 	mu      sync.Mutex
 	clients map[string]*api.Client
-	// A second pipe per machine, for the actions: one request owns a pipe from
-	// first byte to last, so an action that takes seconds on the rounds' pipe
-	// would starve the telemetry — a frozen screen exactly while somebody is
-	// waiting to see what their click did.
-	actors map[string]*api.Client
-	loops  map[string]*hostLoop
+	loops   map[string]*hostLoop
 
 	// one behind a seam: proving a slow machine cannot delay a fast one needs
 	// a machine that is slow on purpose.
@@ -86,6 +81,12 @@ type panel struct {
 	since  map[string]uint64
 	held   map[string]bool
 	cursor uint64
+
+	// The actions running right now, by act: their buttons render held down,
+	// and a second click on one does nothing. It lives here rather than in the
+	// page because a fragment the rounds replace would take a class with it.
+	busyMu sync.Mutex
+	busy   map[string]bool
 
 	viewMu sync.Mutex
 	view   viewState
@@ -120,10 +121,10 @@ func newPanel(opt options, hosts []string) (*panel, error) {
 		hosts:   hosts,
 		cfgDir:  opt.config,
 		clients: map[string]*api.Client{},
-		actors:  map[string]*api.Client{},
 		loops:   map[string]*hostLoop{},
 		since:   map[string]uint64{},
 		held:    map[string]bool{},
+		busy:    map[string]bool{},
 		sent:    map[string]string{},
 		view:    viewState{kind: "fleet", window: 3600, closed: map[string]bool{}},
 		pages:   pages,
@@ -231,13 +232,6 @@ func (p *panel) reloadFleet() {
 		_ = client.Close()
 		delete(p.clients, host)
 	}
-	for host, client := range p.actors {
-		if kept[host] {
-			continue
-		}
-		_ = client.Close()
-		delete(p.actors, host)
-	}
 	p.hosts = hosts
 	p.mu.Unlock()
 	// A machine taken out of the inventory leaves the picture too: the tree
@@ -247,6 +241,21 @@ func (p *panel) reloadFleet() {
 	p.snapMu.Unlock()
 	p.syncLoops()
 	p.wake()
+}
+
+// catalog is what the tree describes, read only while its screen is open: the
+// other screens have no use for it, and reading a directory twice a second for
+// nobody is work nobody asked for.
+func (p *panel) catalog(view viewState) []service.Declaration {
+	if view.kind != "services" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// A tree half of which cannot be read still describes the other half, and
+	// the services screen is where somebody would go to notice.
+	declarations, _ := service.LoadTree(ctx, p.configDir())
+	return declarations
 }
 
 func (p *panel) configDir() string {
@@ -276,8 +285,6 @@ func (p *panel) settings() settingsInfo {
 
 func (p *panel) one(ctx context.Context, host string, fromMS, toMS float64, since uint64, wantImages bool) fleetHost {
 	answer := fleetHost{Host: host, Since: since}
-	p.reaching(host, true)
-	defer p.reaching(host, false)
 	if p.opt.debug {
 		// Said on the way OUT as well as on the way in: a machine that never
 		// answers would otherwise leave no trace at all until ssh gives up,
@@ -363,16 +370,19 @@ func (p *panel) client(host string) (*api.Client, error) {
 	return opened, nil
 }
 
-// actionClient is the machine's second pipe, dialed on first use: an action
-// waits on its own connection, and the rounds keep painting the screen —
-// including the very events the action is causing.
-func (p *panel) actionClient(host string) (*api.Client, error) {
-	p.mu.Lock()
-	existing, ok := p.actors[host]
-	p.mu.Unlock()
-	if ok {
-		return existing, nil
-	}
+// reach opens a connection of an action's own, and the caller closes it. Two
+// reasons, and the second one cost a deploy on the bench:
+//
+// Its own, because one request owns a pipe from first byte to last: an action
+// that takes seconds on the rounds' pipe would starve the telemetry — a frozen
+// screen exactly while somebody waits to see what their click did.
+//
+// And FRESH, never kept: a pipe is `hostd -stdio` on the far side, and that
+// process dies with every daemon restart, ssh hiccup and idle timeout. The
+// rounds keep theirs warm and redial two seconds later, so nothing shows. An
+// action's would sit unused for an hour and then be dead exactly when it was
+// needed — which is what "the image arrived and the client got EOF" was.
+func (p *panel) reach(host string) (*api.Client, error) {
 	opened, err := p.dial(host)
 	if err != nil {
 		return nil, err
@@ -380,9 +390,6 @@ func (p *panel) actionClient(host string) (*api.Client, error) {
 	if p.opt.debug {
 		opened.Debug = os.Stderr
 	}
-	p.mu.Lock()
-	p.actors[host] = opened
-	p.mu.Unlock()
 	return opened, nil
 }
 
@@ -399,26 +406,12 @@ func (p *panel) drop(host string) {
 	}
 }
 
-func (p *panel) dropAction(host string) {
-	p.mu.Lock()
-	client, ok := p.actors[host]
-	delete(p.actors, host)
-	p.mu.Unlock()
-	if ok {
-		_ = client.Close()
-	}
-}
-
 func (p *panel) close() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for host, client := range p.clients {
 		_ = client.Close()
 		delete(p.clients, host)
-	}
-	for host, client := range p.actors {
-		_ = client.Close()
-		delete(p.actors, host)
 	}
 }
 

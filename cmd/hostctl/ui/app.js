@@ -44,18 +44,6 @@ function hostdApply(html) {
 		if (standing) {
 			standing.replaceWith(piece);
 		}
-		// The answer to an action is a dialog, and it says so itself: replacing
-		// a <dialog> element closes it, so the arrival is what reopens it. A
-		// run reports from the corner, over a live screen — the log below it
-		// keeps painting what the action is causing; only a question that
-		// needs an answer takes the centre as a modal.
-		if (piece.id === "action" && piece.hasAttribute("data-open") && !piece.open) {
-			if (piece.hasAttribute("data-corner")) {
-				piece.show();
-			} else {
-				piece.showModal();
-			}
-		}
 	}
 	settle(following);
 }
@@ -64,29 +52,15 @@ function hostdApply(html) {
 // same kind of channel the pushes ride, so nothing on the way can lose its
 // parameters. Outside the window (the test harness, a browser) the binding
 // does not exist and the same action travels over HTTP instead.
-let actionBusy = false;
-
 function act(action) {
-	const acting = action.startsWith("confirm/") || action.startsWith("run/");
-	if (acting) {
-		actionBusy = true;
-	}
-	const settleAct = (apply) => (answer) => {
-		actionBusy = false;
-		if (apply) {
-			hostdApply(answer);
-		} else {
-			say("action failed: " + answer, true);
-		}
-	};
 	if (window.hostd_act) {
-		window.hostd_act(action).then(settleAct(true)).catch(settleAct(false));
+		window.hostd_act(action).then(hostdApply).catch((err) => say("action failed: " + err, true));
 		return;
 	}
 	fetch("/act/" + action)
 		.then((response) => response.text())
-		.then(settleAct(true))
-		.catch(settleAct(false));
+		.then(hostdApply)
+		.catch((err) => say(String(err), true));
 }
 
 // A failure in this script is written where the operator reads, not to a
@@ -112,49 +86,25 @@ document.body.addEventListener("click", (event) => {
 	// element inside a fragment is replaced by the next push, and a handler
 	// bound straight to it is lost with the element it was bound to.
 	const chrome = event.target.closest("[data-ui]");
-	if (chrome && chrome.dataset.ui === "menu") {
-		// The ⋯ beside a service: its list opens under it, and opening one
-		// puts every other away — two open menus answer for two subjects.
-		const list = chrome.nextElementSibling;
-		const wasHidden = list.hidden;
-		closeMenus();
-		if (!wasHidden) {
-			return;
-		}
-		list.hidden = false;
-		// Fixed to the viewport and measured open: the cards clip what
-		// overflows them, and a menu clipped at the card's edge is a menu
-		// with half its actions missing. Near the bottom it opens upward.
-		const anchor = chrome.getBoundingClientRect();
-		list.style.right = `${Math.max(8, window.innerWidth - anchor.right)}px`;
-		const below = anchor.bottom + 4;
-		const fits = below + list.offsetHeight <= window.innerHeight - 8;
-		list.style.top = `${fits ? below : Math.max(8, anchor.top - list.offsetHeight - 4)}px`;
-		return;
-	}
-	// A click anywhere else is done with the menus, whatever else it does.
-	closeMenus();
 	if (chrome) {
 		if (chrome.dataset.ui === "nav") {
 			toggleNav();
 		}
-		if (chrome.dataset.ui === "close-action") {
-			el("action").close();
+		return;
+	}
+	// The catalog's button: the machine comes from the dropdown beside it, so
+	// the act is built here at the click rather than rendered into the page.
+	const deploy = event.target.closest("[data-deploy]");
+	if (deploy) {
+		const where = deploy.closest(".headActions").querySelector(".where");
+		if (where && where.value) {
+			act(`do/deploy/${where.value}/${deploy.dataset.deploy}`);
 		}
 		return;
 	}
 	const asked = event.target.closest("[data-act]");
 	if (!asked) {
 		return;
-	}
-	// An act that reaches the fleet takes as long as ssh takes, and a dialog
-	// that sits unchanged under the click is a dialog somebody clicks again.
-	// One at a time: a second click while one runs would race two dialogs.
-	if (asked.dataset.act.startsWith("confirm/") || asked.dataset.act.startsWith("run/")) {
-		if (actionBusy) {
-			return;
-		}
-		actionWorking(asked.dataset.act.startsWith("run/"));
 	}
 	act(asked.dataset.act);
 	// On a narrow window the sidebar covers what was just chosen: picking
@@ -441,63 +391,6 @@ function arm(wrap) {
 	};
 }
 
-/* The command dialog: what stays a command to copy — the operator's own steps. */
-
-document.body.addEventListener("click", (event) => {
-	// closest, not the target itself: the click usually lands on the label or
-	// the icon inside the button, and reading only the target made the button
-	// work on its padding and do nothing on its own word.
-	const asked = event.target.closest("[data-command]");
-	if (!asked) {
-		return;
-	}
-	event.stopPropagation();
-	showCommand(asked.dataset.command);
-});
-
-function closeMenus() {
-	for (const list of document.querySelectorAll(".menuList:not([hidden])")) {
-		list.hidden = true;
-	}
-}
-
-// The menu is fixed to the viewport, so the page scrolling under it would
-// leave it floating over the wrong row. Capture reaches the inner scrollers.
-document.addEventListener("scroll", closeMenus, true);
-
-// What the action dialog shows between the click and the answer. Its own
-// constant markup, never anything a machine sent. A run waits in the corner,
-// where it covers nothing the operator is watching.
-function actionWorking(corner) {
-	const dialog = el("action");
-	dialog.innerHTML = '<p class="asking"><span class="spinner"></span> working…</p>';
-	if (dialog.open) {
-		dialog.close();
-	}
-	if (corner) {
-		dialog.setAttribute("data-corner", "1");
-		dialog.show();
-		return;
-	}
-	dialog.removeAttribute("data-corner");
-	dialog.showModal();
-}
-
-function showCommand(command) {
-	el("commandTitle").textContent = "This one is yours to run";
-	el("commandNote").textContent = "Run this where you keep your tree:";
-	el("commandText").textContent = command;
-	el("command").showModal();
-}
-
-// Called by the menu bar, which reaches the panel the same way a click does.
-function about(text) {
-	el("commandTitle").textContent = "hostctl";
-	el("commandNote").textContent = "The panel is hostctl in another presentation.";
-	el("commandText").textContent = text;
-	el("command").showModal();
-}
-
 function pickWindow(seconds) {
 	act(`window/${seconds}`);
 }
@@ -510,22 +403,15 @@ function goFleet() {
 	act("select/fleet");
 }
 
+// The menu bar's About: what this binary is, where it already lives.
+function about() {
+	act("select/settings");
+}
+
 function focusSearch() {
 	el("search").focus();
 	el("search").select();
 }
-
-el("copy").onclick = async () => {
-	try {
-		await navigator.clipboard.writeText(el("commandText").textContent);
-		el("copy").textContent = "Copied";
-		setTimeout(() => { el("copy").textContent = "Copy"; }, 1200);
-	} catch {
-		// The text is selectable; saying nothing would be pretending it worked.
-		el("copy").textContent = "Select it and copy";
-	}
-};
-el("dismiss").onclick = () => el("command").close();
 
 /* The two things that can be dragged. */
 

@@ -514,13 +514,20 @@ func TestPullReadsTheErrorOutOfTheStream(t *testing.T) {
 		_, _ = w.Write([]byte(answer))
 	}))
 
-	err := client.Pull(context.Background(), "caddy:2-alpine")
+	var progress []string
+	err := client.Pull(context.Background(), "caddy:2-alpine", func(step string) {
+		progress = append(progress, step)
+	})
 	if err != nil {
 		t.Fatalf("a clean stream was read as failure: %v", err)
 	}
+	// What it is doing has to reach whoever is waiting on a gigabyte.
+	if len(progress) == 0 || !strings.Contains(progress[0], "Pulling from library/caddy") {
+		t.Fatalf("the pull said nothing about what it was doing: %v", progress)
+	}
 
 	answer = `{"status":"Pulling"}` + "\n" + `{"error":"pull access denied"}` + "\n"
-	err = client.Pull(context.Background(), "caddy:2-alpine")
+	err = client.Pull(context.Background(), "caddy:2-alpine", nil)
 	if err == nil || !strings.Contains(err.Error(), "pull access denied") {
 		t.Fatalf("the error inside the stream was not read: %v", err)
 	}

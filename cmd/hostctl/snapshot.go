@@ -18,24 +18,14 @@ const pollInterval = 2 * time.Second
 // window that dies slowly.
 const maxLines = 4000
 
-// How long a round may take before the window is told it is working. Under
-// this, saying so would be a flicker on every tick and the wire would never be
-// quiet; over it, a still window reads as a frozen one — which is what the
-// first round looks like, when four machines are being reached for the first
-// time and the slowest takes seconds.
-const slowRound = 400 * time.Millisecond
-
-// What the panel knows, as of the last round.
+// What the panel knows, as of the last round. There is no "working" state
+// here on purpose: machines appear as they answer and the log goes by while
+// things happen, and that is what says the program is working — an indicator
+// with nothing behind it is only somewhere for impatience to pile up.
 type snapshot struct {
 	Fleet   []fleetHost
 	Lines   []line
 	Updated time.Time
-	// A round is going and taking long enough to say so, and which machines it
-	// is still waiting on: "working" with no name is indistinguishable from
-	// stuck, and the machine that is switched off is exactly what somebody
-	// wants named.
-	Busy     bool
-	Reaching []string
 }
 
 // A log line with the machine that wrote it, which the answer does not carry
@@ -46,6 +36,9 @@ type line struct {
 	api.LogLine
 	Host string
 	N    uint64
+	// hostctl's own failure, which is the only thing this pane paints red: a
+	// container's stderr is where a well-behaved program logs, not a fault.
+	Bad bool
 }
 
 // Each machine is watched by its own loop, and a loop is the only goroutine
@@ -135,9 +128,6 @@ func (p *panel) wake() {
 func (p *panel) roundOne(ctx context.Context, host string) {
 	asking, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	finished := make(chan struct{})
-	go p.sayIfSlow(finished)
-
 	view := p.viewport()
 	// How far back the graphs reach, unless the operator dragged a range on a
 	// chart, which is used instead.
@@ -147,23 +137,8 @@ func (p *panel) roundOne(ctx context.Context, host string) {
 		toMS = 0
 	}
 	answer := p.ask(asking, host, fromMS, toMS, p.sequences()[host], host == imagesHost(view))
-
-	close(finished)
 	p.absorb([]fleetHost{answer})
-	p.settle()
 	p.push()
-}
-
-// settle lowers the indicator only when no machine is still being reached:
-// with a loop per machine, the first one home must not silence the ones still
-// out.
-func (p *panel) settle() {
-	p.snapMu.RLock()
-	idle := len(p.snap.Reaching) == 0
-	p.snapMu.RUnlock()
-	if idle {
-		p.working(false)
-	}
 }
 
 // Which machine, if any, is being asked for its images this round: the one
@@ -173,49 +148,6 @@ func imagesHost(view viewState) string {
 		return ""
 	}
 	return view.host
-}
-
-// sayIfSlow tells the window the panel is working, but only once the round has
-// taken long enough for a person to wonder.
-func (p *panel) sayIfSlow(finished chan struct{}) {
-	select {
-	case <-finished:
-		return
-	case <-time.After(slowRound):
-	}
-	p.working(true)
-}
-
-// working pushes only on the edge: a state that is already on screen is not
-// sent again.
-func (p *panel) working(busy bool) {
-	p.snapMu.Lock()
-	changed := p.snap.Busy != busy
-	p.snap.Busy = busy
-	p.snapMu.Unlock()
-	if changed {
-		p.push()
-	}
-}
-
-// reaching records that a machine is being asked, and answers whether the
-// window should be told again. The set is what the status names.
-func (p *panel) reaching(host string, going bool) {
-	p.snapMu.Lock()
-	at := slices.Index(p.snap.Reaching, host)
-	switch {
-	case going && at < 0:
-		p.snap.Reaching = append(p.snap.Reaching, host)
-	case !going && at >= 0:
-		p.snap.Reaching = slices.Delete(p.snap.Reaching, at, at+1)
-	}
-	busy := p.snap.Busy
-	p.snapMu.Unlock()
-	// Only worth a push while the window is already showing the indicator:
-	// otherwise this is a name nobody is reading.
-	if busy {
-		p.push()
-	}
 }
 
 // absorb folds answers into what the panel knows, one machine or many.

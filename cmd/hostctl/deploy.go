@@ -32,7 +32,7 @@ func deployService(ctx context.Context, client *api.Client, opt options, dir, na
 	if err != nil {
 		return "", err
 	}
-	err = ensureImage(ctx, client, declaration.Service.Image, say)
+	err = ensureImage(ctx, client, name, declaration.Service.Image, say)
 	if err != nil {
 		return "", err
 	}
@@ -69,13 +69,15 @@ func deployService(ctx context.Context, client *api.Client, opt options, dir, na
 // left alone; anything else the machine pulls from its registry. Every path is
 // said out loud, and only the push is fatal — for the rest, the start below is
 // the judge of whether the image really arrived.
-func ensureImage(ctx context.Context, client *api.Client, image string, say func(string)) error {
+func ensureImage(ctx context.Context, client *api.Client, name, image string, say func(string)) error {
 	local, err := docker.Open()
 	if err == nil {
 		_, err = local.Image(ctx, image)
 		if err == nil {
 			say(fmt.Sprintf("sending image %s from this machine…", image))
-			received, pushErr := pushImage(ctx, client, local, image)
+			received, pushErr := pushImage(ctx, client, local, image, func(sent int64) {
+				say(fmt.Sprintf("sending %s: %s sent", image, formatBytes(float64(sent))))
+			})
 			if pushErr != nil {
 				return pushErr
 			}
@@ -88,7 +90,9 @@ func ensureImage(ctx context.Context, client *api.Client, image string, say func
 		return nil
 	}
 	say(fmt.Sprintf("image %s is not here nor there; the machine is pulling it from its registry…", image))
-	resp, err := client.Do(ctx, api.Request{Op: api.OpImagePull, Name: image})
+	// The machine's own pull progress goes into ITS timeline, against this
+	// service, so it arrives by the same road as every other line.
+	resp, err := client.Do(ctx, api.Request{Op: api.OpImagePull, Name: image, Service: name})
 	if err != nil {
 		return err
 	}

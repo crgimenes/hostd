@@ -114,6 +114,13 @@ func SSHArguments(host string, remote []string) []string {
 	return append([]string{
 		"-o", "BatchMode=yes",
 		"-o", fmt.Sprintf("ConnectTimeout=%d", connectTimeout),
+		// A pipe that died — a NAT that forgot it, a machine that went away
+		// mid-operation — otherwise hangs until something else notices. ssh
+		// asks every 15s and gives up after four unanswered asks, so a dead
+		// connection fails in about a minute with an error instead of waiting
+		// on an answer that is never coming.
+		"-o", "ServerAliveInterval=15",
+		"-o", "ServerAliveCountMax=4",
 		"--",
 		host,
 	}, remote...)

@@ -127,6 +127,14 @@ func (c *Client) Push(ctx context.Context, image, arch string, content io.Reader
 	}
 	var resp Response
 	err = ReadMessage(ctx, c.reader, &resp)
+	if errors.Is(err, io.EOF) {
+		// The bytes went and the answer did not come back. Said the same way a
+		// request says it, because the cause is the same: nothing is listening
+		// on the other end of this pipe any more.
+		return Response{}, fmt.Errorf(
+			"hostd on %s took the image and closed the connection without answering; it restarted, or this pipe was already dead: %w",
+			c.target, ErrNoAnswer)
+	}
 	if err != nil {
 		return Response{}, err
 	}

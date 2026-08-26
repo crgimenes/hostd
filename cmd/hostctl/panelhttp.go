@@ -75,19 +75,27 @@ func (p *panel) Act(action string) (string, error) {
 		fmt.Fprintf(os.Stderr, "debug act action=%q\n", action)
 	}
 	parts := strings.Split(action, "/")
-	// The acts that reach the fleet answer with a dialog: what will happen, or
-	// what happened. The push that rides along keeps the rest of the window
-	// current under it.
-	if parts[0] == "confirm" || parts[0] == "run" {
-		dialog, err := p.action(parts)
+	// An action reaches the fleet and takes as long as it takes: nothing waits
+	// for it here. What it is doing arrives in the log, and its button renders
+	// held down until it is over — so the answer to this click is just the
+	// screen with that button held.
+	if parts[0] == "do" {
+		work, err := p.action(parts[1:])
 		if err != nil {
 			return "", err
 		}
-		rest, err := p.pending(false)
-		if err != nil {
-			return "", err
+		if !p.hold(action) {
+			// Already running: a second click on a held button is nothing.
+			return "", nil
 		}
-		return rest + dialog, nil
+		go func() {
+			defer func() {
+				p.release(action)
+				p.push()
+			}()
+			work()
+		}()
+		return p.pending(false)
 	}
 	rest := parts[1:]
 	before := p.viewport()
@@ -239,7 +247,19 @@ func (p *panel) fragments() []fragment {
 	snap := p.latest()
 	view := p.viewport()
 	tree := treeOf(snap, view)
-	detail := detailOf(snap, view, p.settings())
+	detail := detailOf(snap, view, p.settings(), p.catalog(view), p.hostsNow())
+	// Held-down buttons are rendered from the panel, not remembered by the
+	// page: a fragment the rounds replace would take a class with it.
+	for card := range detail.Cards {
+		for at, button := range detail.Cards[card].Buttons {
+			if button.Act != "" {
+				detail.Cards[card].Buttons[at].Busy = p.running(button.Act)
+			}
+			if button.Deploy != "" {
+				detail.Cards[card].Buttons[at].Busy = p.deploying(button.Deploy)
+			}
+		}
+	}
 
 	out := []fragment{
 		p.renderKeyed("tree", "tree", tree, tree.StructureKey()),
@@ -255,10 +275,6 @@ func (p *panel) fragments() []fragment {
 	}
 	out = append(out, detail.volatiles(p)...)
 	out = append(out, p.render("status", "status", statusOf(snap)))
-	// The same news twice on purpose: the status lives in the sidebar's foot,
-	// and on a narrow window the sidebar is put away — which left a click with
-	// no sign anywhere that the fleet is being asked.
-	out = append(out, p.render("working", "working", statusOf(snap)))
 	return out
 }
 
@@ -425,6 +441,14 @@ func treeOf(snap snapshot, view viewState) treeView {
 		Key:    "head-panel",
 		Label:  "Panel",
 		Header: true,
+	}, rowView{
+		// The second inventory. The machines above are where things run; this
+		// is what there is to run — two lists, each easy to find and to keep.
+		Key:      "services",
+		Label:    "Services",
+		Icon:     "stack",
+		Selected: view.kind == "services",
+		Link:     "select/services",
 	}, rowView{
 		Key:      "settings",
 		Label:    "Settings",

@@ -2,12 +2,12 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/crgimenes/hostd/api"
 	"github.com/crgimenes/hostd/logs"
@@ -20,6 +20,9 @@ import (
 // A supervisor the test writes the script for: what the plan says is what the
 // test is about, and a real one would need a container runtime to say it.
 type scriptedSup struct {
+	// Closed to let a held action finish: proving a button holds itself down
+	// needs an action that is still running while the test looks.
+	hold       chan struct{}
 	mu         sync.Mutex
 	statuses   []supervisor.Status
 	plan       []supervisor.Change
@@ -56,6 +59,9 @@ func (s *scriptedSup) Stop(name string) (bool, error) {
 }
 
 func (s *scriptedSup) Restart(name string) (bool, error) {
+	if s.hold != nil {
+		<-s.hold
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.restarted = append(s.restarted, name)
@@ -169,209 +175,240 @@ func actingPanel(t *testing.T) (*panel, *scriptedSup, string) {
 	return view, sup, services
 }
 
-// A click asks first and acts second: the confirmation performs nothing, the
-// run performs exactly the operation the command line would.
-func TestARestartClickIsConfirmedThenPerformed(t *testing.T) {
+// waitFor gives an action started off this goroutine time to land. Nothing in
+// the window waits for one either: the log says what is happening while it
+// happens, and the screen catches up when it is done.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
+
+// A click is the action: no confirmation, no dialog. What it did shows up in
+// the log, which is the one place this window tells its story.
+func TestAClickIsTheAction(t *testing.T) {
 	view, sup, _ := actingPanel(t)
 	get(t, view, "/")
 
-	asked := get(t, view, "/act/confirm/restart/yuki/caddy").Body.String()
-	if !strings.Contains(asked, `id="action"`) || !strings.Contains(asked, "data-open") {
-		t.Fatalf("the confirmation dialog did not come back: %s", asked)
-	}
-	if !strings.Contains(asked, `data-act="run/restart/yuki/caddy"`) {
-		t.Fatalf("the dialog has no button that performs the restart: %s", asked)
-	}
-	if !strings.Contains(asked, "hostctl -host yuki service restart caddy") {
-		t.Fatalf("the dialog does not show the command line equivalent: %s", asked)
-	}
-	if sup.count(&sup.restarted) != 0 {
-		t.Fatal("asking about a restart restarted something")
-	}
-
-	done := get(t, view, "/act/run/restart/yuki/caddy").Body.String()
-	if sup.count(&sup.restarted) != 1 {
-		t.Fatalf("the run did not reach the daemon: restarted %d time(s)", sup.count(&sup.restarted))
-	}
-	if !strings.Contains(done, "done") {
-		t.Fatalf("the outcome did not come back to the dialog: %s", done)
-	}
+	get(t, view, "/act/do/restart/yuki/caddy")
+	waitFor(t, "the restart to reach the daemon", func() bool { return sup.count(&sup.restarted) == 1 })
 }
 
-// A daemon too old to know an operation is not a dead end: the window carries
-// the daemon that knows it, and the dialog offers to put it there.
-func TestAnOldDaemonOffersItsOwnUpdate(t *testing.T) {
-	view := probePanel(t)
-	out := view.failedResp(dialogView{Title: "redeploy caddy on m1.local"}, "m1.local",
-		api.Response{Code: api.CodeUnknownOp, Message: `this hostd does not implement "service.redeploy"`})
-	if out.Confirm.Act != "confirm/update/m1.local" {
-		t.Fatalf("an unknown operation did not offer the update: %+v", out)
-	}
-	if !out.Bad || out.Outcome == "" {
-		t.Fatalf("the refusal itself must still be shown: %+v", out)
-	}
-
-	// And the confirmation renders, whichever daemon this build carries.
-	acting, _, _ := actingPanel(t)
-	asked := get(t, acting, "/act/confirm/update/yuki").Body.String()
-	if !strings.Contains(asked, `id="action"`) || !strings.Contains(asked, "update hostd on yuki") {
-		t.Fatalf("the update confirmation did not come back: %s", asked)
-	}
-}
-
-// A deploy is confirmed and then overwrites: the declaration lands on the
-// machine, the container is recreated from it, and what the machine was
-// already complaining about is said in the same dialog.
-func TestDeployIsConfirmedThenOverwrites(t *testing.T) {
+// A deploy overwrites, and says what it is doing as it goes: the declaration
+// lands on the machine, the container is recreated from it, and every step is
+// a line in the log — including the image it could not find anywhere.
+func TestADeployOverwritesAndNarratesItself(t *testing.T) {
 	view, sup, services := actingPanel(t)
 	get(t, view, "/")
 
-	asked := get(t, view, "/act/confirm/deploy/yuki/caddy").Body.String()
-	if !strings.Contains(asked, `data-act="run/deploy/yuki/caddy"`) {
-		t.Fatalf("the dialog has no button that deploys: %s", asked)
-	}
-	if !strings.Contains(asked, "hostctl -host yuki service deploy caddy") {
-		t.Fatalf("the dialog does not show the command line equivalent: %s", asked)
-	}
-	if sup.count(&sup.redeployed) != 0 {
-		t.Fatal("confirming a deploy deployed something")
-	}
-
-	sup.mu.Lock()
-	sup.statuses = []supervisor.Status{{
-		Name: "caddy", State: supervisor.StateFailed,
-		LastError: "image hostd-nowhere:0 is not on this machine; send it with hostctl image push",
-	}}
-	sup.mu.Unlock()
-	done := get(t, view, "/act/run/deploy/yuki/caddy").Body.String()
+	get(t, view, "/act/do/deploy/yuki/caddy")
+	waitFor(t, "the deploy to recreate the container", func() bool { return sup.count(&sup.redeployed) == 1 })
 	_, err := os.Stat(filepath.Join(services, "caddy.filo"))
 	if err != nil {
 		t.Fatalf("the declaration did not land on the machine: %v", err)
 	}
-	// The image is nowhere: the machine is asked to pull, and this daemon has
-	// no runtime to pull into — said, not hidden, and not fatal: the start is
-	// the judge.
-	if !strings.Contains(done, "pulling it from its registry") || !strings.Contains(done, "could not pull") {
-		t.Fatalf("the image path is not told step by step: %s", done)
-	}
-	if sup.count(&sup.redeployed) != 1 {
-		t.Fatalf("the deploy did not recreate the container: %d", sup.count(&sup.redeployed))
-	}
-	if !strings.Contains(done, "deployed") {
-		t.Fatalf("the outcome did not come back: %s", done)
-	}
-	if !strings.Contains(done, "the machine reports: caddy") {
-		t.Fatalf("the dialog hides what the machine is reporting: %s", done)
+
+	said := view.logText()
+	for _, expected := range []string{"pulling it from its registry", "sending the declaration", "caddy is"} {
+		if !strings.Contains(said, expected) {
+			t.Fatalf("the log does not carry %q:\n%s", expected, said)
+		}
 	}
 }
 
-// A remove is confirmed in red, and then takes the service off the machine:
-// container, declaration and image — while the tree keeps describing it, so a
-// deploy puts it back.
-func TestRemoveIsConfirmedThenTakesItOffTheMachine(t *testing.T) {
+// A remove takes the service off the machine — container, declaration, image —
+// with one click, because the tree still describes it and a deploy puts it
+// back. Volumes are never touched, which is what makes it ordinary.
+func TestARemoveTakesTheServiceOffTheMachine(t *testing.T) {
 	view, sup, services := actingPanel(t)
 	get(t, view, "/")
-	get(t, view, "/act/run/deploy/yuki/caddy")
+	get(t, view, "/act/do/deploy/yuki/caddy")
+	waitFor(t, "the deploy", func() bool { return sup.count(&sup.redeployed) == 1 })
+
+	get(t, view, "/act/do/remove/yuki/caddy")
+	waitFor(t, "the removal to reach the daemon", func() bool { return sup.count(&sup.removed) == 1 })
 	_, err := os.Stat(filepath.Join(services, "caddy.filo"))
-	if err != nil {
-		t.Fatalf("the deploy did not land the declaration: %v", err)
-	}
-
-	asked := get(t, view, "/act/confirm/remove/yuki/caddy").Body.String()
-	if !strings.Contains(asked, `data-act="run/remove/yuki/caddy"`) {
-		t.Fatalf("the dialog has no button that removes: %s", asked)
-	}
-	if !strings.Contains(asked, `class="danger"`) {
-		t.Fatalf("a removal is not offered in red: %s", asked)
-	}
-	if sup.count(&sup.removed) != 0 {
-		t.Fatal("confirming a removal removed something")
-	}
-
-	done := get(t, view, "/act/run/remove/yuki/caddy").Body.String()
-	if sup.count(&sup.removed) != 1 {
-		t.Fatalf("the removal did not reach the daemon: %d", sup.count(&sup.removed))
-	}
-	_, err = os.Stat(filepath.Join(services, "caddy.filo"))
 	if !os.IsNotExist(err) {
 		t.Fatalf("the declaration is still on the machine: %v", err)
 	}
-	if !strings.Contains(done, `data-act="confirm/deploy/yuki/caddy"`) {
-		t.Fatalf("the outcome does not offer the way back as a button: %s", done)
+}
+
+// Nothing in the window asks before acting, and nothing opens a dialog: the
+// act on a button is the operation itself.
+func TestNothingAsksAndNothingIsModal(t *testing.T) {
+	view, _, _ := actingPanel(t)
+	pages := []string{"/", "/act/select/host/yuki", "/act/select/service/yuki/caddy",
+		"/act/select/services", "/act/select/images/yuki", "/act/select/settings"}
+	for _, path := range pages {
+		body := get(t, view, path).Body.String()
+		for _, forbidden := range []string{"confirm/", "showModal", "<dialog"} {
+			if strings.Contains(body, forbidden) {
+				t.Fatalf("%s still carries %q", path, forbidden)
+			}
+		}
+	}
+	script, err := ui.ReadFile("ui/app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	for _, forbidden := range []string{"showModal", "actionWorking", "spinner"} {
+		if strings.Contains(string(script), forbidden) {
+			t.Fatalf("app.js still carries %q", forbidden)
+		}
 	}
 }
 
-// The machine's deploy button is the catalog: everything the tree describes,
-// each one a click away, with what already runs said beside the name.
-func TestTheCatalogListsEveryDescribedService(t *testing.T) {
+// The button an action is running holds itself down, and a second click on it
+// does nothing: the panel keeps that state, because a class in the page would
+// be lost with the fragment the rounds replace.
+func TestAHeldButtonIgnoresTheSecondClick(t *testing.T) {
+	view, sup, _ := actingPanel(t)
+	get(t, view, "/")
+	release := make(chan struct{})
+	sup.hold = release
+	defer close(release)
+
+	get(t, view, "/act/do/restart/yuki/caddy")
+	waitFor(t, "the action to be held", func() bool { return view.running("do/restart/yuki/caddy") })
+
+	pane := get(t, view, "/act/select/service/yuki/caddy").Body.String()
+	if !strings.Contains(pane, "disabled") {
+		t.Fatalf("the button of a running action is not held down: %s", pane)
+	}
+	get(t, view, "/act/do/restart/yuki/caddy")
+	if sup.count(&sup.restarted) != 0 {
+		t.Fatal("a held action was started a second time")
+	}
+}
+
+// The other inventory: every service the tree describes, one card each, with
+// the machines in a dropdown beside its deploy. It deliberately does not say
+// where each service already runs — that is what the machine inventory on the
+// left is for, and repeating it here would repaint the card, dropping the
+// choice in its dropdown, every time anything moved in the fleet.
+func TestTheCatalogListsWhatTheTreeDescribes(t *testing.T) {
 	view, _, _ := actingPanel(t)
 	get(t, view, "/")
 
-	catalog := get(t, view, "/act/confirm/add/yuki").Body.String()
-	if !strings.Contains(catalog, `data-act="confirm/deploy/yuki/caddy"`) ||
-		!strings.Contains(catalog, `data-act="confirm/deploy/yuki/other"`) {
-		t.Fatalf("the catalog does not offer every described service: %s", catalog)
+	catalog := get(t, view, "/act/select/services").Body.String()
+	for _, expected := range []string{"caddy", "other", `data-deploy="caddy"`, `class="where"`, `value="yuki"`} {
+		if !strings.Contains(catalog, expected) {
+			t.Fatalf("the catalog is missing %q: %s", expected, catalog)
+		}
 	}
-	// The probe snapshot already runs caddy on yuki; deploying again overwrites,
-	// and the catalog says so instead of hiding the entry.
-	if !strings.Contains(catalog, "already here; deploying replaces it") {
-		t.Fatalf("the catalog does not say what is already running: %s", catalog)
+	tree := get(t, view, "/").Body.String()
+	if !strings.Contains(tree, `data-act="select/services"`) {
+		t.Fatalf("the tree has no way to reach the catalog: %s", tree)
 	}
 }
 
-// An action waits on its own pipe: one request owns a connection from first
-// byte to last, so an action that takes seconds on the rounds' pipe would
-// freeze the screen exactly while somebody waits to see what their click did.
-func TestActionsRideTheirOwnConnection(t *testing.T) {
+// A machine ssh reached where no hostd answered, or one too old for an
+// operation, is not a dead end: this window carries a daemon, and putting it
+// there is a button on the machine's own panel.
+func TestTheMachinePanelCanInstallTheDaemon(t *testing.T) {
+	view, _, _ := actingPanel(t)
+	get(t, view, "/")
+	pane := get(t, view, "/act/select/host/yuki").Body.String()
+	if !strings.Contains(pane, `data-act="do/install/yuki"`) {
+		t.Fatalf("the machine panel cannot put a daemon there: %s", pane)
+	}
+}
+
+// An action gets a connection of its own, and a FRESH one. Its own, because
+// one request owns a pipe from first byte to last: sharing the rounds' pipe
+// would freeze the screen exactly while somebody waits on their click. Fresh,
+// because a kept pipe is `hostd -stdio` on the far side, and that dies with
+// every daemon restart and idle timeout — a pipe held from an hour ago is dead
+// exactly when it is finally needed.
+func TestEveryActionGetsAFreshConnectionOfItsOwn(t *testing.T) {
 	view, _, _ := actingPanel(t)
 	rounds, err := view.client("yuki")
 	if err != nil {
 		t.Fatalf("client: %v", err)
 	}
-	acting, err := view.actionClient("yuki")
+	first, err := view.reach("yuki")
 	if err != nil {
-		t.Fatalf("actionClient: %v", err)
+		t.Fatalf("reach: %v", err)
 	}
-	if rounds == acting {
-		t.Fatal("actions share the telemetry pipe, so a slow action freezes the screen")
+	defer func() { _ = first.Close() }()
+	second, err := view.reach("yuki")
+	if err != nil {
+		t.Fatalf("reach again: %v", err)
+	}
+	defer func() { _ = second.Close() }()
+
+	if rounds == first {
+		t.Fatal("an action shares the telemetry pipe, so a slow action freezes the screen")
+	}
+	if first == second {
+		t.Fatal("actions reuse a kept pipe, which is dead after any daemon restart")
 	}
 }
 
-// A run reports from the corner, over a live screen; only a question that
-// needs an answer takes the centre as a modal.
-func TestARunReportsFromTheCorner(t *testing.T) {
+// The connection an action opened is closed when it is done: one ssh per click
+// is fine, one ssh per click left behind is a leak that ends in a daemon that
+// stops accepting.
+func TestAnActionClosesWhatItOpened(t *testing.T) {
+	view, sup, _ := actingPanel(t)
+	dial := view.dial
+	var mu sync.Mutex
+	var opened []*api.Client
+	view.dial = func(host string) (*api.Client, error) {
+		client, err := dial(host)
+		if err == nil {
+			mu.Lock()
+			opened = append(opened, client)
+			mu.Unlock()
+		}
+		return client, err
+	}
+	get(t, view, "/")
+
+	get(t, view, "/act/do/restart/yuki/caddy")
+	waitFor(t, "the restart to land", func() bool { return sup.count(&sup.restarted) == 1 })
+
+	mu.Lock()
+	last := opened[len(opened)-1]
+	mu.Unlock()
+	// A closed connection cannot carry a request, which is the only way to ask
+	// a client whether it is closed.
+	waitFor(t, "the connection to be closed", func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_, err := last.Do(ctx, api.Request{Op: api.OpStatus})
+		return err != nil
+	})
+}
+
+// A failure is a line in the log like everything else, in the colour of a
+// failure: there is nowhere else for it to go, and nothing to dismiss.
+func TestAFailureIsALineInTheLog(t *testing.T) {
 	view, _, _ := actingPanel(t)
 	get(t, view, "/")
 
-	asked := get(t, view, "/act/confirm/restart/yuki/caddy").Body.String()
-	if strings.Contains(asked, "data-corner") {
-		t.Fatalf("a question is not a corner card: %s", asked)
-	}
-	done := get(t, view, "/act/run/restart/yuki/caddy").Body.String()
-	if !strings.Contains(done, "data-corner") {
-		t.Fatalf("a run's report is not a corner card: %s", done)
-	}
-
-	script, err := ui.ReadFile("ui/app.js")
-	if err != nil {
-		t.Fatalf("read app.js: %v", err)
-	}
-	if !strings.Contains(string(script), `hasAttribute("data-corner")`) || !strings.Contains(string(script), "piece.show()") {
-		t.Fatal("app.js does not open corner cards without a modal")
+	get(t, view, "/act/do/deploy/yuki/nosuchservice")
+	waitFor(t, "the failure to reach the log", func() bool {
+		return strings.Contains(view.logText(), "does not describe")
+	})
+	page := get(t, view, "/").Body.String()
+	if !strings.Contains(page, `class="err"`) {
+		t.Fatalf("a failure is not marked as one in the log: %s", page)
 	}
 }
 
-// A machine ssh reaches where no hostd answers is the state an install fixes,
-// so that is what the dialog offers — instead of an error that reads like a
-// dead end.
-func TestNoHostdAnsweringOffersTheInstall(t *testing.T) {
-	view := probePanel(t)
-	out := view.failedErr(dialogView{Title: "deploy site on selene"}, "selene",
-		fmt.Errorf("hostd on selene closed the connection without answering: %w", api.ErrNoAnswer))
-	if out.Confirm.Act != "confirm/update/selene" {
-		t.Fatalf("no install was offered: %+v", out)
+// logText is what the window's log pane holds, for a test to read.
+func (p *panel) logText() string {
+	p.snapMu.RLock()
+	defer p.snapMu.RUnlock()
+	var out strings.Builder
+	for _, held := range p.snap.Lines {
+		out.WriteString(held.Host + " " + held.Service + " " + held.Text + "\n")
 	}
-	if !out.Bad || out.Outcome == "" {
-		t.Fatalf("the failure itself must still be shown: %+v", out)
-	}
+	return out.String()
 }

@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"github.com/crgimenes/hostd/api"
+	"github.com/crgimenes/hostd/logs"
 	"github.com/crgimenes/hostd/metrics"
+	"github.com/crgimenes/hostd/service"
 	"github.com/crgimenes/hostd/supervisor"
 	"github.com/crgimenes/hostd/version"
 )
@@ -46,9 +48,9 @@ type cardView struct {
 	Facts   [][2]string
 	Charts  []chartView
 	Buttons []buttonView
-	// The buttons fold into one ⋯ menu: actions grow with the project, the
-	// heading does not.
-	Menu bool
+	// The machines a catalog card can deploy to, in a dropdown beside its
+	// button.
+	Machines []string
 	// A plain table, for a card whose rows are not services. Head above drives
 	// the service table and its fixed columns; these two are the general one.
 	GridHead []string
@@ -95,10 +97,14 @@ type buttonView struct {
 	// The picture beside the word, never instead of it: the panel is also for
 	// people who have not learned the pictures yet.
 	Icon string
-	// One of the two: a command shown for the person to run themselves, or an
-	// act the panel performs.
-	Command string
-	Act     string
+	// The act this button performs. One click, no confirmation: what it is
+	// doing shows in the log.
+	Act string
+	// A catalog button instead names the SERVICE, and takes the machine from
+	// the dropdown beside it — the act is built at the click.
+	Deploy string
+	// Running right now: rendered held down, and a second click is nothing.
+	Busy bool
 }
 
 type chartView struct {
@@ -127,7 +133,7 @@ func (d detailView) StructureKey() string {
 	var key strings.Builder
 	fmt.Fprintf(&key, "%s|%s|%v|%s|%d|%v|%v|%s\n", d.Title, d.Subtitle, d.Single, d.Empty, d.Window, d.Watching, d.Frozen, d.RangeText)
 	for _, card := range d.Cards {
-		fmt.Fprintf(&key, "%s|%s|%s|%s|%d|%d|%v\n", card.Key, card.Heading, card.Link, card.Problem, len(card.Charts), len(card.Numbers), card.Menu)
+		fmt.Fprintf(&key, "%s|%s|%s|%s|%d|%d|%v\n", card.Key, card.Heading, card.Link, card.Problem, len(card.Charts), len(card.Numbers), card.Machines)
 		for _, row := range card.Rows {
 			fmt.Fprintf(&key, " %s|%s|%s|%s|%v\n", row.Key, row.Name, row.Image, row.Problem, row.Job)
 		}
@@ -140,7 +146,7 @@ func (d detailView) StructureKey() string {
 			fmt.Fprintf(&key, " g:%s|%v\n", strings.Join(row.Cells, "\x1f"), row.Loose)
 		}
 		for _, button := range card.Buttons {
-			fmt.Fprintf(&key, " b:%s|%s\n", button.Command, button.Act)
+			fmt.Fprintf(&key, " b:%s|%s|%v\n", button.Act, button.Deploy, button.Busy)
 		}
 	}
 	return key.String()
@@ -173,29 +179,18 @@ func (d detailView) volatiles(p *panel) []fragment {
 	return out
 }
 
-// No clock here on purpose: a status that stamps the time changes every round,
-// and a fragment that changes every round is a wire that is never quiet. When
-// the fleet is well the panel has nothing to say.
+// No clock and no spinner: the machines appear as they answer and the log goes
+// by while things happen, which is what tells somebody the program is working.
+// A status that stamped the time would change every round, and a fragment that
+// changes every round is a wire that is never quiet.
 func statusOf(snap snapshot) statusView {
-	if snap.Busy {
-		// Named, because "working" with nothing after it is what a hung
-		// program also looks like, and the machine still outstanding is
-		// usually the one somebody needs to hear about.
-		if len(snap.Reaching) > 0 {
-			return statusView{Text: "asking " + strings.Join(snap.Reaching, ", ") + "…", Busy: true}
-		}
-		return statusView{Text: "asking the fleet…", Busy: true}
-	}
-	// A machine that did not answer says so where it is: its own card, in red,
-	// beside a red dot. Repeating it down here would be the same news twice,
-	// in the corner furthest from the thing it is about.
 	if snap.Updated.IsZero() {
-		return statusView{Text: "asking the fleet…", Busy: true}
+		return statusView{Text: "reaching the fleet"}
 	}
 	return statusView{Text: fmt.Sprintf("watching %d machine(s)", len(snap.Fleet))}
 }
 
-func detailOf(snap snapshot, view viewState, info settingsInfo) detailView {
+func detailOf(snap snapshot, view viewState, info settingsInfo, catalog []service.Declaration, machines []string) detailView {
 	var out detailView
 	switch view.kind {
 	case "host":
@@ -204,6 +199,8 @@ func detailOf(snap snapshot, view viewState, info settingsInfo) detailView {
 		out = serviceDetail(snap, view)
 	case "images":
 		out = imagesDetail(snap, view)
+	case "services":
+		out = catalogDetail(catalog, machines, info)
 	case "settings":
 		out = settingsDetail(info)
 	default:
@@ -213,7 +210,7 @@ func detailOf(snap snapshot, view viewState, info settingsInfo) detailView {
 	// are DOING. A page about the panel, or about what a machine is storing,
 	// governs neither, and offering a control that moves nothing is worse than
 	// not offering it.
-	out.Watching = view.kind != "settings" && view.kind != "images"
+	out.Watching = view.kind != "settings"
 	out.Window = view.window
 	from, to := span(snap, view)
 	out.From, out.To = int64(from), int64(to)
@@ -306,12 +303,13 @@ func imagesDetail(snap snapshot, view viewState) detailView {
 		GridHead: []string{"image", "size", "created", "used by", "digest"},
 		Numbers:  imageNumbers(ours, true),
 		Grid:     imageRows(ours),
-		// The plan, then the removal: the dialog shows what would go, and
-		// authorising it is the red button that says how much.
+		// One click, and the log says which images went. The policy is the
+		// daemon's: only what hostd put here, never what a container or a
+		// declaration is holding.
 		Buttons: []buttonView{{
 			Label: "Clean up",
 			Icon:  "trash",
-			Act:   "confirm/prune/" + host.Host,
+			Act:   "do/prune/" + host.Host,
 		}},
 	}
 	if len(ours) == 0 {
@@ -391,6 +389,43 @@ func imageRows(images []api.ImageEntry) []gridRow {
 	return out
 }
 
+// catalogDetail is the OTHER inventory: everything the tree describes, one
+// small card each. Where a service runs is not written in any file — it is
+// this choice, made here: pick a machine in the dropdown and deploy. The card
+// deliberately does not say where the service already runs; the machine
+// inventory on the left answers that, and repeating it here would repaint the
+// card — dropping the choice in its dropdown — every time a service moved
+// anywhere in the fleet.
+func catalogDetail(catalog []service.Declaration, machines []string, info settingsInfo) detailView {
+	out := detailView{
+		Title:    "Services",
+		Subtitle: fmt.Sprintf("%d described in %s", len(catalog), info.ConfigDir),
+	}
+	if len(catalog) == 0 {
+		out.Empty = "this tree describes no services yet: a service is a .filo file, or a directory with an init.filo and the files that travel with it"
+		return out
+	}
+	for _, declaration := range catalog {
+		name := declaration.Service.Name
+		aside := shortImage(declaration.Service.Image)
+		if declaration.Service.Every != "" {
+			aside += " · every " + declaration.Service.Every
+		}
+		out.Cards = append(out.Cards, cardView{
+			Key:      "catalog:" + name,
+			Heading:  name,
+			Aside:    aside,
+			Machines: machines,
+			Buttons: []buttonView{{
+				Label:  "deploy",
+				Icon:   "box-arrow-up",
+				Deploy: name,
+			}},
+		})
+	}
+	return out
+}
+
 func hostDetail(snap snapshot, view viewState) detailView {
 	host, found := machineOf(snap, view.host)
 	if !found {
@@ -416,12 +451,7 @@ func hostDetail(snap snapshot, view viewState) detailView {
 	services := cardView{
 		Key:     "services",
 		Heading: "Services",
-		Head:    []string{"service", "state", "image", "uptime", "restarts", ""},
-		// The catalog: everything the tree describes, each one a deploy away.
-		Buttons: []buttonView{{
-			Label: "deploy", Icon: "box-arrow-up",
-			Act: "confirm/add/" + host.Host,
-		}},
+		Head:    []string{"service", "state", "image", "uptime", "restarts"},
 	}
 	for _, service := range host.Services {
 		services.Rows = append(services.Rows, cellsOf(host.Host, service))
@@ -435,6 +465,14 @@ func hostDetail(snap snapshot, view viewState) detailView {
 		Heading: "Load",
 		Numbers: numbersOf(host),
 		Charts:  []chartView{load},
+		// The machine's own operation: put this window's hostd there. It is
+		// what a machine with no daemon, or one too old for an operation,
+		// needs — and it is where that error leads.
+		Buttons: []buttonView{{
+			Label: "install hostd",
+			Icon:  "box-arrow-up",
+			Act:   "do/install/" + host.Host,
+		}},
 	})
 
 	stacked := stackedLayers(host)
@@ -499,10 +537,9 @@ func serviceDetail(snap snapshot, view viewState) detailView {
 		Key:     "facts",
 		Heading: "Declaration",
 		Facts:   facts,
-		// On the heading line, where a person acts on what they just read.
-		// The panel still does not act: each item shows the command to run.
+		// On the heading line, where a person acts on what they just read:
+		// one click each, and the log says what happened.
 		Buttons: serviceActions(host.Host, service.Name),
-		Menu:    true,
 	})
 
 	cpu := seriesOf(host, metrics.ScopeService, service.Name, metrics.MetricCPUPercent)
@@ -522,9 +559,8 @@ func serviceDetail(snap snapshot, view viewState) detailView {
 	return out
 }
 
-// serviceActions is every operation one service offers. Each opens the
-// confirmation dialog: what will happen, the command line equivalent, and the
-// button that performs it — the same API operation the command line calls.
+// serviceActions is every operation one service offers, each one click. The
+// service's own panel is where they live: one subject, all its verbs in sight.
 func serviceActions(host, service string) []buttonView {
 	verbs := []struct{ label, icon string }{
 		{"deploy", "box-arrow-up"},
@@ -538,7 +574,7 @@ func serviceActions(host, service string) []buttonView {
 		out = append(out, buttonView{
 			Label: verb.label,
 			Icon:  verb.icon,
-			Act:   fmt.Sprintf("confirm/%s/%s/%s", verb.label, host, service),
+			Act:   fmt.Sprintf("do/%s/%s/%s", verb.label, host, service),
 		})
 	}
 	return out
@@ -562,7 +598,6 @@ func cellsOf(host string, service supervisor.Status) rowCells {
 		Since:   int64(service.Since),
 		Job:     service.Every != "",
 		Restart: strconv.Itoa(service.Restarts),
-		Buttons: serviceActions(host, service.Name),
 		Problem: service.LastError,
 	}
 }
@@ -728,11 +763,17 @@ func lineOf(held line, view viewState) lineView {
 		Where: where,
 		Text:  held.Text,
 	}
-	switch held.Stream {
-	case "err":
-		out.Class = "err"
-	case "event":
+	if held.Stream == logs.StreamEvent {
 		out.Class = "event"
+	}
+	// A failure wins the colour, and it is the ONLY thing that gets red here.
+	// A container's stderr does not: every well-behaved program logs there, so
+	// caddy's ordinary shutdown notes would paint the whole pane red. (This
+	// compared the stream with "err" for a while, when the stream is called
+	// "stderr"; the mismatch was hiding a wrong intent, and fixing the
+	// comparison exposed it.)
+	if held.Bad {
+		out.Class = "err"
 	}
 	return out
 }

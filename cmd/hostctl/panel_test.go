@@ -218,11 +218,7 @@ func TestServeThePanelForLooking(t *testing.T) {
 	if addr == "" {
 		t.Skip("set HOSTD_PANEL_ADDR to serve the panel for looking at")
 	}
-	view, sup, _ := actingPanel(t)
-	sup.plan = []supervisor.Change{
-		{Service: "caddy", Action: "recreate", Disruptive: true, Detail: "the image moved"},
-		{Service: "site", Action: "remove", Destructive: true, Detail: "no file declares it any more"},
-	}
+	view, _, _ := actingPanel(t)
 	server := &http.Server{Addr: addr, Handler: view.routes(), ReadHeaderTimeout: 5 * time.Second}
 	t.Log("serving the panel on", addr)
 	_ = server.ListenAndServe()
@@ -624,52 +620,6 @@ func TestTheWindowHasAFloorAndTheSidebarCanHide(t *testing.T) {
 	}
 }
 
-// A window that sits perfectly still while four machines are being reached for
-// the first time reads as a frozen one. It says it is working — but only when
-// the round is slow enough for a person to wonder, or the indicator would
-// blink on every tick and the wire would never be quiet.
-func TestTheWindowIsToldWhenTheFleetIsSlow(t *testing.T) {
-	view := probePanel(t)
-	var pushes []string
-	view.emit = func(js string) { pushes = append(pushes, js) }
-	get(t, view, "/")
-
-	// A round that answers at once says nothing at all.
-	finished := make(chan struct{})
-	close(finished)
-	view.sayIfSlow(finished)
-	if len(pushes) != 0 {
-		t.Fatalf("a quick round announced itself: %q", pushes)
-	}
-
-	// One that drags says so, once.
-	view.working(true)
-	if len(pushes) != 1 || !strings.Contains(pushes[0], "spinner") {
-		t.Fatalf("a slow round did not raise the indicator: %q", pushes)
-	}
-	view.working(true)
-	if len(pushes) != 1 {
-		t.Fatal("the indicator was raised twice for one state")
-	}
-	view.working(false)
-	if len(pushes) != 2 || strings.Contains(pushes[1], "spinner") {
-		t.Fatalf("the indicator was not lowered: %q", pushes)
-	}
-}
-
-// Before the first answer the window already says it is working: that is the
-// round the operator is most likely to mistake for a freeze.
-func TestTheFirstPaintAlreadySaysItIsWorking(t *testing.T) {
-	view, err := newPanel(options{}, []string{"yuki"})
-	if err != nil {
-		t.Fatalf("newPanel: %v", err)
-	}
-	page := get(t, view, "/").Body.String()
-	if !strings.Contains(page, "spinner") || !strings.Contains(page, "asking the fleet") {
-		t.Fatalf("the first paint looks idle: %s", page)
-	}
-}
-
 // The window buttons and the log are about the machines. A page about the
 // panel itself shows neither: a control that governs nothing on screen is a
 // control that lies about what it does.
@@ -726,21 +676,6 @@ func TestAMachineThatIsOffDoesNotHideTheOnesThatAnswered(t *testing.T) {
 	view.snapMu.RUnlock()
 	if !slices.Equal(order, []string{"yuki", "selene", "cronos"}) {
 		t.Fatalf("the machines are in the order they answered, not the order they are listed: %v", order)
-	}
-}
-
-// While a machine is being reached, the window is told WHICH one: "working"
-// with no name is indistinguishable from stuck.
-func TestTheIndicatorNamesTheMachineItIsWaitingOn(t *testing.T) {
-	view := probePanel(t)
-	view.snapMu.Lock()
-	view.snap.Busy = true
-	view.snap.Reaching = []string{"cronos"}
-	view.snapMu.Unlock()
-
-	page := get(t, view, "/").Body.String()
-	if !strings.Contains(page, "asking cronos") {
-		t.Fatalf("the indicator does not say what it is waiting on: %s", page)
 	}
 }
 
@@ -930,70 +865,5 @@ func TestReloadDropsTheMachineFromThePicture(t *testing.T) {
 	page := get(t, view, "/").Body.String()
 	if strings.Contains(page, "selene") {
 		t.Fatalf("a machine the inventory stopped listing is still drawn: %s", page)
-	}
-}
-
-// The status lives in the sidebar's foot, and a narrow window puts the sidebar
-// away — which left a click with no sign anywhere that the fleet was being
-// asked. The same news floats under the toolbar, where the eyes are.
-func TestTheIndicatorIsAlsoWhereTheEyesAre(t *testing.T) {
-	view := probePanel(t)
-	page := get(t, view, "/").Body.String()
-	if !strings.Contains(page, `id="working" hidden`) {
-		t.Fatalf("a quiet fleet does not put the floating indicator away: %s", page)
-	}
-
-	view.snapMu.Lock()
-	view.snap.Busy = true
-	view.snap.Reaching = []string{"cronos"}
-	view.snapMu.Unlock()
-	answer := get(t, view, "/act/refresh").Body.String()
-	if !strings.Contains(answer, `id="working"`) || strings.Contains(answer, `id="working" hidden`) {
-		t.Fatalf("a slow fleet does not raise the floating indicator: %q", answer)
-	}
-	if !strings.Contains(answer, "asking cronos") {
-		t.Fatalf("the floating indicator does not name the machine it waits on: %q", answer)
-	}
-}
-
-// The actions fold into one ⋯ menu, so the row and the heading stay one size
-// while the list of operations grows. The script must know how to open it,
-// put it away, and read the command off whatever was clicked inside it.
-func TestServiceActionsFoldIntoAMenu(t *testing.T) {
-	view := probePanel(t)
-	get(t, view, "/")
-	host := get(t, view, "/act/select/host/yuki").Body.String()
-	if !strings.Contains(host, `data-ui="menu"`) {
-		t.Fatalf("the service rows carry no actions menu: %s", host)
-	}
-	if !strings.Contains(host, `data-act="confirm/add/yuki"`) {
-		t.Fatalf("the machine's page has no way to deploy something new: %s", host)
-	}
-
-	script, err := ui.ReadFile("ui/app.js")
-	if err != nil {
-		t.Fatalf("read app.js: %v", err)
-	}
-	for _, needed := range []string{`dataset.ui === "menu"`, "closeMenus", `closest("[data-command]")`} {
-		if !strings.Contains(string(script), needed) {
-			t.Fatalf("app.js lost %q, which the menu depends on", needed)
-		}
-	}
-}
-
-// Every operation a service offers opens its confirmation first: the menu
-// item carries the confirm act, never the run itself — a slip of the pointer
-// must not stop anything.
-func TestEveryServiceActionAsksBeforeActing(t *testing.T) {
-	view := probePanel(t)
-	get(t, view, "/")
-	page := get(t, view, "/act/select/service/yuki/caddy").Body.String()
-	for _, label := range []string{"restart", "stop", "start", "deploy", "remove"} {
-		if !strings.Contains(page, `data-act="confirm/`+label+`/yuki/caddy"`) {
-			t.Fatalf("the service's menu does not confirm %q: %s", label, page)
-		}
-	}
-	if strings.Contains(page, `data-act="run/`) {
-		t.Fatalf("something on the page runs without confirming: %s", page)
 	}
 }

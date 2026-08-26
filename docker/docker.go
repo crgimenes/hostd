@@ -744,10 +744,17 @@ func (c *Client) Events(ctx context.Context, since time.Time, label string, fn f
 	}
 }
 
-// Pull asks this runtime to fetch an image from its registry. Errors arrive
-// inside the 200 stream as {"error": ...} lines, so the stream is read to the
-// end and the last error found is the answer.
-func (c *Client) Pull(ctx context.Context, image string) error {
+// How often a transfer says where it got to. A pull of a gigabyte emits
+// thousands of status frames; one line a second reads like progress without
+// burying everything else that is happening.
+const progressInterval = time.Second
+
+// Pull asks this runtime to fetch an image from its registry, and reports what
+// it is doing as it goes: waiting in front of a silent gigabyte is the whole
+// reason somebody starts clicking again. Errors arrive inside the 200 stream
+// as {"error": ...} lines, so the stream is read to the end and the last error
+// found is the answer.
+func (c *Client) Pull(ctx context.Context, image string, progress func(string)) error {
 	name, tag, found := strings.Cut(image, ":")
 	if !found {
 		tag = "latest"
@@ -760,9 +767,13 @@ func (c *Client) Pull(ctx context.Context, image string) error {
 	defer func() { _ = resp.Body.Close() }()
 	decoder := json.NewDecoder(resp.Body)
 	pullErr := ""
+	said := time.Time{}
 	for {
 		var line struct {
-			Error string `json:"error"`
+			Status   string `json:"status"`
+			ID       string `json:"id"`
+			Progress string `json:"progress"`
+			Error    string `json:"error"`
 		}
 		err = decoder.Decode(&line)
 		if errors.Is(err, io.EOF) {
@@ -773,12 +784,45 @@ func (c *Client) Pull(ctx context.Context, image string) error {
 		}
 		if line.Error != "" {
 			pullErr = line.Error
+			continue
 		}
+		if progress == nil || line.Status == "" || time.Since(said) < progressInterval {
+			continue
+		}
+		said = time.Now()
+		progress(strings.TrimSpace(strings.Join([]string{line.ID, line.Status, line.Progress}, " ")))
 	}
 	if pullErr != "" {
 		return fmt.Errorf("pulling %s: %s", image, pullErr)
 	}
 	return nil
+}
+
+// Progress wraps a reader and says how far it has got, once a second. Nothing
+// here claims a percentage: what `docker save` streams carries no declared
+// length, so the honest report is bytes gone by.
+func Progress(reader io.Reader, say func(int64)) io.Reader {
+	// The clock starts now, not at the zero value: otherwise the first read
+	// reports before any interval has passed, and a transfer that finishes
+	// inside a second says "1.5 KiB sent" and then nothing.
+	return &counter{reader: reader, say: say, said: time.Now()}
+}
+
+type counter struct {
+	reader io.Reader
+	say    func(int64)
+	total  int64
+	said   time.Time
+}
+
+func (c *counter) Read(p []byte) (int, error) {
+	read, err := c.reader.Read(p)
+	c.total += int64(read)
+	if time.Since(c.said) >= progressInterval {
+		c.said = time.Now()
+		c.say(c.total)
+	}
+	return read, err
 }
 
 // Save streams an image out of the runtime as a tar, which is what crosses the

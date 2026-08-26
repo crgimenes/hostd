@@ -318,6 +318,17 @@ func (s *Supervisor) retire(ctx context.Context, svc service.Service) {
 		return
 	}
 	container := containerName(svc.Name)
+	s.sayStopping(svc)
 	_ = client.Stop(ctx, container, svc.StopGrace())
 	_ = client.Remove(ctx, container)
+}
+
+// sayStopping puts the wait in the timeline BEFORE it is waited out. A service
+// whose process ignores SIGTERM spends its whole grace period dying, and
+// thirty seconds of a screen with nothing on it is what makes an operator
+// conclude that nothing happened and click again. Naming the budget also says
+// where to change it: stop-timeout, in the declaration.
+func (s *Supervisor) sayStopping(svc service.Service) {
+	s.event(logs.EventStopped, svc.Name, fmt.Sprintf(
+		"asking it to stop, waiting up to %s for it to go (stop-timeout)", svc.StopGrace()))
 }

@@ -39,20 +39,6 @@
   </section>
 </div>
 
-{{.working}}
-
-<dialog id="command">
-  <h3 id="commandTitle">The panel does not change anything</h3>
-  <p id="commandNote">Run this where you keep your tree:</p>
-  <code id="commandText"></code>
-  <div class="actions">
-    <button id="dismiss">Close</button>
-    <button id="copy" class="default">Copy</button>
-  </div>
-</dialog>
-
-<dialog id="action"></dialog>
-
 <script src="/asset/app.js"></script>
 </body>
 </html>{{end}}
@@ -78,9 +64,7 @@
 {{define "treeDot"}}<span id="{{.DotID}}" class="dot {{.Dot}}"></span>{{end}}
 {{define "treeMeta"}}<span id="{{.MetaID}}" class="meta">{{.Meta}}</span>{{end}}
 
-{{define "status"}}<span id="status" class="{{if .Busy}}busy{{end}}">{{if .Busy}}<span class="spinner" aria-hidden="true"></span>{{end}}{{.Text}}</span>{{end}}
-
-{{define "working"}}<span id="working"{{if not .Busy}} hidden{{end}}>{{if .Busy}}<span class="spinner" aria-hidden="true"></span>{{.Text}}{{end}}</span>{{end}}
+{{define "status"}}<span id="status">{{.Text}}</span>{{end}}
 
 {{define "detail"}}<div id="detail" data-log="{{if .Watching}}on{{else}}off{{end}}">
   <header id="toolbar">
@@ -112,8 +96,9 @@
       <section class="card{{if .Link}} machineCard{{end}}"{{if .Link}} data-act="{{.Link}}"{{end}}>
         <h2><span>{{.Heading}}</span>{{if .Aside}}{{template "cardAside" .}}{{end}}
           {{- if .Buttons}}<span class="headActions">
-            {{- if .Menu}}{{template "actions" .Buttons}}
-            {{- else}}{{range .Buttons}}<button class="push"{{if .Act}} data-act="{{.Act}}"{{else}} data-command="{{.Command}}"{{end}}>{{if .Icon}}{{icon .Icon}}{{end}}<span>{{.Label}}</span></button>{{end}}{{end}}</span>{{end}}</h2>
+            {{- if .Machines}}<select class="where" aria-label="machine">{{range .Machines}}<option value="{{.}}">{{.}}</option>{{end}}</select>{{end}}
+            {{- range .Buttons}}<button class="push"{{if .Act}} data-act="{{.Act}}"{{end}}{{if .Deploy}} data-deploy="{{.Deploy}}"{{end}}{{if .Busy}} disabled{{end}}>{{if .Icon}}{{icon .Icon}}{{end}}<span>{{.Label}}</span></button>
+            {{- end}}</span>{{end}}</h2>
         {{- if .Problem}}<p class="problem">{{.Problem}}</p>{{end}}
         {{- if .Numbers}}{{template "statBlock" .}}{{end}}
         {{- if .Head}}
@@ -126,9 +111,8 @@
             <td class="dim">{{.Image}}</td>
             {{template "rowUptime" .}}
             {{template "rowRestarts" .}}
-            <td class="actions">{{template "actions" .Buttons}}</td>
           </tr>
-          {{- if .Problem}}<tr><td class="wide problem" colspan="6">{{.Problem}}</td></tr>{{end}}
+          {{- if .Problem}}<tr><td class="wide problem" colspan="5">{{.Problem}}</td></tr>{{end}}
           {{- end}}
           {{- if not .Rows}}<tr><td class="dim">no service is declared here</td></tr>{{end}}
         </table>
@@ -150,33 +134,6 @@
 </div>{{end}}
 
 {{define "cardAside"}}<span id="{{.AsideID}}" class="aside">{{.Aside}}</span>{{end}}
-
-{{define "actions"}}<span class="menu"><button class="push menuBtn" data-ui="menu" title="Actions" aria-label="Actions" aria-haspopup="menu">{{icon "three-dots"}}</button><div class="menuList" hidden role="menu">
-  {{- range .}}<button role="menuitem"{{if .Act}} data-act="{{.Act}}"{{else}} data-command="{{.Command}}"{{end}}>{{if .Icon}}{{icon .Icon}}{{end}}<span>{{.Label}}</span></button>
-  {{- end}}</div></span>{{end}}
-
-{{define "actionDialog"}}<dialog id="action" data-open="1"{{if .Corner}} data-corner="1"{{end}}>
-  <h3>{{.Title}}</h3>
-  {{- range .Notes}}<p class="dialogNote">{{.}}</p>{{end}}
-  {{- if .Choices}}<div class="choices">
-    {{- range .Choices}}<button data-act="{{.Act}}">{{if .Icon}}{{icon .Icon}}{{end}}<span>{{.Label}}</span></button>
-    {{- end}}</div>
-  {{- end}}
-  {{- if .Grid}}
-  <table class="plan">
-    <tr>{{range .GridHead}}<th>{{.}}</th>{{end}}</tr>
-    {{- range .Grid}}
-    <tr>{{range .}}<td>{{.}}</td>{{end}}</tr>
-    {{- end}}
-  </table>
-  {{- end}}
-  {{- if .Outcome}}<p class="outcome{{if .Bad}} bad{{end}}">{{.Outcome}}</p>{{end}}
-  {{- if .Command}}<p class="dialogNote dim">the command line does the same with:</p><code>{{.Command}}</code>{{end}}
-  <div class="actions">
-    <button data-ui="close-action">Close</button>
-    {{- if .Confirm.Label}}<button class="{{if .Danger}}danger{{else}}default{{end}}" data-act="{{.Confirm.Act}}">{{.Confirm.Label}}</button>{{end}}
-  </div>
-</dialog>{{end}}
 
 {{define "statBlock"}}<div id="{{.StatID}}" class="stat">{{range .Numbers}}<div><span class="value">{{.Value}}</span><span class="of">{{.Of}}</span></div>{{end}}</div>{{end}}
 

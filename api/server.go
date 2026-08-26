@@ -537,7 +537,21 @@ func (s *Server) pullImage(ctx context.Context, req Request, actor string) Respo
 		return Response{Code: CodeInvalid, Message: "a pull needs the image to fetch"}
 	}
 	entry := state.Entry{Operation: req.Op, Target: req.Name, Actor: actor, OnBehalfOf: req.OnBehalfOf}
-	err := s.runtime.Pull(ctx, req.Name)
+	// The pull's own progress goes into this machine's timeline, so it reaches
+	// whoever is watching by the same road every other line takes. Waiting in
+	// front of a silent gigabyte is what makes somebody click again.
+	said := req.Service
+	if said == "" {
+		said = "hostd"
+	}
+	err := s.runtime.Pull(ctx, req.Name, func(progress string) {
+		s.log.Append(logs.Record{
+			Service: said,
+			Stream:  logs.StreamEvent,
+			Kind:    logs.EventImage,
+			Text:    progress,
+		})
+	})
 	if err != nil {
 		entry.Result = state.ResultFailed
 		entry.Detail = err.Error()

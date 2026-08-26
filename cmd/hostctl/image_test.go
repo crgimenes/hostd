@@ -153,18 +153,22 @@ func TestImagesSomethingElseBuiltAreShownButNotCountedAsOurs(t *testing.T) {
 	}
 }
 
-// The image screen is about what a machine is STORING, not what it is doing.
-// The log and the window buttons govern nothing here.
-func TestTheImageScreenCarriesNoLogAndNoWindowButtons(t *testing.T) {
+// The image screen carries the log, because the cleanup that runs from it
+// reports there — the log is where every action on this window tells its
+// story, and a screen that can act is a screen that needs it.
+func TestTheImageScreenCarriesTheLogItReportsInto(t *testing.T) {
 	view := probePanel(t)
+	view.snap.Fleet[0].Images = []api.ImageEntry{
+		{Digest: "sha256:1", Tags: []string{"site:hostd-abc"}, Bytes: 1 << 20, Managed: true},
+	}
 	get(t, view, "/")
 
 	body := get(t, view, "/act/select/images/yuki").Body.String()
-	if !strings.Contains(body, `data-log="off"`) {
-		t.Fatalf("the image screen still asks for the log pane:\n%s", body)
+	if !strings.Contains(body, `data-log="on"`) {
+		t.Fatalf("the image screen has nowhere to report a cleanup:\n%s", body)
 	}
-	if strings.Contains(body, `data-act="window/3600"`) {
-		t.Fatalf("the image screen offers a window control that governs nothing:\n%s", body)
+	if !strings.Contains(body, `data-act="do/prune/yuki"`) {
+		t.Fatalf("the image screen cannot clean up:\n%s", body)
 	}
 }
 
