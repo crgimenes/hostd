@@ -292,18 +292,18 @@ func (c *Client) Create(ctx context.Context, spec Spec) (string, error) {
 // interrupting the service, which is the whole point of applying a file.
 func (c *Client) UpdateRestart(ctx context.Context, id, policy string) error {
 	body := map[string]any{"RestartPolicy": map[string]any{"Name": policy}}
-	return c.call(ctx, http.MethodPost, "/containers/"+id+"/update", nil, body, nil)
+	return c.call(ctx, http.MethodPost, "/containers/"+url.PathEscape(id)+"/update", nil, body, nil)
 }
 
 func (c *Client) Start(ctx context.Context, id string) error {
-	return c.call(ctx, http.MethodPost, "/containers/"+id+"/start", nil, nil, nil)
+	return c.call(ctx, http.MethodPost, "/containers/"+url.PathEscape(id)+"/start", nil, nil, nil)
 }
 
 // Stop asks, waits, and the runtime kills what did not go. The grace is the
 // service's own, so a database gets the patience it was declared with.
 func (c *Client) Stop(ctx context.Context, id string, grace time.Duration) error {
 	query := url.Values{"t": {fmt.Sprint(int(grace.Seconds()))}}
-	err := c.call(ctx, http.MethodPost, "/containers/"+id+"/stop", query, nil, nil)
+	err := c.call(ctx, http.MethodPost, "/containers/"+url.PathEscape(id)+"/stop", query, nil, nil)
 	if errors.Is(err, ErrNotFound) {
 		return nil
 	}
@@ -312,7 +312,7 @@ func (c *Client) Stop(ctx context.Context, id string, grace time.Duration) error
 
 func (c *Client) Remove(ctx context.Context, id string) error {
 	query := url.Values{"force": {"true"}, "v": {"false"}}
-	err := c.call(ctx, http.MethodDelete, "/containers/"+id, query, nil, nil)
+	err := c.call(ctx, http.MethodDelete, "/containers/"+url.PathEscape(id), query, nil, nil)
 	if errors.Is(err, ErrNotFound) {
 		return nil
 	}
@@ -370,7 +370,7 @@ func (c *Client) Inspect(ctx context.Context, id string) (Container, error) {
 			Image string `json:"Image"`
 		} `json:"Config"`
 	}
-	err := c.call(ctx, http.MethodGet, "/containers/"+id+"/json", nil, nil, &raw)
+	err := c.call(ctx, http.MethodGet, "/containers/"+url.PathEscape(id)+"/json", nil, nil, &raw)
 	if err != nil {
 		return Container{}, err
 	}
@@ -442,7 +442,7 @@ func (c *Client) Wait(ctx context.Context, id string) (int, error) {
 			Message string `json:"Message"`
 		} `json:"Error"`
 	}
-	err := c.call(ctx, http.MethodPost, "/containers/"+id+"/wait", nil, nil, &result)
+	err := c.call(ctx, http.MethodPost, "/containers/"+url.PathEscape(id)+"/wait", nil, nil, &result)
 	if err != nil {
 		return -1, err
 	}
@@ -637,7 +637,7 @@ func (c *Client) Logs(ctx context.Context, id string, since time.Time, fn func(L
 		// Nanoseconds, so resuming does not replay the line it stopped on.
 		query.Set("since", fmt.Sprintf("%d.%09d", since.Unix(), since.Nanosecond()))
 	}
-	resp, err := c.do(ctx, http.MethodGet, "/containers/"+id+"/logs", query, nil)
+	resp, err := c.do(ctx, http.MethodGet, "/containers/"+url.PathEscape(id)+"/logs", query, nil)
 	if err != nil {
 		return err
 	}

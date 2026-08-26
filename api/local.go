@@ -101,16 +101,28 @@ func Stdio(socket string, in io.Reader, out io.Writer) error {
 // enough that a person watching does not conclude the program hung.
 const connectTimeout = 10
 
-func DialSSH(ctx context.Context, host string, remote []string) (*Client, error) {
-	arguments := append([]string{
+// SSHArguments builds the argument list, with the machine's name after a "--"
+// that ends option parsing.
+//
+// Without it a name beginning with a dash IS an option: ssh reads
+// "-oProxyCommand=..." as one and runs whatever it says, on this machine. The
+// names do not all come from the operator's keyboard — -all and -tag read them
+// out of the inventory FILE, which travels in a tree and may have been written
+// by somebody else. That file is a trust boundary, and this is where it is
+// crossed.
+func SSHArguments(host string, remote []string) []string {
+	return append([]string{
 		"-o", "BatchMode=yes",
 		"-o", fmt.Sprintf("ConnectTimeout=%d", connectTimeout),
+		"--",
 		host,
 	}, remote...)
-	// #nosec G204 -- the host and the remote command come from the operator's
-	// own flags and configuration, which is the same trust as the shell they
-	// typed them in
-	cmd := exec.CommandContext(ctx, "ssh", arguments...)
+}
+
+func DialSSH(ctx context.Context, host string, remote []string) (*Client, error) {
+	// #nosec G204 -- the remote command comes from the operator's own flag, and
+	// the host cannot be read as an option: see SSHArguments
+	cmd := exec.CommandContext(ctx, "ssh", SSHArguments(host, remote)...)
 	in, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err

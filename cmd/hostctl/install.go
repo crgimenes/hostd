@@ -103,7 +103,7 @@ func runInstall(ctx context.Context, opt options, args []string) (int, error) {
 	// ten minutes of "permission denied" nobody can explain. Ending the master
 	// makes the next command a fresh login. It happens BEFORE the check below,
 	// which is the first thing to need the group on a first install.
-	_ = exec.CommandContext(ctx, "ssh", "-O", "exit", host).Run() // #nosec G204 -- the host is the operator's own flag
+	_ = exec.CommandContext(ctx, "ssh", "-O", "exit", "--", host).Run() // #nosec G204 -- "--" keeps the name a name
 
 	// The version that came up is not the whole question. A daemon that came
 	// back having lost the work it was supervising is not a good upgrade, and
@@ -323,7 +323,10 @@ func remoteOutput(ctx context.Context, host, command string) string {
 func remoteOutputErr(ctx context.Context, host, command string, stdin []byte) (string, error) {
 	// #nosec G204 -- the host comes from the operator's own flags, which is the
 	// same trust as the shell they typed them in
-	cmd := exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", host, command)
+	// The "--" ends option parsing: a machine name beginning with a dash would
+	// otherwise be an ssh option rather than a host, and the names come out of
+	// the inventory file as well as out of flags.
+	cmd := exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", "--", host, command)
 	if len(stdin) > 0 {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}

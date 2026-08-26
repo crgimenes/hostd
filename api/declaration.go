@@ -106,8 +106,11 @@ func (s *Server) writeDeclaration(incoming Declaration) error {
 	kept := make([]string, 0, len(incoming.Artifacts))
 	for _, artifact := range incoming.Artifacts {
 		// A name with a path in it would write outside the directory it was
-		// sent for; the name is a name.
-		if artifact.Name != filepath.Base(artifact.Name) || artifact.Name == "" || artifact.Name == "." {
+		// sent for; the name is a name. ".." is the one that reads as a name
+		// and is not: filepath.Base leaves it alone, and joining it lands in
+		// the services directory itself. The write fails there because a
+		// directory is not a file, which is luck rather than a guard.
+		if !plainFileName(artifact.Name) {
 			return fmt.Errorf("%q is not a file name", artifact.Name)
 		}
 		content, decodeErr := base64.StdEncoding.DecodeString(artifact.Content)
@@ -139,6 +142,14 @@ func (s *Server) writeDeclaration(incoming Declaration) error {
 }
 
 // Half a file on disk is a declaration that reads as something nobody wrote.
+func plainFileName(name string) bool {
+	switch name {
+	case "", ".", "..":
+		return false
+	}
+	return name == filepath.Base(name)
+}
+
 func writeAtomic(path string, content []byte, mode os.FileMode) error {
 	temporary, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
 	if err != nil {
