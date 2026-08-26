@@ -12,6 +12,7 @@ import (
 
 	"github.com/crgimenes/hostd/daemon"
 	"github.com/crgimenes/hostd/supervisor"
+	"github.com/crgimenes/hostd/version"
 )
 
 // Putting hostd on a machine is copying a binary and activating a service.
@@ -46,6 +47,16 @@ func runInstall(ctx context.Context, opt options, args []string) (int, error) {
 	// bare success. A machine with no hostd yet answers nothing, which is the
 	// honest before-state of a first install.
 	before := strings.TrimSpace(remoteOutput(ctx, host, "/usr/local/bin/hostd -version 2>/dev/null || true"))
+
+	// An old client installing "its" daemon over a newer one is a downgrade
+	// wearing the word upgrade, and it is the mistake this whole comparison
+	// exists to catch: the operator forgot to update hostctl, and -all install
+	// would walk the fleet backwards. Refused before anything is sent, because
+	// after the restart the damage is already done.
+	behind, refusal := goingBackwards(host, before, daemon.Version())
+	if behind && !opt.allowDestr {
+		return exitRefused, refusal
+	}
 
 	// And what it is DOING now, which is what the upgrade must not change. A
 	// machine with no daemon yet has nothing to lose, and says so by answering
@@ -148,6 +159,35 @@ func runningServices(ctx context.Context, opt options, host string) []supervisor
 	return runningIn(statuses)
 }
 
+// goingBackwards reads the version line the machine answered and says whether
+// installing would take it back. A machine that answers nothing has no hostd
+// yet, and a line neither side can rank is not called a downgrade: refusing on
+// a guess would block the install that repairs a machine answering nonsense.
+func goingBackwards(host, before, carried string) (bool, error) {
+	running := versionIn(before)
+	if running == "" || carried == "" {
+		return false, nil
+	}
+	order, comparable := version.Compare(running, carried)
+	if !comparable || order <= 0 {
+		return false, nil
+	}
+	return true, fmt.Errorf(
+		"%s runs %s and this hostctl carries %s, so installing would take it backwards; update hostctl, or pass -allow-destructive if going back is what you mean",
+		host, running, carried)
+}
+
+// "hostd <version> (protocol N, schema N)" is what a daemon answers, but a
+// machine can answer anything: what cannot be read is reported as no version
+// rather than indexed into.
+func versionIn(line string) string {
+	fields := strings.Fields(line)
+	if len(fields) < 2 {
+		return ""
+	}
+	return fields[1]
+}
+
 // What changed, in the words an operator is asking in: a first install, an
 // upgrade from a named version, or a machine that already had this one.
 func transition(before, now string) string {
@@ -157,14 +197,17 @@ func transition(before, now string) string {
 	case strings.Contains(before, now):
 		return "unchanged"
 	}
-	// "hostd <version> (protocol N, schema N)" is what the old daemon answers, but a
-	// machine can answer anything: an unparseable line is reported whole rather
-	// than indexed into.
-	was := strings.Fields(before)
-	if len(was) < 2 {
+	was := versionIn(before)
+	if was == "" {
 		return "upgraded"
 	}
-	return "upgraded from " + was[1]
+	// Calling a downgrade an upgrade is the kind of small lie that gets
+	// believed later, when somebody reads the line and stops looking.
+	order, comparable := version.Compare(was, now)
+	if comparable && order > 0 {
+		return "downgraded from " + was
+	}
+	return "upgraded from " + was
 }
 
 // The daemon for the machine's architecture, or the reason there is none. A

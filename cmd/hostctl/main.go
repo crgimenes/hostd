@@ -262,6 +262,8 @@ usage:
   hostctl -all status                  ask every machine at once
   hostctl status                       what every service is doing
   hostctl describe                     versions and capabilities of the daemon
+  hostctl -all version                 which machines are behind the daemon this
+                                       hostctl carries, and which are ahead of it
   hostctl service list                 same as status, by service
   hostctl service versions <name>      which versions it could be put back on
   hostctl job run <name>               run a job now, without waiting for it
@@ -371,6 +373,8 @@ func dispatch(ctx context.Context, opt options, args []string) (int, error) {
 		return runStatus(ctx, client, opt)
 	case "describe":
 		return runDescribe(ctx, client, opt)
+	case "version":
+		return runFleetVersion(ctx, client, opt, args[1:])
 	case "service":
 		return runService(ctx, client, opt, args[1:])
 	case "plan":

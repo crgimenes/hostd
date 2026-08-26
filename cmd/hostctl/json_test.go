@@ -97,6 +97,7 @@ func TestTheJSONNamesMatchTheFiloNames(t *testing.T) {
 		api.Description{}, api.ImageEntry{}, api.ImagePrune{}, api.ImageChange{},
 		api.Image{}, api.LogLine{},
 		api.ServiceVersions{}, api.ServiceVersion{}, api.JobRun{},
+		fleetVersion{},
 		supervisor.Status{}, supervisor.Change{},
 		state.Entry{}, metrics.Series{}, metrics.Point{},
 	} {
