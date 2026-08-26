@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -836,5 +837,116 @@ func TestTheLogPaneElementsExistForTheScriptThatDrivesThem(t *testing.T) {
 	// pane is built the way it is.
 	if !strings.Contains(page, `data-swap="append:#lines"`) && !strings.Contains(string(script), "append:") {
 		t.Error("nothing in the page or the script appends log lines, so the pane must be redrawing them")
+	}
+}
+
+// Why each machine has its own loop: a fleet-wide round ends when its slowest
+// machine does, so one that is switched off — ten seconds of ssh giving up —
+// sat in front of every answer the operator was waiting for, and a click
+// looked like nothing happened.
+func TestASlowMachineDoesNotDelayAnothersAnswer(t *testing.T) {
+	view := probePanel(t)
+	stuck := make(chan struct{})
+	fast := make(chan string, 64)
+	view.ask = func(ctx context.Context, host string, fromMS, toMS float64, since uint64, wantImages bool) fleetHost {
+		if host == "selene" {
+			select {
+			case <-stuck:
+			case <-ctx.Done():
+			}
+			return fleetHost{Host: host}
+		}
+		fast <- host
+		return fleetHost{Host: host}
+	}
+	watching := t.Context()
+	defer close(stuck)
+	view.start(watching)
+
+	// Well under the ticker, so the answer can only have come from the first
+	// round or a nudge — never from the clock covering for a loop that waited.
+	prompt := pollInterval - 500*time.Millisecond
+	select {
+	case <-fast:
+	case <-time.After(prompt):
+		t.Fatal("yuki's answer waited on selene")
+	}
+	view.wake()
+	select {
+	case <-fast:
+	case <-time.After(prompt):
+		t.Fatal("a nudge waited on the machine that is stuck")
+	}
+}
+
+// The loops follow the inventory: a machine that leaves it stops being asked.
+func TestTheLoopsFollowTheInventory(t *testing.T) {
+	view := probePanel(t)
+	view.ask = func(ctx context.Context, host string, fromMS, toMS float64, since uint64, wantImages bool) fleetHost {
+		return fleetHost{Host: host}
+	}
+	watching := t.Context()
+	view.start(watching)
+
+	view.mu.Lock()
+	started := len(view.loops)
+	view.mu.Unlock()
+	if started != 2 {
+		t.Fatalf("2 machines, %d loop(s)", started)
+	}
+
+	view.mu.Lock()
+	view.hosts = []string{"yuki"}
+	view.mu.Unlock()
+	view.syncLoops()
+	view.mu.Lock()
+	_, still := view.loops["selene"]
+	kept := len(view.loops)
+	view.mu.Unlock()
+	if still || kept != 1 {
+		t.Fatalf("the loops do not match the inventory: %d loop(s)", kept)
+	}
+}
+
+// A machine taken out of the inventory leaves the picture with the reload,
+// not when the window is next opened.
+func TestReloadDropsTheMachineFromThePicture(t *testing.T) {
+	view := probePanel(t)
+	dir := t.TempDir()
+	view.cfgDir = dir
+	err := os.WriteFile(filepath.Join(dir, "inventory.filo"), []byte(`(inventory
+	  (host (tuple "name" "yuki")))`), 0o600)
+	if err != nil {
+		t.Fatalf("write inventory: %v", err)
+	}
+
+	get(t, view, "/")
+	get(t, view, "/act/config/reload")
+	page := get(t, view, "/").Body.String()
+	if strings.Contains(page, "selene") {
+		t.Fatalf("a machine the inventory stopped listing is still drawn: %s", page)
+	}
+}
+
+// The status lives in the sidebar's foot, and a narrow window puts the sidebar
+// away — which left a click with no sign anywhere that the fleet was being
+// asked. The same news floats under the toolbar, where the eyes are.
+func TestTheIndicatorIsAlsoWhereTheEyesAre(t *testing.T) {
+	view := probePanel(t)
+	page := get(t, view, "/").Body.String()
+	if !strings.Contains(page, `id="working" hidden`) {
+		t.Fatalf("a quiet fleet does not put the floating indicator away: %s", page)
+	}
+
+	view.snapMu.Lock()
+	view.snap.Busy = true
+	view.snap.Reaching = []string{"cronos"}
+	view.snapMu.Unlock()
+	answer := get(t, view, "/act/refresh").Body.String()
+	if !strings.Contains(answer, `id="working"`) || strings.Contains(answer, `id="working" hidden`) {
+		t.Fatalf("a slow fleet does not raise the floating indicator: %q", answer)
+	}
+	if !strings.Contains(answer, "asking cronos") {
+		t.Fatalf("the floating indicator does not name the machine it waits on: %q", answer)
 	}
 }

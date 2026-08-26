@@ -239,6 +239,10 @@ func (p *panel) fragments() []fragment {
 	}
 	out = append(out, detail.volatiles(p)...)
 	out = append(out, p.render("status", "status", statusOf(snap)))
+	// The same news twice on purpose: the status lives in the sidebar's foot,
+	// and on a narrow window the sidebar is put away — which left a click with
+	// no sign anywhere that the fleet is being asked.
+	out = append(out, p.render("working", "working", statusOf(snap)))
 	return out
 }
 

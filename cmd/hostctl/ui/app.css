@@ -343,6 +343,33 @@ body.narrow .narrowOnly {
 	color: var(--failed);
 }
 
+/* The status again, where the eyes are: floating under the toolbar, because on
+   a narrow window the sidebar — and the only other indicator — is put away. */
+#working {
+	position: fixed;
+	top: calc(var(--toolbar) + 10px);
+	right: 14px;
+	z-index: 30;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	max-width: min(60vw, 340px);
+	padding: 4px 10px;
+	font-size: 11px;
+	color: var(--secondary);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	background: var(--bg);
+	border: 1px solid var(--separator);
+	border-radius: 20px;
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+}
+
+#working[hidden] {
+	display: none;
+}
+
 /* The two things that can be dragged: the sidebar's edge and the log's top. */
 
 #grip {

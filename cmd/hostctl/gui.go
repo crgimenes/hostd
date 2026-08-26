@@ -48,10 +48,16 @@ type panel struct {
 	// other refresh found four broken pipes where its fleet used to be.
 	life context.Context
 
-	// The machines and their connections share one lock: letting go of a
-	// machine and closing what was open for it is one decision.
+	// The machines, their connections and their loops share one lock: letting
+	// go of a machine, closing what was open for it and stopping its loop is
+	// one decision.
 	mu      sync.Mutex
 	clients map[string]*api.Client
+	loops   map[string]*hostLoop
+
+	// one behind a seam: proving a slow machine cannot delay a fast one needs
+	// a machine that is slow on purpose.
+	ask func(ctx context.Context, host string, fromMS, toMS float64, since uint64, wantImages bool) fleetHost
 
 	// Where the panel's tree lives, changeable from the Settings page: the
 	// window is also for people who do not live in a terminal, and a path
@@ -74,9 +80,6 @@ type panel struct {
 
 	viewMu sync.Mutex
 	view   viewState
-
-	// Rings the poller: the one goroutine allowed to talk to the fleet.
-	nudge chan struct{}
 
 	// How the fleet reaches the window: the poller pushes what changed into
 	// the page, and a round where nothing changed pushes nothing. The page
@@ -103,18 +106,20 @@ func newPanel(opt options, hosts []string) (*panel, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &panel{
+	view := &panel{
 		opt:     opt,
 		hosts:   hosts,
 		cfgDir:  opt.config,
 		clients: map[string]*api.Client{},
+		loops:   map[string]*hostLoop{},
 		since:   map[string]uint64{},
 		held:    map[string]bool{},
 		sent:    map[string]string{},
-		nudge:   make(chan struct{}, 1),
 		view:    viewState{kind: "fleet", window: 3600, closed: map[string]bool{}},
 		pages:   pages,
-	}, nil
+	}
+	view.ask = view.one
+	return view, nil
 }
 
 // Fleet answers with everything the overview needs, one entry per machine. A
@@ -132,33 +137,6 @@ type fleetHost struct {
 	Images      []api.ImageEntry `json:"images"`
 	ImagesError string           `json:"images-error,omitempty"`
 	Since       uint64           `json:"since"`
-}
-
-// Fleet asks every machine at once. The window in seconds is how far back the
-// graphs reach, unless the operator dragged a range on a chart, which arrives
-// as fromMS and toMS and is used instead. since is the last log sequence the
-// panel already has, so a round carries only what is new.
-// Fleet asks every machine at once and hands each answer over the moment it
-// arrives. It does NOT wait for the slowest: a machine that is switched off
-// takes as long as ssh takes to give up, and waiting for it would hide every
-// machine that answered — which is the whole fleet gone from the window
-// because one of them is unplugged.
-func (p *panel) Fleet(window int, fromMS, toMS float64, since map[string]uint64, imagesFor string, arrived func(fleetHost)) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-
-	if fromMS <= 0 {
-		fromMS = float64(time.Now().Add(-time.Duration(window) * time.Second).UnixMilli())
-		toMS = 0
-	}
-
-	var wg sync.WaitGroup
-	for _, host := range p.hostsNow() {
-		wg.Go(func() {
-			arrived(p.one(ctx, host, fromMS, toMS, since[host], host == imagesFor))
-		})
-	}
-	wg.Wait()
 }
 
 func (p *panel) hostsNow() []string {
@@ -228,6 +206,12 @@ func (p *panel) reloadFleet() {
 	}
 	p.hosts = hosts
 	p.mu.Unlock()
+	// A machine taken out of the inventory leaves the picture too: the tree
+	// would otherwise carry it until the window closed.
+	p.snapMu.Lock()
+	p.snap.Fleet = slices.DeleteFunc(p.snap.Fleet, func(known fleetHost) bool { return !kept[known.Host] })
+	p.snapMu.Unlock()
+	p.syncLoops()
 	p.wake()
 }
 
@@ -464,8 +448,7 @@ func runGUI(ctx context.Context, opt options, args []string) (int, error) {
 	// would freeze the window for as long as the slowest machine takes.
 	polling, stop := context.WithCancel(ctx)
 	defer stop()
-	view.life = polling
-	go view.poll(polling)
+	view.start(polling)
 
 	window, err := glaze.NewWithOptions(glaze.Options{
 		SchemeHandlers: map[string]glaze.SchemeHandler{"app": serve(view.routes(), opt.debug)},

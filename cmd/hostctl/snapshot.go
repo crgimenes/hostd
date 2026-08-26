@@ -48,51 +48,122 @@ type line struct {
 	N    uint64
 }
 
-// poll keeps the snapshot current until the window closes. It is the ONLY
-// goroutine that ever talks to the fleet: the scheme handler that serves the
-// page runs on the UI thread, so a handler that waited on ssh would freeze the
-// window — and a handler that talked concurrently with this loop would
-// interleave two requests on one pipe. A handler that needs fresh numbers
-// nudges and answers from what is already held.
-func (p *panel) poll(ctx context.Context) {
+// Each machine is watched by its own loop, and a loop is the only goroutine
+// that ever talks to its machine: the scheme handler that serves the page runs
+// on the UI thread, so a handler that waited on ssh would freeze the window —
+// and two goroutines on one pipe would interleave their requests. A handler
+// that needs fresh numbers nudges and answers from what is already held.
+//
+// One loop per machine rather than one round over the fleet, because a round
+// ends when its slowest machine does: a machine that is switched off spends
+// its ssh timeout on every answer the operator is waiting for, and a click
+// looks like nothing happened. Here it spends that timeout on its own line.
+type hostLoop struct {
+	nudge chan struct{}
+	stop  context.CancelFunc
+}
+
+// start begins watching the fleet; syncLoops keeps the loops matching the
+// inventory from then on.
+func (p *panel) start(ctx context.Context) {
+	p.life = ctx
+	p.syncLoops()
+}
+
+func (p *panel) syncLoops() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	// Not started (the command line, the tests): nothing to keep in step.
+	if p.life == nil {
+		return
+	}
+	kept := make(map[string]bool, len(p.hosts))
+	for _, host := range p.hosts {
+		kept[host] = true
+	}
+	for host, loop := range p.loops {
+		if kept[host] {
+			continue
+		}
+		loop.stop()
+		delete(p.loops, host)
+	}
+	for _, host := range p.hosts {
+		if p.loops[host] != nil {
+			continue
+		}
+		watching, stop := context.WithCancel(p.life)
+		loop := &hostLoop{nudge: make(chan struct{}, 1), stop: stop}
+		p.loops[host] = loop
+		go p.pollHost(watching, host, loop.nudge)
+	}
+}
+
+func (p *panel) pollHost(ctx context.Context, host string, nudge chan struct{}) {
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
-	p.round(ctx)
 	for {
+		p.roundOne(ctx, host)
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-		case <-p.nudge:
+		case <-nudge:
 		}
-		p.round(ctx)
 	}
 }
 
 // asked, not waited for: the handler goes back to the window immediately and
-// the next answer carries what the round brought.
+// the next answer carries what the machines bring.
 func (p *panel) wake() {
-	select {
-	case p.nudge <- struct{}{}:
-	default:
+	p.mu.Lock()
+	loops := make([]*hostLoop, 0, len(p.loops))
+	for _, loop := range p.loops {
+		loops = append(loops, loop)
+	}
+	p.mu.Unlock()
+	for _, loop := range loops {
+		select {
+		case loop.nudge <- struct{}{}:
+		default:
+		}
 	}
 }
 
-func (p *panel) round(ctx context.Context) {
+// roundOne asks one machine and folds the answer in, so the window fills up
+// machine by machine rather than all at once when the last one is done.
+func (p *panel) roundOne(ctx context.Context, host string) {
+	asking, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
 	finished := make(chan struct{})
 	go p.sayIfSlow(finished)
 
 	view := p.viewport()
-	// Each machine is folded in and pushed as it answers, so the window fills
-	// up rather than appearing all at once when the last one is done.
-	p.Fleet(view.window, view.from, view.to, p.sequences(), imagesHost(view), func(answer fleetHost) {
-		p.absorb([]fleetHost{answer})
-		p.push()
-	})
+	// How far back the graphs reach, unless the operator dragged a range on a
+	// chart, which is used instead.
+	fromMS, toMS := view.from, view.to
+	if fromMS <= 0 {
+		fromMS = float64(time.Now().Add(-time.Duration(view.window) * time.Second).UnixMilli())
+		toMS = 0
+	}
+	answer := p.ask(asking, host, fromMS, toMS, p.sequences()[host], host == imagesHost(view))
 
 	close(finished)
-	p.working(false)
+	p.absorb([]fleetHost{answer})
+	p.settle()
 	p.push()
+}
+
+// settle lowers the indicator only when no machine is still being reached:
+// with a loop per machine, the first one home must not silence the ones still
+// out.
+func (p *panel) settle() {
+	p.snapMu.RLock()
+	idle := len(p.snap.Reaching) == 0
+	p.snapMu.RUnlock()
+	if idle {
+		p.working(false)
+	}
 }
 
 // Which machine, if any, is being asked for its images this round: the one
