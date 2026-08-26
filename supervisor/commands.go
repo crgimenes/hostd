@@ -275,6 +275,13 @@ func (s *Supervisor) heldBy(name string) (held, bool) {
 // definition did not change keeps its container: applying configuration must
 // not restart the machine's work for nothing.
 func (s *Supervisor) Apply(declared []service.Service) []Change {
+	// Excludes the drift round for the whole apply, so nothing this takes away
+	// is brought back by a round that read the declarations a moment earlier.
+	// Stop below does not take this lock, which is what keeps the two from
+	// meeting each other here.
+	s.converge.Lock()
+	defer s.converge.Unlock()
+
 	changes := s.Plan(declared)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()

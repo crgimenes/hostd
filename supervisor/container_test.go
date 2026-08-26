@@ -75,6 +75,12 @@ func newHarness(t *testing.T) *harness {
 
 // start2 starts a supervisor the test already built, which the job tests do
 // because they hand it a runtime first.
+//
+// Stopping it is the harness's job, never the test's. A supervisor a test
+// forgot to stop keeps its drift round going for the rest of the package, and
+// its declarations are not the next test's: it removes the container that test
+// just created, or brings back one it retired. Two tests here really did leak
+// one, and that was the whole of the flake in this suite.
 func (h *harness) start2(services ...service.Service) {
 	h.t.Helper()
 	err := h.sup.Adopt(context.Background(), services)
@@ -83,29 +89,26 @@ func (h *harness) start2(services ...service.Service) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	h.cancel = cancel
+	h.t.Cleanup(h.stop)
 	go h.sup.Run(ctx)
 }
 
 func (h *harness) start(services ...service.Service) {
 	h.t.Helper()
 	h.sup = New(h.buffer, h.services)
-	err := h.sup.Adopt(context.Background(), services)
-	if err != nil {
-		h.t.Fatalf("Adopt: %v", err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	h.cancel = cancel
-	go h.sup.Run(ctx)
+	h.start2(services...)
 }
 
 // stop ends the loop the way hostd ends: the containers keep running, because
-// they are the runtime's.
+// they are the runtime's. Idempotent, so a test that stops early and the
+// cleanup that stops anyway do not fight over it.
 func (h *harness) stop() {
 	h.t.Helper()
 	if h.cancel == nil {
 		return
 	}
 	h.cancel()
+	h.cancel = nil
 	select {
 	case <-h.sup.Done():
 	case <-time.After(20 * time.Second):
@@ -190,14 +193,7 @@ func TestRunsAndCapturesAContainer(t *testing.T) {
 	h.sup.Runtime(client)
 
 	svc := container(testService, image, `echo "listening on 80"; echo "warming up" >&2; sleep 30`)
-	err := h.sup.Adopt(context.Background(), []service.Service{svc})
-	if err != nil {
-		t.Fatalf("Adopt: %v", err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	h.cancel = cancel
-	go h.sup.Run(ctx)
-	defer h.stop()
+	h.start2(svc)
 
 	h.waitFor("the container to be running", func() bool { return h.status(testService).State == StateRunning })
 
@@ -233,36 +229,17 @@ func TestAdoptsAContainerAcrossARestart(t *testing.T) {
 	h.sup.Runtime(client)
 
 	svc := container(testService, image, `while true; do echo tick; sleep 1; done`)
-	err := h.sup.Adopt(context.Background(), []service.Service{svc})
-	if err != nil {
-		t.Fatalf("Adopt: %v", err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	h.cancel = cancel
-	go h.sup.Run(ctx)
+	h.start2(svc)
 	h.waitFor("the container to be running", func() bool { return h.status(testService).State == StateRunning })
 	first := h.status(testService)
 
 	// The daemon leaves the way it does on an upgrade: the loop stops, the
 	// container keeps running.
-	cancel()
-	select {
-	case <-h.sup.Done():
-	case <-time.After(20 * time.Second):
-		t.Fatal("the supervisor did not stop")
-	}
+	h.stop()
 
-	next := New(h.buffer, h.services)
-	next.Runtime(client)
-	err = next.Adopt(context.Background(), []service.Service{svc})
-	if err != nil {
-		t.Fatalf("Adopt after restart: %v", err)
-	}
-	h.sup = next
-	ctx, cancel = context.WithCancel(context.Background())
-	h.cancel = cancel
-	go next.Run(ctx)
-	defer h.stop()
+	h.sup = New(h.buffer, h.services)
+	h.sup.Runtime(client)
+	h.start2(svc)
 
 	h.waitFor("the container to be seen again", func() bool { return h.status(testService).State == StateRunning })
 	after := h.status(testService)
@@ -291,17 +268,10 @@ func TestStoppingIsRememberedByTheRuntime(t *testing.T) {
 	// such record, and a stop that ends in a kill reads as the kill it was.
 	svc := container(testService, image, `while true; do sleep 1; done`)
 	svc.Restart = service.RestartAlways
-	err := h.sup.Adopt(context.Background(), []service.Service{svc})
-	if err != nil {
-		t.Fatalf("Adopt: %v", err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	h.cancel = cancel
-	go h.sup.Run(ctx)
-	defer h.stop()
+	h.start2(svc)
 
 	h.waitFor("the container to be running", func() bool { return h.status(testService).State == StateRunning })
-	_, err = h.sup.Stop(testService)
+	_, err := h.sup.Stop(testService)
 	if err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
@@ -344,14 +314,7 @@ func TestTheStartedEventNamesTheImageThatRan(t *testing.T) {
 	h.sup = New(h.buffer, h.services)
 	h.sup.Runtime(client)
 
-	err := h.sup.Adopt(context.Background(), []service.Service{container(testService, image, "sleep 30")})
-	if err != nil {
-		t.Fatalf("Adopt: %v", err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	h.cancel = cancel
-	go h.sup.Run(ctx)
-	defer h.stop()
+	h.start2(container(testService, image, "sleep 30"))
 
 	h.waitFor("the started event", func() bool {
 		for _, record := range h.search(logs.Query{Kind: logs.EventStarted}) {
@@ -398,14 +361,7 @@ func TestServicesReachEachOtherByName(t *testing.T) {
 	h.sup.Runtime(client)
 
 	svc := container(testService, image, `echo reached-by-name > /tmp/i.html; httpd -f -p 80 -h /tmp`)
-	err := h.sup.Adopt(context.Background(), []service.Service{svc})
-	if err != nil {
-		t.Fatalf("Adopt: %v", err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	h.cancel = cancel
-	go h.sup.Run(ctx)
-	defer h.stop()
+	h.start2(svc)
 	h.waitFor("the service to be running", func() bool { return h.status(testService).State == StateRunning })
 
 	// A second container on the same network, asking for the service by the
@@ -463,18 +419,11 @@ func TestARestartPolicyThatDriftedIsCorrectedInPlace(t *testing.T) {
 
 	svc := container(testService, image, `while true; do sleep 1; done`)
 	svc.Restart = service.RestartAlways
-	err := h.sup.Adopt(context.Background(), []service.Service{svc})
-	if err != nil {
-		t.Fatalf("Adopt: %v", err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	h.cancel = cancel
-	go h.sup.Run(ctx)
-	defer h.stop()
+	h.start2(svc)
 	h.waitFor("the container to be running", func() bool { return h.status(testService).State == StateRunning })
 
 	before := h.status(testService)
-	err = client.UpdateRestart(context.Background(), containerName(testService), "no")
+	err := client.UpdateRestart(context.Background(), containerName(testService), "no")
 	if err != nil {
 		t.Fatalf("drift the policy: %v", err)
 	}
@@ -668,12 +617,7 @@ func TestARunInFlightIsPickedUpByTheNextDaemon(t *testing.T) {
 	})
 
 	// The daemon leaves the way it does on an upgrade, mid-run.
-	h.cancel()
-	select {
-	case <-h.sup.Done():
-	case <-time.After(20 * time.Second):
-		t.Fatal("the supervisor did not stop")
-	}
+	h.stop()
 	// It did not write down an ending that did not happen.
 	for _, record := range h.search(logs.Query{Service: testService, Kind: logs.EventJobFinished}) {
 		if strings.Contains(record.Text, "could not be read") {
@@ -681,17 +625,9 @@ func TestARunInFlightIsPickedUpByTheNextDaemon(t *testing.T) {
 		}
 	}
 
-	next := New(h.buffer, h.services)
-	next.Runtime(client)
-	err := next.Adopt(context.Background(), []service.Service{svc})
-	if err != nil {
-		t.Fatalf("Adopt: %v", err)
-	}
-	h.sup = next
-	ctx, cancel := context.WithCancel(context.Background())
-	h.cancel = cancel
-	go next.Run(ctx)
-	defer h.stop()
+	h.sup = New(h.buffer, h.services)
+	h.sup.Runtime(client)
+	h.start2(svc)
 
 	h.waitFor("the run to be finished by the daemon that found it", func() bool {
 		return len(h.search(logs.Query{Service: testService, Kind: logs.EventJobFinished})) > 0
@@ -700,7 +636,7 @@ func TestARunInFlightIsPickedUpByTheNextDaemon(t *testing.T) {
 	h.waitFor("the container to be cleared", func() bool {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		live, err := next.containers(ctx)
+		live, err := h.sup.containers(ctx)
 		if err != nil {
 			return false
 		}

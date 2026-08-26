@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/crgimenes/hostd/docker"
-	"github.com/crgimenes/hostd/service"
 )
 
 // The rule the whole timeout rests on: a run's allowance is measured from when
@@ -59,14 +58,7 @@ func TestAJobRunThatHangsIsStoppedAtItsLimit(t *testing.T) {
 	svc.Every = "1s"
 	svc.RunTimeout = "3s"
 
-	err := h.sup.Adopt(context.Background(), []service.Service{svc})
-	if err != nil {
-		t.Fatalf("Adopt: %v", err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	h.cancel = cancel
-	go h.sup.Run(ctx)
-	defer h.stop()
+	h.start2(svc)
 
 	h.waitFor("a run to start", func() bool {
 		return strings.Contains(h.logText(), "started as container")

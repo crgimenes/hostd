@@ -5,7 +5,9 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/crgimenes/hostd/docker"
 	"github.com/crgimenes/hostd/service"
 )
 
@@ -23,14 +25,7 @@ func TestARunAskedForByHandHappensWithoutWaitingForTheClock(t *testing.T) {
 	svc := container(job, image, `echo asked for`)
 	svc.Every = "1h"
 
-	err := h.sup.Adopt(context.Background(), []service.Service{svc})
-	if err != nil {
-		t.Fatalf("Adopt: %v", err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	h.cancel = cancel
-	go h.sup.Run(ctx)
-	defer h.stop()
+	h.start2(svc)
 
 	run, err := h.sup.RunNow(job)
 	if err != nil {
@@ -67,16 +62,9 @@ func TestAskingForARunDoesNotOverruleTheOverlapTheFileDeclares(t *testing.T) {
 	svc.Every = "1h"
 	svc.Overlap = service.OverlapSkip
 
-	err := h.sup.Adopt(context.Background(), []service.Service{svc})
-	if err != nil {
-		t.Fatalf("Adopt: %v", err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	h.cancel = cancel
-	go h.sup.Run(ctx)
-	defer h.stop()
+	h.start2(svc)
 
-	_, err = h.sup.RunNow(job)
+	_, err := h.sup.RunNow(job)
 	if err != nil {
 		t.Fatalf("the first run: %v", err)
 	}
@@ -127,5 +115,58 @@ func TestAskingARunOfSomethingNobodyDeclaredIsNotFound(t *testing.T) {
 	_, unknown := errors.AsType[ErrUnknownService](err)
 	if !unknown {
 		t.Fatalf("RunNow of an undeclared service returned %v", err)
+	}
+}
+
+// An apply that takes a service away must not have it brought back by a drift
+// round that started a moment earlier. The round reads the declarations, the
+// apply then changes them and removes the container, and the round — still
+// holding the list it read — finds a declared service with nothing running and
+// creates it again. The next round retires it, so the service the file no
+// longer declares runs for up to a drift interval.
+//
+// The rounds here are forced rather than waited for: the window is real at any
+// interval, and hammering it is what makes a rare race a test.
+func TestAnApplyIsNotUndoneByARoundThatStartedFirst(t *testing.T) {
+	client, image := requireRuntime(t)
+	h := newHarness(t)
+	const name = "hostd-suite-applyrace"
+	cleanupRuns(t, client, name)
+	h.sup = New(h.buffer, h.services)
+	h.sup.Runtime(client)
+
+	h.start2(container(name, image, `sleep 300`))
+	h.waitFor("the service to be up", func() bool {
+		observed, err := client.Inspect(context.Background(), containerName(name))
+		return err == nil && observed.Running
+	})
+
+	hammering := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-hammering:
+				return
+			default:
+				h.sup.nudge()
+			}
+		}
+	}()
+
+	h.sup.Apply([]service.Service{job(name, image, `echo ran`, "1m")})
+	close(hammering)
+	<-done
+
+	// Forced rounds after the apply, so a resurrection has every chance to
+	// happen before this concludes it did not.
+	for range 5 {
+		h.sup.nudge()
+		time.Sleep(100 * time.Millisecond)
+	}
+	_, err := client.Inspect(context.Background(), containerName(name))
+	if !errors.Is(err, docker.ErrNotFound) {
+		t.Fatalf("the service the file stopped declaring is back: %v", err)
 	}
 }

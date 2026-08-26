@@ -98,6 +98,18 @@ type Supervisor struct {
 	sampled  int
 	tickRing [tickSamples]time.Duration
 
+	// Held for the whole of a drift round and the whole of an apply. The two do
+	// conflicting work on the same containers: a round reads the declarations,
+	// an apply then changes them and removes a container, and the round — still
+	// holding the list it read — can find a declared service with nothing
+	// running and create it again. The window between the removal and the
+	// declaration going is small, which is why it shows up as a rare flaky test
+	// rather than as a bug report; small is not closed.
+	//
+	// Not s.mu: that one guards map access for microseconds, and this is held
+	// across calls to the runtime.
+	converge sync.Mutex
+
 	wake   chan struct{}
 	done   chan struct{}
 	closed sync.Once
@@ -202,6 +214,8 @@ func (s *Supervisor) observe(ctx context.Context) {
 	if s.client() == nil {
 		return
 	}
+	s.converge.Lock()
+	defer s.converge.Unlock()
 	running, err := s.containers(ctx)
 	if err != nil {
 		s.reportOnce("runtime", fmt.Sprintf("cannot ask the container runtime what it is running: %v", err))
