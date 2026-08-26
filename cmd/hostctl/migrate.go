@@ -487,7 +487,7 @@ func dropFromSource(ctx context.Context, opt options, from *api.Client, host, na
 			return fmt.Errorf("the tree still declares %s for %s", name, host)
 		}
 	}
-	err := prune(ctx, from, opt, belongs, len(declarations))
+	_, err := pruneTree(ctx, from, opt, belongs, len(declarations))
 	if err != nil {
 		return err
 	}

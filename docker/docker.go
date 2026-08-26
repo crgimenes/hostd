@@ -691,6 +691,96 @@ func splitTimestamp(raw string) (time.Time, string) {
 	return at, rest
 }
 
+// Event is one fact the runtime announced about a container. hostd initiates
+// some of them; the ones it did not — a restart policy bringing back a crashed
+// service, the kernel killing one for memory — happen with nobody asking, and
+// this stream is the only place the runtime says so.
+type Event struct {
+	Action     string
+	ID         string
+	At         time.Time
+	Attributes map[string]string
+}
+
+// Events follows the runtime's announcements about containers carrying the
+// label, until the context ends or the stream drops. since resumes a dropped
+// stream without a gap.
+func (c *Client) Events(ctx context.Context, since time.Time, label string, fn func(Event) error) error {
+	query := url.Values{"filters": {fmt.Sprintf(`{"type":["container"],"label":[%q]}`, label)}}
+	if !since.IsZero() {
+		query.Set("since", fmt.Sprintf("%d.%09d", since.Unix(), since.Nanosecond()))
+	}
+	resp, err := c.do(ctx, http.MethodGet, "/events", query, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	decoder := json.NewDecoder(resp.Body)
+	for {
+		var raw struct {
+			Action   string `json:"Action"`
+			ID       string `json:"id"`
+			TimeNano int64  `json:"timeNano"`
+			Actor    struct {
+				Attributes map[string]string `json:"Attributes"`
+			} `json:"Actor"`
+		}
+		err = decoder.Decode(&raw)
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		err = fn(Event{
+			Action:     raw.Action,
+			ID:         raw.ID,
+			At:         time.Unix(0, raw.TimeNano),
+			Attributes: raw.Actor.Attributes,
+		})
+		if err != nil {
+			return err
+		}
+	}
+}
+
+// Pull asks this runtime to fetch an image from its registry. Errors arrive
+// inside the 200 stream as {"error": ...} lines, so the stream is read to the
+// end and the last error found is the answer.
+func (c *Client) Pull(ctx context.Context, image string) error {
+	name, tag, found := strings.Cut(image, ":")
+	if !found {
+		tag = "latest"
+	}
+	query := url.Values{"fromImage": {name}, "tag": {tag}}
+	resp, err := c.do(ctx, http.MethodPost, "/images/create", query, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	decoder := json.NewDecoder(resp.Body)
+	pullErr := ""
+	for {
+		var line struct {
+			Error string `json:"error"`
+		}
+		err = decoder.Decode(&line)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("pulling %s: %w", image, err)
+		}
+		if line.Error != "" {
+			pullErr = line.Error
+		}
+	}
+	if pullErr != "" {
+		return fmt.Errorf("pulling %s: %s", image, pullErr)
+	}
+	return nil
+}
+
 // Save streams an image out of the runtime as a tar, which is what crosses the
 // wire to another machine. Nothing is written to disk here: the bytes go from
 // one runtime to the other through the pipe.

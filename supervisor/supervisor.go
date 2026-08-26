@@ -190,6 +190,7 @@ func (s *Supervisor) Run(ctx context.Context) {
 	// The clock and the machine are different questions asked at different
 	// rates: a job every second cannot wait for the drift round.
 	running.Go(func() { s.schedule(ctx) })
+	running.Go(func() { s.watchRuntime(ctx) })
 	ticker := time.NewTicker(driftInterval)
 	defer ticker.Stop()
 	for {
@@ -269,6 +270,89 @@ func (s *Supervisor) observe(ctx context.Context) {
 			continue
 		}
 		s.clearReport(name)
+	}
+}
+
+// How long to wait before reopening a dropped event stream. The runtime being
+// restarted is the usual cause, and it is back well inside this.
+const eventRetryDelay = 5 * time.Second
+
+// watchRuntime copies into the timeline what the runtime announces on its own:
+// the deaths hostd did not cause. A service crashing under a restart policy is
+// brought back with nobody asking, and without this the only trace was a
+// restart counter moving.
+func (s *Supervisor) watchRuntime(ctx context.Context) {
+	client := s.client()
+	if client == nil {
+		return
+	}
+	// Anchored before anything can die: the runtime replays from an instant in
+	// the past, so a container that exits while the stream is still being
+	// opened is announced rather than missed.
+	since := s.now()
+	for {
+		err := client.Events(ctx, since, labelService, func(e docker.Event) error {
+			// The next connection resumes after this event, so a dropped
+			// stream loses nothing announced while it was down.
+			since = e.At.Add(time.Nanosecond)
+			s.clearReport("runtime.events")
+			s.runtimeEvent(e)
+			return nil
+		})
+		if ctx.Err() != nil {
+			return
+		}
+		if err != nil {
+			s.reportOnce("runtime.events", fmt.Sprintf("cannot follow the runtime's events: %v", err))
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(eventRetryDelay):
+		}
+	}
+}
+
+// The announcements hostd never makes itself. Its own starts and stops are
+// already events with the intent attached, and a job's runs end on purpose —
+// job.finished tells that story with the exit code. What is left is a service
+// container dying and the kernel killing one for memory.
+func (s *Supervisor) runtimeEvent(e docker.Event) {
+	name := e.Attributes[labelService]
+	if name == "" {
+		return
+	}
+	at := e.At
+	if at.IsZero() {
+		at = s.now()
+	}
+	run := e.Attributes[labelRun]
+	switch e.Action {
+	case "oom":
+		s.log.Append(logs.Record{
+			Time:    at,
+			Service: name,
+			Run:     run,
+			Stream:  logs.StreamEvent,
+			Kind:    logs.EventKilled,
+			Text:    fmt.Sprintf("the kernel killed container %s: out of memory", short(e.ID)),
+		})
+	case "die":
+		if run != "" {
+			return
+		}
+		text := fmt.Sprintf("container %s exited", short(e.ID))
+		code := e.Attributes["exitCode"]
+		if code != "" {
+			text += " with code " + code
+		}
+		s.log.Append(logs.Record{
+			Time:    at,
+			Service: name,
+			Stream:  logs.StreamEvent,
+			Kind:    logs.EventExited,
+			Text:    text,
+		})
 	}
 }
 

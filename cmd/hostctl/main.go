@@ -264,12 +264,21 @@ usage:
   hostctl describe                     versions and capabilities of the daemon
   hostctl -all version                 which machines are behind the daemon this
                                        hostctl carries, and which are ahead of it
+  hostctl service deploy <name>        put a service from the tree on that
+                                       machine — declaration, image and a fresh
+                                       container; deploying again overwrites,
+                                       which is how a new version goes live
+  hostctl service remove <name>        take it off that machine — container,
+                                       declaration and image; the tree still
+                                       describes it, and a deploy puts it back
   hostctl service list                 same as status, by service
   hostctl service versions <name>      which versions it could be put back on
   hostctl job run <name>               run a job now, without waiting for it
   hostctl service start <name>         ask a service to run
   hostctl service stop <name>          ask a service to stop
   hostctl service restart <name>       stop and start a service
+  hostctl service redeploy <name>      a fresh container from the declaration,
+                                       resolving its image tag again
   hostctl service migrate <name>       move it to where your tree now says
   hostctl plan                         what an apply would do, without doing it
   hostctl apply                        re-read the services directory and converge
@@ -278,8 +287,8 @@ usage:
   hostctl log -follow                  keep watching
   hostctl caddyfile                    write a Caddyfile from what the tree
                                        declares, to stdout
-  hostctl push                         send your declarations to that machine
-                                       (and drop what the tree stopped carrying)
+  hostctl push                         refresh the declarations of the services
+                                       that machine already runs, from the tree
   hostctl install                      put this hostctl's own hostd on it
   hostctl image ls                     the images that machine holds
   hostctl image prune                  what an image cleanup would remove

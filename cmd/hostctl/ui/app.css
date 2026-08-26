@@ -507,6 +507,50 @@ button {
 	background: var(--hover);
 }
 
+/* The ⋯ beside a service: every operation in one place, so the row and the
+   heading stay one size while the list of operations grows. */
+.menu {
+	position: relative;
+	display: inline-flex;
+}
+
+/* Fixed and placed by the script when it opens: absolute would sit inside the
+   card, and the card clips what overflows it. */
+.menuList {
+	position: fixed;
+	z-index: 40;
+	min-width: 150px;
+	display: flex;
+	flex-direction: column;
+	padding: 4px;
+	background: var(--card);
+	border: 0.5px solid var(--hairline);
+	border-radius: 8px;
+	box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+}
+
+.menuList[hidden] {
+	display: none;
+}
+
+.menuList button {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	padding: 5px 9px;
+	font-size: 12px;
+	color: var(--label);
+	background: none;
+	border: none;
+	border-radius: 5px;
+	text-align: left;
+	white-space: nowrap;
+}
+
+.menuList button:hover {
+	background: var(--hover);
+}
+
 #rangeReset {
 	font-size: 11px;
 	padding: 2px 8px;
@@ -919,13 +963,18 @@ td.problem {
 	color: var(--failed);
 }
 
-/* The one dialog: what to run, since the panel never runs it. */
+/* Two dialogs: #command shows a command the operator runs themselves;
+   #action confirms and performs one — the plan first, the button after. */
 
 dialog {
 	border: 0;
 	border-radius: 12px;
 	padding: 20px;
 	max-width: 460px;
+	/* The global reset above takes the margin that centres a <dialog>; without
+	   this the modal sits in the corner, beside the buttons that close the
+	   whole app — which is what people then click. */
+	margin: auto;
 	background: var(--card);
 	color: var(--label);
 	box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
@@ -946,7 +995,8 @@ dialog p {
 	margin: 4px 0 12px;
 }
 
-#commandText {
+#commandText,
+#action code {
 	display: block;
 	font-family: var(--mono);
 	font-size: 12px;
@@ -956,6 +1006,107 @@ dialog p {
 	-webkit-user-select: text;
 	user-select: text;
 	word-break: break-all;
+}
+
+/* A reference for whoever prefers the terminal, never a step: the button does
+   it. Smaller than everything above it on purpose. */
+#action code {
+	font-size: 11px;
+	color: var(--secondary);
+}
+
+#action {
+	min-width: 340px;
+	max-width: 560px;
+}
+
+#action table.plan {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 12px;
+	margin: 8px 0 12px;
+}
+
+#action table.plan th {
+	text-align: left;
+	font-size: 10px;
+	font-weight: 500;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	color: var(--secondary);
+	padding: 4px 10px 4px 0;
+	border-bottom: 1px solid var(--separator);
+}
+
+#action table.plan td {
+	padding: 5px 10px 5px 0;
+	border-bottom: 1px solid var(--separator);
+	vertical-align: top;
+}
+
+/* The row the red button is about. */
+#action table.plan tr.stops td {
+	color: var(--failed);
+}
+
+#action .outcome {
+	font-size: 12px;
+	color: var(--label);
+}
+
+#action .outcome.bad {
+	color: var(--failed);
+}
+
+#action .asking {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin: 4px 0;
+}
+
+/* A run reports from the corner, above the log that is painting what it
+   causes; nothing is covered and nothing is modal. */
+#action[data-corner] {
+	position: fixed;
+	right: 14px;
+	bottom: calc(var(--logHeight, 220px) + 20px);
+	left: auto;
+	top: auto;
+	margin: 0;
+	max-width: 400px;
+	z-index: 45;
+	border: 0.5px solid var(--hairline);
+}
+
+/* The catalog: one button per service the tree describes. */
+#action .choices {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	margin: 10px 0;
+}
+
+#action .choices button {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 8px 12px;
+	font-size: 12px;
+	text-align: left;
+	color: var(--label);
+	background: var(--hover);
+	border: 0.5px solid var(--hairline);
+	border-radius: 8px;
+}
+
+#action .choices button:hover {
+	background: var(--separator);
+}
+
+dialog button.danger {
+	background: var(--failed);
+	color: #fff;
 }
 
 dialog .actions {

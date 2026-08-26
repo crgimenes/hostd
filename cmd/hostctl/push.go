@@ -7,52 +7,57 @@ import (
 	"github.com/crgimenes/hostd/api"
 	"github.com/crgimenes/hostd/filoconf"
 	"github.com/crgimenes/hostd/service"
+	"github.com/crgimenes/hostd/supervisor"
 )
 
-// runPush sends the declarations the operator keeps under version control to a
-// machine. It does not apply them: what a machine holds and what it runs are
-// different questions, and the second one is answered by apply, with a plan and
-// a generation.
+// runPush refreshes the descriptions of the services this machine already
+// runs. The tree describes services; WHERE they run is decided by deploy and
+// remove — so a push adds nothing and takes nothing away, and what runs does
+// not change until an apply (or a deploy, which overwrites) says so.
 func runPush(ctx context.Context, client *api.Client, opt options, args []string) (int, error) {
 	if len(args) > 0 {
-		return exitUsage, fmt.Errorf("push takes no arguments; it sends the tree named by -config")
+		return exitUsage, fmt.Errorf("push takes no arguments; it refreshes this machine's services from the tree named by -config")
 	}
-	declarations, loadErr := service.LoadTree(ctx, opt.config)
-	if len(declarations) == 0 {
-		if loadErr != nil {
-			return exitUsage, loadErr
-		}
-		return exitUsage, fmt.Errorf("no service is declared in %s", opt.config)
+	resp, err := client.Do(ctx, api.Request{Op: api.OpServiceList})
+	if err != nil {
+		return exitComms, err
+	}
+	if resp.Failed() {
+		return codeFor(resp.Err()), resp.Err()
+	}
+	var held []supervisor.Status
+	err = decode(ctx, resp.Body, &held)
+	if err != nil {
+		return exitFailed, err
 	}
 
-	// Which machine this is, so a tree shared by a heterogeneous fleet sends
-	// each machine only what is declared for it.
-	machine := opt.entry(ctx, client.Target())
+	declarations, loadErr := service.LoadTree(ctx, opt.config)
+	described := make(map[string]service.Declaration, len(declarations))
+	for _, declaration := range declarations {
+		described[declaration.Service.Name] = declaration
+	}
 
 	out := opt.out
 	sent := 0
-	belongs := belongingTo(declarations, machine)
-	for _, declaration := range belongs {
-		err := putDeclaration(ctx, client, opt, declaration)
+	for _, status := range held {
+		if status.Orphan {
+			continue
+		}
+		declaration, ok := described[status.Name]
+		if !ok {
+			_, _ = fmt.Fprintf(out, "%s;%s;runs here but the tree does not describe it\n", client.Target(), status.Name)
+			continue
+		}
+		err = putDeclaration(ctx, client, opt, declaration)
 		if err != nil {
 			return codeFor(err), err
 		}
 		sent++
 		_, _ = fmt.Fprintf(out, "%s;%s;%d\n", client.Target(), declaration.Service.Name, len(declaration.Artifacts))
 	}
-	// A tree that could not be read in full is not a tree that can say what a
-	// machine should stop holding: the service missing from it may be the one
-	// whose file failed to parse.
-	if loadErr == nil {
-		err := prune(ctx, client, opt, belongs, len(declarations))
-		if err != nil {
-			return exitFailed, err
-		}
-	}
-
 	// A file on the machine has not changed what runs there. Saying so is what
 	// keeps somebody from believing a push was a deploy.
-	_, _ = fmt.Fprintf(out, "sent %d of %d declaration(s); run apply to converge\n", sent, len(declarations))
+	_, _ = fmt.Fprintf(out, "refreshed %d declaration(s); run apply to converge, or service deploy to overwrite one\n", sent)
 	// Broken files do not stop the good ones, and the status says the picture
 	// is incomplete.
 	if loadErr != nil {
@@ -94,17 +99,18 @@ func putDeclaration(ctx context.Context, client *api.Client, opt options, declar
 	return nil
 }
 
-// prune tells the machine which services the tree carries, so the ones deleted
-// from it stop being held there. Deleting a file changes nothing that runs:
-// the next plan proposes the removal, and an operator reviews it.
-func prune(ctx context.Context, client *api.Client, opt options, belongs []service.Declaration, declared int) error {
+// pruneTree tells the machine which services the tree carries, so the ones
+// deleted from it stop being held there, and answers with what was let go.
+// Deleting a file changes nothing that runs: the next plan proposes the
+// removal, and an operator reviews it.
+func pruneTree(ctx context.Context, client *api.Client, opt options, belongs []service.Declaration, declared int) ([]string, error) {
 	keep := api.ServiceSet{Names: make([]string, 0, len(belongs)), Declared: declared}
 	for _, declaration := range belongs {
 		keep.Names = append(keep.Names, declaration.Service.Name)
 	}
 	payload, err := filoconf.Marshal(keep)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	resp, err := client.Do(ctx, api.Request{
 		Op:         api.OpServicePrune,
@@ -112,23 +118,20 @@ func prune(ctx context.Context, client *api.Client, opt options, belongs []servi
 		OnBehalfOf: opt.onBehalfOf,
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if resp.Failed() {
 		// An older daemon that does not know the operation is not a failed
 		// push: everything the tree carries did arrive.
 		if resp.Code == api.CodeUnknownOp {
-			return nil
+			return nil, nil
 		}
-		return resp.Err()
+		return nil, resp.Err()
 	}
 	var removed api.ServiceSet
 	err = decode(ctx, resp.Body, &removed)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	for _, name := range removed.Names {
-		_, _ = fmt.Fprintf(opt.out, "%s;%s;no longer declared\n", client.Target(), name)
-	}
-	return nil
+	return removed.Names, nil
 }

@@ -243,6 +243,76 @@ func (s *Supervisor) Stop(name string) (bool, error) {
 	return true, nil
 }
 
+// Deploy takes the declaration as the machine now holds it, retires whatever
+// container stands, and builds a fresh one — which resolves the image tag as
+// it stands NOW. Restart brings back the same container on the same image;
+// this is the explicit "run the version the tag means today". The declaration
+// is upserted, never looked up: what was just put on this machine deploys,
+// whether or not this supervisor had met it before.
+func (s *Supervisor) Deploy(svc service.Service) (bool, error) {
+	client := s.client()
+	if client == nil {
+		return false, docker.ErrNoRuntime
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), svc.StopGrace()+2*runtimeTimeout)
+	defer cancel()
+	// Between the retire and the create there is no container, and a drift
+	// round reading that instant would create a second one; the mutex keeps
+	// the round out, exactly as it keeps it out of an apply.
+	s.converge.Lock()
+	defer s.converge.Unlock()
+	s.mu.Lock()
+	s.declared[svc.Name] = svc
+	s.mu.Unlock()
+	s.retire(ctx, svc)
+	if svc.IsJob() {
+		// A job has no standing container: the declaration is in place and the
+		// next run starts from it.
+		s.nudge()
+		return true, nil
+	}
+	err := s.create(ctx, svc, svc.WantRunning())
+	if err != nil {
+		return false, err
+	}
+	s.nudge()
+	return true, nil
+}
+
+// Remove takes the service off this machine: the container goes, and the
+// declaration leaves the supervisor so the drift round does not bring it
+// back. The description still exists in the operator's tree — a deploy puts
+// the service back — which is what makes this removal ordinary rather than
+// destructive to anything that cannot be rebuilt. Volumes stay: data is never
+// a removal's side effect.
+func (s *Supervisor) Remove(name string) (bool, error) {
+	svc, ok := s.declaration(name)
+	if !ok {
+		// An orphan can be removed too: it is on this machine, and refusing
+		// would leave ssh as the only way.
+		_, orphan := s.heldBy(name)
+		if !orphan {
+			return false, ErrUnknownService{Name: name}
+		}
+		svc = service.Service{Name: name}
+	}
+	client := s.client()
+	if client == nil {
+		return false, docker.ErrNoRuntime
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), svc.StopGrace()+2*runtimeTimeout)
+	defer cancel()
+	s.converge.Lock()
+	defer s.converge.Unlock()
+	s.retire(ctx, svc)
+	s.mu.Lock()
+	delete(s.declared, name)
+	s.mu.Unlock()
+	s.event(logs.EventStopped, name, "removed from this machine; the tree still describes it, and a deploy puts it back")
+	s.nudge()
+	return true, nil
+}
+
 // Always a change: it interrupts what is running, or starts what is not.
 func (s *Supervisor) Restart(name string) (bool, error) {
 	_, err := s.Stop(name)

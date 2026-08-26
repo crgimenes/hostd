@@ -709,3 +709,103 @@ func TestTheDriftRoundTakesAwayAJobsOwnContainer(t *testing.T) {
 		return errors.Is(err, docker.ErrNotFound)
 	})
 }
+
+// A death hostd did not cause reaches the timeline: the runtime announces it,
+// and the announcement is the only trace when a restart policy quietly brings
+// the service back.
+func TestADeathTheRuntimeAnnouncesLandsInTheTimeline(t *testing.T) {
+	client, image := requireRuntime(t)
+	h := newHarness(t)
+	cleanup(t, client, testService)
+	h.sup = New(h.buffer, h.services)
+	h.sup.Runtime(client)
+	h.start2(container(testService, image, "exit 7"))
+
+	h.waitFor("the runtime to announce the death", func() bool {
+		records := h.search(logs.Query{Service: testService, Kind: logs.EventExited})
+		return len(records) > 0 && strings.Contains(records[0].Text, "exited with code 7")
+	})
+}
+
+// Deploy recreates the container from the declaration handed to it — the PID
+// that answered before is not the one that answers after, and that is the
+// point: the image tag is resolved again on the way, which restart never does.
+// The declaration is upserted, so a service this supervisor never met deploys
+// exactly the same way.
+func TestDeployRecreatesTheContainer(t *testing.T) {
+	client, image := requireRuntime(t)
+	h := newHarness(t)
+	cleanup(t, client, testService)
+	h.sup = New(h.buffer, h.services)
+	h.sup.Runtime(client)
+	svc := container(testService, image, "sleep 300")
+	h.start2(svc)
+	h.waitFor("the service to run", func() bool { return h.status(testService).State == StateRunning })
+	before := h.status(testService).PID
+
+	changed, err := h.sup.Deploy(svc)
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if !changed {
+		t.Fatal("a deploy claims nothing changed")
+	}
+	h.waitFor("the fresh container", func() bool {
+		status := h.status(testService)
+		return status.State == StateRunning && status.PID != 0 && status.PID != before
+	})
+}
+
+// Deploying a job puts its declaration in place and leaves the running to the
+// schedule: a job has no standing container to recreate.
+func TestDeployOfAJobPlacesTheDeclaration(t *testing.T) {
+	client, image := requireRuntime(t)
+	h := newHarness(t)
+	h.sup = New(h.buffer, h.services)
+	h.sup.Runtime(client)
+	h.start2()
+	svc := container("tick", image, "true")
+	svc.Every = "1h"
+	changed, err := h.sup.Deploy(svc)
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if !changed {
+		t.Fatal("deploying a job claims nothing changed")
+	}
+	status, err := h.sup.StatusOf("tick")
+	if err != nil || status.Every != "1h" {
+		t.Fatalf("the job's declaration is not in place: %+v (%v)", status, err)
+	}
+}
+
+// Remove takes the service off this machine — container and declaration — and
+// the drift round it nudges does not bring anything back: the declaration left
+// the supervisor with the container.
+func TestRemoveTakesTheServiceOffTheMachine(t *testing.T) {
+	client, image := requireRuntime(t)
+	h := newHarness(t)
+	cleanup(t, client, testService)
+	h.sup = New(h.buffer, h.services)
+	h.sup.Runtime(client)
+	h.start2(container(testService, image, "sleep 300"))
+	h.waitFor("the service to run", func() bool { return h.status(testService).State == StateRunning })
+
+	changed, err := h.sup.Remove(testService)
+	if err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if !changed {
+		t.Fatal("a removal claims nothing changed")
+	}
+	h.waitFor("the service to be gone", func() bool {
+		_, missing := h.sup.StatusOf(testService)
+		return missing != nil
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err = client.Inspect(ctx, containerName(testService))
+	if !errors.Is(err, docker.ErrNotFound) {
+		t.Fatalf("the container is still on the machine: %v", err)
+	}
+}

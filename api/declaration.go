@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"github.com/crgimenes/hostd/filoconf"
 	"github.com/crgimenes/hostd/service"
 	"github.com/crgimenes/hostd/state"
+	"github.com/crgimenes/hostd/supervisor"
 )
 
 // A declaration as it crosses the wire: the file itself, and whatever the
@@ -179,6 +181,94 @@ func writeAtomic(path string, content []byte, mode os.FileMode) error {
 		return err
 	}
 	return os.Rename(name, path)
+}
+
+// What a removal did, piece by piece: the pieces have different owners and can
+// end differently, and one word for the three would hide the one that stayed.
+type Removal struct {
+	Service   string `filo:"service"`
+	Container string `filo:"container"`
+	Image     string `filo:"image"`
+}
+
+// removeService takes a service off this machine: the container stops and
+// goes, the declaration leaves the services directory, and the image is let
+// go of when nothing else is holding it. The description still lives in the
+// operator's tree, so a deploy puts the service back — data in volumes is
+// never touched.
+func (s *Server) removeService(ctx context.Context, req Request, actor string) Response {
+	name := req.Name
+	if !service.ValidName(name) {
+		return Response{Code: CodeInvalid, Message: fmt.Sprintf("%q is not a service name", name)}
+	}
+	report := Removal{Service: name, Container: "there was none", Image: "none declared"}
+
+	// The image the declaration names, read before the file goes.
+	image := ""
+	declared, err := service.ParseFile(ctx, filepath.Join(s.services, name+service.Extension))
+	if err == nil {
+		image = declared.Image
+	}
+
+	changed, err := s.sup.Remove(name)
+	if err != nil {
+		code := CodeFailed
+		_, unknown := errors.AsType[supervisor.ErrUnknownService](err)
+		if unknown {
+			code = CodeNotFound
+		}
+		entry := state.Entry{Operation: OpServiceRemove, Target: name, Actor: actor,
+			OnBehalfOf: req.OnBehalfOf, Result: state.ResultFailed, Detail: err.Error()}
+		generation := s.store.Record(entry, false)
+		return Response{Code: code, Message: err.Error(), Generation: generation}
+	}
+	if changed {
+		report.Container = "stopped and removed"
+	}
+
+	err = os.Remove(filepath.Join(s.services, name+service.Extension))
+	if err != nil && !os.IsNotExist(err) {
+		return Response{Code: CodeFailed, Message: err.Error()}
+	}
+	err = os.RemoveAll(filepath.Join(s.services, name+service.ArtifactSuffix))
+	if err != nil {
+		return Response{Code: CodeFailed, Message: err.Error()}
+	}
+
+	report.Image = s.releaseImage(ctx, image)
+
+	entry := state.Entry{Operation: OpServiceRemove, Target: name, Actor: actor,
+		OnBehalfOf: req.OnBehalfOf, Result: state.ResultOK,
+		Detail: fmt.Sprintf("container %s; image %s", report.Container, report.Image)}
+	// Removing a service changes what this machine is meant to run, which is
+	// exactly what the generation counts.
+	generation := s.store.Record(entry, true)
+	resp := body(report)
+	resp.Generation = generation
+	return resp
+}
+
+// releaseImage drops the reference a removed service held. The runtime refuses
+// while any container still uses the image, and another declaration naming it
+// keeps it too — a removal never takes what somebody else is standing on.
+func (s *Server) releaseImage(ctx context.Context, image string) string {
+	if image == "" {
+		return "none declared"
+	}
+	if s.runtime == nil {
+		return "kept: no container runtime on this machine"
+	}
+	declarations, _ := service.LoadDir(ctx, s.services)
+	for _, other := range declarations {
+		if other.Image == image {
+			return fmt.Sprintf("kept: %s still declares it", other.Name)
+		}
+	}
+	err := s.runtime.RemoveImage(ctx, image)
+	if err != nil {
+		return "kept: " + err.Error()
+	}
+	return "removed " + image
 }
 
 // The set of services a tree carries, and what a machine stopped holding

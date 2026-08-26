@@ -120,6 +120,15 @@ func SSHArguments(host string, remote []string) []string {
 }
 
 func DialSSH(ctx context.Context, host string, remote []string) (*Client, error) {
+	return DialSSHDiag(ctx, host, remote, os.Stderr)
+}
+
+// DialSSHDiag is DialSSH with a home for the remote side's stderr. The command
+// line hands it the terminal; the panel's rounds hand it nothing unless -debug
+// is on — a machine with no daemon would otherwise write the same complaint
+// into the operator's terminal every two seconds, forever, and that reads as
+// the program looping.
+func DialSSHDiag(ctx context.Context, host string, remote []string, diagnostics io.Writer) (*Client, error) {
 	// #nosec G204 -- the remote command comes from the operator's own flag, and
 	// the host cannot be read as an option: see SSHArguments
 	cmd := exec.CommandContext(ctx, "ssh", SSHArguments(host, remote)...)
@@ -131,8 +140,7 @@ func DialSSH(ctx context.Context, host string, remote []string) (*Client, error)
 	if err != nil {
 		return nil, err
 	}
-	// ssh's own complaints are diagnostics and belong where diagnostics go.
-	cmd.Stderr = os.Stderr
+	cmd.Stderr = diagnostics
 	err = cmd.Start()
 	if err != nil {
 		return nil, fmt.Errorf("cannot run ssh: %w", err)

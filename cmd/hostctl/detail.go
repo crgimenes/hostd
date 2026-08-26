@@ -46,6 +46,9 @@ type cardView struct {
 	Facts   [][2]string
 	Charts  []chartView
 	Buttons []buttonView
+	// The buttons fold into one ⋯ menu: actions grow with the project, the
+	// heading does not.
+	Menu bool
 	// A plain table, for a card whose rows are not services. Head above drives
 	// the service table and its fixed columns; these two are the general one.
 	GridHead []string
@@ -92,8 +95,8 @@ type buttonView struct {
 	// The picture beside the word, never instead of it: the panel is also for
 	// people who have not learned the pictures yet.
 	Icon string
-	// One of the two: a command the person runs themselves, or an act the
-	// panel performs on itself. The fleet only ever gets the first kind.
+	// One of the two: a command shown for the person to run themselves, or an
+	// act the panel performs.
 	Command string
 	Act     string
 }
@@ -124,7 +127,7 @@ func (d detailView) StructureKey() string {
 	var key strings.Builder
 	fmt.Fprintf(&key, "%s|%s|%v|%s|%d|%v|%v|%s\n", d.Title, d.Subtitle, d.Single, d.Empty, d.Window, d.Watching, d.Frozen, d.RangeText)
 	for _, card := range d.Cards {
-		fmt.Fprintf(&key, "%s|%s|%s|%s|%d|%d\n", card.Key, card.Heading, card.Link, card.Problem, len(card.Charts), len(card.Numbers))
+		fmt.Fprintf(&key, "%s|%s|%s|%s|%d|%d|%v\n", card.Key, card.Heading, card.Link, card.Problem, len(card.Charts), len(card.Numbers), card.Menu)
 		for _, row := range card.Rows {
 			fmt.Fprintf(&key, " %s|%s|%s|%s|%v\n", row.Key, row.Name, row.Image, row.Problem, row.Job)
 		}
@@ -303,13 +306,12 @@ func imagesDetail(snap snapshot, view viewState) detailView {
 		GridHead: []string{"image", "size", "created", "used by", "digest"},
 		Numbers:  imageNumbers(ours, true),
 		Grid:     imageRows(ours),
-		// The plan, not the removal: what the panel hands over is the command
-		// that shows what would go. Authorising it is a word the operator adds
-		// themselves, which is the point at which they have read the plan.
+		// The plan, then the removal: the dialog shows what would go, and
+		// authorising it is the red button that says how much.
 		Buttons: []buttonView{{
-			Label:   "Clean up",
-			Icon:    "clipboard",
-			Command: "hostctl -host " + host.Host + " image prune",
+			Label: "Clean up",
+			Icon:  "trash",
+			Act:   "confirm/prune/" + host.Host,
 		}},
 	}
 	if len(ours) == 0 {
@@ -415,6 +417,11 @@ func hostDetail(snap snapshot, view viewState) detailView {
 		Key:     "services",
 		Heading: "Services",
 		Head:    []string{"service", "state", "image", "uptime", "restarts", ""},
+		// The catalog: everything the tree describes, each one a deploy away.
+		Buttons: []buttonView{{
+			Label: "deploy", Icon: "box-arrow-up",
+			Act: "confirm/add/" + host.Host,
+		}},
 	}
 	for _, service := range host.Services {
 		services.Rows = append(services.Rows, cellsOf(host.Host, service))
@@ -493,8 +500,9 @@ func serviceDetail(snap snapshot, view viewState) detailView {
 		Heading: "Declaration",
 		Facts:   facts,
 		// On the heading line, where a person acts on what they just read.
-		// The panel still does not act: each button shows the command to run.
-		Buttons: commandsFor(host.Host, service.Name, "restart", "stop", "start"),
+		// The panel still does not act: each item shows the command to run.
+		Buttons: serviceActions(host.Host, service.Name),
+		Menu:    true,
 	})
 
 	cpu := seriesOf(host, metrics.ScopeService, service.Name, metrics.MetricCPUPercent)
@@ -514,18 +522,23 @@ func serviceDetail(snap snapshot, view viewState) detailView {
 	return out
 }
 
-func commandsFor(host, service string, verbs ...string) []buttonView {
-	pictures := map[string]string{
-		"restart": "arrow-clockwise",
-		"stop":    "stop-fill",
-		"start":   "play-fill",
+// serviceActions is every operation one service offers. Each opens the
+// confirmation dialog: what will happen, the command line equivalent, and the
+// button that performs it — the same API operation the command line calls.
+func serviceActions(host, service string) []buttonView {
+	verbs := []struct{ label, icon string }{
+		{"deploy", "box-arrow-up"},
+		{"restart", "arrow-clockwise"},
+		{"stop", "stop-fill"},
+		{"start", "play-fill"},
+		{"remove", "trash"},
 	}
 	out := make([]buttonView, 0, len(verbs))
 	for _, verb := range verbs {
 		out = append(out, buttonView{
-			Label:   verb,
-			Icon:    pictures[verb],
-			Command: fmt.Sprintf("hostctl -host %s service %s %s", host, verb, service),
+			Label: verb.label,
+			Icon:  verb.icon,
+			Act:   fmt.Sprintf("confirm/%s/%s/%s", verb.label, host, service),
 		})
 	}
 	return out
@@ -549,7 +562,7 @@ func cellsOf(host string, service supervisor.Status) rowCells {
 		Since:   int64(service.Since),
 		Job:     service.Every != "",
 		Restart: strconv.Itoa(service.Restarts),
-		Buttons: commandsFor(host, service.Name, "restart", "stop"),
+		Buttons: serviceActions(host, service.Name),
 		Problem: service.LastError,
 	}
 }

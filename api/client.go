@@ -13,6 +13,10 @@ import (
 
 const dialTimeout = 10 * time.Second
 
+// ErrNoAnswer is a machine that ssh reached and where no hostd answered — the
+// state an install resolves, which is why it is worth telling apart.
+var ErrNoAnswer = errors.New("no hostd answered")
+
 // What a client talks over: the socket on this machine, or the pipes of an ssh
 // running the daemon's stdio mode on another. The protocol is the same either
 // way, which is what lets the transport be somebody else's problem.
@@ -89,10 +93,11 @@ func (c *Client) do(ctx context.Context, req Request) (Response, error) {
 	err = ReadMessage(ctx, c.reader, &resp)
 	if errors.Is(err, io.EOF) {
 		// The bare "EOF" the reader returns names the mechanism and teaches
-		// nothing: what the operator needs is where to look.
+		// nothing: what the operator needs is where to look. Typed, so a
+		// caller can offer the install that fixes the commonest cause.
 		return Response{}, fmt.Errorf(
-			"hostd on %s closed the connection without answering; it either restarted, or this user cannot open its socket",
-			c.target)
+			"hostd on %s closed the connection without answering; it is not installed there, just restarted, or this user cannot open its socket: %w",
+			c.target, ErrNoAnswer)
 	}
 	if err != nil {
 		return Response{}, err

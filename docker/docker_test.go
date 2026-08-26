@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -449,4 +450,78 @@ func tagsOf(held []ImageSummary, digest string) []string {
 		}
 	}
 	return nil
+}
+
+// The stream asks only about containers carrying the label, and each
+// announcement arrives with the container, the instant and the attributes —
+// exitCode is where the runtime puts the code a death ended with.
+func TestEventsFollowTheRuntimesAnnouncements(t *testing.T) {
+	var asked url.Values
+	client := fakeRuntime(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/events") {
+			http.NotFound(w, r)
+			return
+		}
+		asked = r.URL.Query()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(
+			`{"Type":"container","Action":"die","id":"abc123def","Actor":{"ID":"abc123def","Attributes":{"hostd.service":"caddy","exitCode":"137"}},"timeNano":1700000000000000001}` + "\n" +
+				`{"Type":"container","Action":"oom","id":"abc123def","Actor":{"ID":"abc123def","Attributes":{"hostd.service":"caddy"}},"timeNano":1700000000000000002}` + "\n"))
+	}))
+
+	var seen []Event
+	err := client.Events(context.Background(), time.Unix(5, 7), "hostd.service", func(e Event) error {
+		seen = append(seen, e)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Events: %v", err)
+	}
+	if !strings.Contains(asked.Get("filters"), `"hostd.service"`) {
+		t.Fatalf("the stream does not filter by the label: %q", asked.Get("filters"))
+	}
+	if asked.Get("since") != "5.000000007" {
+		t.Fatalf("a resumed stream does not say where it stopped: %q", asked.Get("since"))
+	}
+	if len(seen) != 2 {
+		t.Fatalf("expected 2 announcements, got %d", len(seen))
+	}
+	first := seen[0]
+	if first.Action != "die" || first.ID != "abc123def" || first.Attributes["exitCode"] != "137" {
+		t.Fatalf("the announcement lost something on the way: %+v", first)
+	}
+	if first.At.UnixNano() != 1700000000000000001 {
+		t.Fatalf("the announcement lost its instant: %v", first.At)
+	}
+	if seen[1].Action != "oom" {
+		t.Fatalf("the second announcement is %q", seen[1].Action)
+	}
+}
+
+// A pull's failure arrives INSIDE the 200 stream, so success is only the
+// stream ending with no error line in it.
+func TestPullReadsTheErrorOutOfTheStream(t *testing.T) {
+	answer := `{"status":"Pulling from library/caddy"}` + "\n"
+	client := fakeRuntime(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/images/create") {
+			http.NotFound(w, r)
+			return
+		}
+		if r.URL.Query().Get("fromImage") != "caddy" || r.URL.Query().Get("tag") != "2-alpine" {
+			t.Errorf("the pull asks for the wrong image: %s", r.URL.RawQuery)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(answer))
+	}))
+
+	err := client.Pull(context.Background(), "caddy:2-alpine")
+	if err != nil {
+		t.Fatalf("a clean stream was read as failure: %v", err)
+	}
+
+	answer = `{"status":"Pulling"}` + "\n" + `{"error":"pull access denied"}` + "\n"
+	err = client.Pull(context.Background(), "caddy:2-alpine")
+	if err == nil || !strings.Contains(err.Error(), "pull access denied") {
+		t.Fatalf("the error inside the stream was not read: %v", err)
+	}
 }

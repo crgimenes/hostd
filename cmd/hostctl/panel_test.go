@@ -211,13 +211,18 @@ func TestNothingInTheWindowReachesTheNetwork(t *testing.T) {
 
 // Not a test: how the panel is looked at without opening a window on somebody's
 // screen. It serves the same handler the window serves, over a port, only when
-// asked for by name.
+// asked for by name. The actions work too, against a scripted daemon on a local
+// socket — the port can DO things now, so bind it to loopback.
 func TestServeThePanelForLooking(t *testing.T) {
 	addr := os.Getenv("HOSTD_PANEL_ADDR")
 	if addr == "" {
 		t.Skip("set HOSTD_PANEL_ADDR to serve the panel for looking at")
 	}
-	view := probePanel(t)
+	view, sup, _ := actingPanel(t)
+	sup.plan = []supervisor.Change{
+		{Service: "caddy", Action: "recreate", Disruptive: true, Detail: "the image moved"},
+		{Service: "site", Action: "remove", Destructive: true, Detail: "no file declares it any more"},
+	}
 	server := &http.Server{Addr: addr, Handler: view.routes(), ReadHeaderTimeout: 5 * time.Second}
 	t.Log("serving the panel on", addr)
 	_ = server.ListenAndServe()
@@ -948,5 +953,47 @@ func TestTheIndicatorIsAlsoWhereTheEyesAre(t *testing.T) {
 	}
 	if !strings.Contains(answer, "asking cronos") {
 		t.Fatalf("the floating indicator does not name the machine it waits on: %q", answer)
+	}
+}
+
+// The actions fold into one ⋯ menu, so the row and the heading stay one size
+// while the list of operations grows. The script must know how to open it,
+// put it away, and read the command off whatever was clicked inside it.
+func TestServiceActionsFoldIntoAMenu(t *testing.T) {
+	view := probePanel(t)
+	get(t, view, "/")
+	host := get(t, view, "/act/select/host/yuki").Body.String()
+	if !strings.Contains(host, `data-ui="menu"`) {
+		t.Fatalf("the service rows carry no actions menu: %s", host)
+	}
+	if !strings.Contains(host, `data-act="confirm/add/yuki"`) {
+		t.Fatalf("the machine's page has no way to deploy something new: %s", host)
+	}
+
+	script, err := ui.ReadFile("ui/app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	for _, needed := range []string{`dataset.ui === "menu"`, "closeMenus", `closest("[data-command]")`} {
+		if !strings.Contains(string(script), needed) {
+			t.Fatalf("app.js lost %q, which the menu depends on", needed)
+		}
+	}
+}
+
+// Every operation a service offers opens its confirmation first: the menu
+// item carries the confirm act, never the run itself — a slip of the pointer
+// must not stop anything.
+func TestEveryServiceActionAsksBeforeActing(t *testing.T) {
+	view := probePanel(t)
+	get(t, view, "/")
+	page := get(t, view, "/act/select/service/yuki/caddy").Body.String()
+	for _, label := range []string{"restart", "stop", "start", "deploy", "remove"} {
+		if !strings.Contains(page, `data-act="confirm/`+label+`/yuki/caddy"`) {
+			t.Fatalf("the service's menu does not confirm %q: %s", label, page)
+		}
+	}
+	if strings.Contains(page, `data-act="run/`) {
+		t.Fatalf("something on the page runs without confirming: %s", page)
 	}
 }

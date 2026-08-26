@@ -103,21 +103,32 @@ func runStatus(ctx context.Context, client *api.Client, opt options) (int, error
 
 func runService(ctx context.Context, client *api.Client, opt options, args []string) (int, error) {
 	if len(args) == 0 {
-		return exitUsage, fmt.Errorf("service needs a subcommand: list, versions, start, stop or restart")
+		return exitUsage, fmt.Errorf("service needs a subcommand: list, versions, deploy, remove, start, stop, restart or redeploy")
 	}
 	switch args[0] {
 	case "list":
 		return showStatus(ctx, client, opt, api.Request{Op: api.OpServiceList})
 	case "versions":
 		return runServiceVersions(ctx, client, opt, args[1:])
-	case "start", "stop", "restart":
+	case "deploy":
+		if len(args) < 2 {
+			return exitUsage, fmt.Errorf("service deploy needs a service name from the tree")
+		}
+		return runServiceDeploy(ctx, client, opt, args[1])
+	case "remove":
+		if len(args) < 2 {
+			return exitUsage, fmt.Errorf("service remove needs a service name")
+		}
+		return runServiceRemove(ctx, client, opt, args[1])
+	case "start", "stop", "restart", "redeploy":
 		if len(args) < 2 {
 			return exitUsage, fmt.Errorf("service %s needs a service name", args[0])
 		}
 		op := map[string]string{
-			"start":   api.OpServiceStart,
-			"stop":    api.OpServiceStop,
-			"restart": api.OpServiceRestrt,
+			"start":    api.OpServiceStart,
+			"stop":     api.OpServiceStop,
+			"restart":  api.OpServiceRestrt,
+			"redeploy": api.OpServiceRedeploy,
 		}[args[0]]
 		return showStatus(ctx, client, opt, api.Request{
 			Op:               op,
@@ -126,7 +137,7 @@ func runService(ctx context.Context, client *api.Client, opt options, args []str
 			OnBehalfOf:       opt.onBehalfOf,
 		})
 	default:
-		return exitUsage, fmt.Errorf("unknown service subcommand %q; expected list, versions, start, stop or restart", args[0])
+		return exitUsage, fmt.Errorf("unknown service subcommand %q; expected list, versions, deploy, remove, start, stop, restart or redeploy", args[0])
 	}
 }
 
@@ -253,16 +264,22 @@ func printChanges(out io.Writer, changes []supervisor.Change) {
 	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(w, "SERVICE\tACTION\tIMPACT\tDETAIL")
 	for _, c := range changes {
-		impact := "safe"
-		switch {
-		case c.Destructive:
-			impact = "STOPS SERVICE"
-		case c.Disruptive:
-			impact = "interrupts"
-		}
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", c.Service, c.Action, impact, c.Detail)
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", c.Service, c.Action, impactOf(c), c.Detail)
 	}
 	_ = w.Flush()
+}
+
+// One reading of a change's impact, wherever a plan is shown: the terminal and
+// the window must not disagree about what stops a service.
+func impactOf(c supervisor.Change) string {
+	switch {
+	case c.Destructive:
+		return "STOPS SERVICE"
+	case c.Disruptive:
+		return "interrupts"
+	default:
+		return "safe"
+	}
 }
 
 func runAudit(ctx context.Context, client *api.Client, opt options) (int, error) {

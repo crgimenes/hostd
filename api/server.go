@@ -48,6 +48,8 @@ type Supervisor interface {
 	Start(name string) (bool, error)
 	Stop(name string) (bool, error)
 	Restart(name string) (bool, error)
+	Deploy(svc service.Service) (bool, error)
+	Remove(name string) (bool, error)
 	RunNow(name string) (string, error)
 	Plan(declared []service.Service) []supervisor.Change
 	Apply(declared []service.Service) []supervisor.Change
@@ -523,6 +525,38 @@ func imagesToPrune(held []docker.ImageSummary, holders map[string]string, keep i
 // pruneImages plans, and carries the plan out only when told to. It is one
 // computation either way: a dry run that ran different code would be
 // decoration.
+// pullImage has this machine fetch an image from its registry — what a deploy
+// falls back to when the operator's machine cannot carry the image (a public
+// multi-arch base never survives a save on another platform). The answer names
+// what the machine now holds.
+func (s *Server) pullImage(ctx context.Context, req Request, actor string) Response {
+	if s.runtime == nil {
+		return Response{Code: CodeUnavailable, Message: "this machine has no container runtime to pull into"}
+	}
+	if req.Name == "" {
+		return Response{Code: CodeInvalid, Message: "a pull needs the image to fetch"}
+	}
+	entry := state.Entry{Operation: req.Op, Target: req.Name, Actor: actor, OnBehalfOf: req.OnBehalfOf}
+	err := s.runtime.Pull(ctx, req.Name)
+	if err != nil {
+		entry.Result = state.ResultFailed
+		entry.Detail = err.Error()
+		// An image is not desired state, so the generation stays put.
+		generation := s.store.Record(entry, false)
+		return Response{Code: CodeFailed, Message: err.Error(), Generation: generation}
+	}
+	found, err := s.runtime.Image(ctx, req.Name)
+	if err != nil {
+		return Response{Code: CodeFailed, Message: fmt.Sprintf("the pull reported success and yet %s is not here: %v", req.Name, err)}
+	}
+	entry.Result = state.ResultOK
+	entry.Detail = found.Digest
+	generation := s.store.Record(entry, false)
+	resp := body(Image{Digest: found.Digest})
+	resp.Generation = generation
+	return resp
+}
+
 func (s *Server) pruneImages(ctx context.Context, req Request, actor string) Response {
 	if s.runtime == nil {
 		return Response{Code: CodeUnavailable, Message: "this machine has no container runtime to remove images from"}
@@ -671,12 +705,18 @@ func (s *Server) dispatch(ctx context.Context, req Request, actor string) Respon
 		return s.stamp(s.runJob(req, actor))
 	case OpImagePrune:
 		return s.stamp(s.pruneImages(ctx, req, actor))
+	case OpImagePull:
+		return s.stamp(s.pullImage(ctx, req, actor))
 	case OpServiceStart:
 		return s.mutate(req, actor, req.Name, s.sup.Start)
 	case OpServiceStop:
 		return s.mutate(req, actor, req.Name, s.sup.Stop)
 	case OpServiceRestrt:
 		return s.mutate(req, actor, req.Name, s.sup.Restart)
+	case OpServiceRedeploy:
+		return s.mutate(req, actor, req.Name, s.redeploy(ctx))
+	case OpServiceRemove:
+		return s.stamp(s.removeService(ctx, req, actor))
 	case OpApply:
 		return s.apply(ctx, req, actor)
 	case OpServicePut:
@@ -780,6 +820,22 @@ func (s *Server) mutate(req Request, actor, name string, fn func(string) (bool, 
 	return resp
 }
 
+// redeploy reads the declaration as this machine holds it ON DISK, which is
+// what a deploy just put there: the supervisor's memory of a service it never
+// met cannot be the gate to running one.
+func (s *Server) redeploy(ctx context.Context) func(string) (bool, error) {
+	return func(name string) (bool, error) {
+		svc, err := service.ParseFile(ctx, filepath.Join(s.services, name+service.Extension))
+		if err != nil {
+			if os.IsNotExist(err) {
+				return false, supervisor.ErrUnknownService{Name: name}
+			}
+			return false, err
+		}
+		return s.sup.Deploy(svc)
+	}
+}
+
 // Audits an operation that was not carried out.
 func (s *Server) refuse(entry state.Entry, code string, cause error) Response {
 	entry.Result = state.ResultRefused
@@ -822,9 +878,9 @@ func (s *Server) describe(ctx context.Context) Response {
 		MemoryBytes: s.hostMemory(),
 		Operations: []string{
 			OpDescribe, OpStatus, OpServiceList,
-			OpServiceStart, OpServiceStop, OpServiceRestrt,
+			OpServiceStart, OpServiceStop, OpServiceRestrt, OpServiceRedeploy, OpServiceRemove,
 			OpPlan, OpApply, OpAudit, OpLogSearch, OpLogFollow, OpMetrics,
-			OpImagePush, OpImageList, OpImagePrune, OpServicePut, OpServicePrune,
+			OpImagePush, OpImagePull, OpImageList, OpImagePrune, OpServicePut, OpServicePrune,
 			OpServiceVersions, OpJobRun,
 		},
 	})

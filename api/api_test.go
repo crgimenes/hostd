@@ -98,6 +98,16 @@ func (f *fakeSupervisor) Restart(name string) (bool, error) {
 	return err == nil && !f.unchanged, err
 }
 
+func (f *fakeSupervisor) Deploy(svc service.Service) (bool, error) {
+	err := f.act("deploy", svc.Name)
+	return err == nil && !f.unchanged, err
+}
+
+func (f *fakeSupervisor) Remove(name string) (bool, error) {
+	err := f.act("remove", name)
+	return err == nil && !f.unchanged, err
+}
+
 // The run id the real supervisor answers with is the instant it was asked for,
 // so the fake answers with a fixed one: what the tests check is which outcome
 // came back, not what the clock said.

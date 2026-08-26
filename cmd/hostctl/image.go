@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -204,19 +205,41 @@ func runImagePush(ctx context.Context, client *api.Client, opt options, args []s
 		return exitUsage, fmt.Errorf("image push needs the image to send, as it is named here")
 	}
 	image := args[0]
-
 	local, err := docker.Open()
 	if err != nil {
 		return exitFailed, fmt.Errorf("no container runtime on this machine to read %s from: %w", image, err)
 	}
+	received, err := pushImage(ctx, client, local, image)
+	if errors.Is(err, errComms) {
+		return exitComms, err
+	}
+	if err != nil {
+		return codeFor(err), err
+	}
+	// The id to declare is the one that machine now has: it is the machine
+	// that will run it.
+	emit(opt, received.Body, received.Image, func() {
+		_, _ = fmt.Fprintf(opt.out, "%s;%s;%.0f;sha256:%s\n",
+			client.Target(), received.Digest, received.Bytes, received.Content)
+		printNotADeploy(opt.out, received.Image)
+	})
+	return exitOK, nil
+}
+
+// A transport failure and an operation failure are different exit codes, and
+// the wrapping is how the shared push says which one it was.
+var errComms = errors.New("could not reach the machine")
+
+// pushImage streams an image out of the local runtime into the target's. The
+// tar goes from one runtime to the other through the pipe: nothing touches a
+// disk on either side, and what proves the transfer is the hash of the bytes —
+// two daemons reading the same archive arrive at different image ids, because
+// an id is of the config each one writes.
+func pushImage(ctx context.Context, client *api.Client, local *docker.Client, image string) (pushedImage, error) {
 	built, err := local.Image(ctx, image)
 	if err != nil {
-		return exitFailed, fmt.Errorf("%s is not on this machine; build it first: %w", image, err)
+		return pushedImage{}, fmt.Errorf("%s is not on this machine; build it first: %w", image, err)
 	}
-
-	// The tar goes from one runtime to the other through the pipe: nothing is
-	// written to disk on either side, and a machine never holds an image it is
-	// only passing on.
 	content, writer := io.Pipe()
 	go func() {
 		saveErr := local.Save(ctx, image, writer)
@@ -226,33 +249,29 @@ func runImagePush(ctx context.Context, client *api.Client, opt options, args []s
 
 	resp, err := client.Push(ctx, image, built.Arch, io.TeeReader(content, sent))
 	if err != nil {
-		return exitComms, err
+		return pushedImage{}, fmt.Errorf("%w: %v", errComms, err)
 	}
 	if resp.Failed() {
-		return codeFor(resp.Err()), resp.Err()
+		return pushedImage{}, resp.Err()
 	}
 	var received api.Image
 	err = decode(ctx, resp.Body, &received)
 	if err != nil {
-		return exitFailed, err
+		return pushedImage{}, err
 	}
-	// What proves the transfer is the hash of the bytes, not the image id: two
-	// daemons reading the same archive arrive at different ids, because an id
-	// is of the config each one writes.
 	sum := hex.EncodeToString(sent.Sum(nil))
 	if received.Content != sum {
-		return exitFailed, fmt.Errorf(
+		return pushedImage{}, fmt.Errorf(
 			"%s arrived as sha256:%s and left here as sha256:%s; the bytes did not survive the trip",
 			image, received.Content, sum)
 	}
-	// The id to declare is the one that machine now has: it is the machine
-	// that will run it.
-	emit(opt, resp.Body, received, func() {
-		_, _ = fmt.Fprintf(opt.out, "%s;%s;%.0f;sha256:%s\n",
-			client.Target(), received.Digest, received.Bytes, received.Content)
-		printNotADeploy(opt.out, received)
-	})
-	return exitOK, nil
+	return pushedImage{Image: received, Body: resp.Body}, nil
+}
+
+// What a push answers with, plus the wire text an emit passes through.
+type pushedImage struct {
+	api.Image
+	Body string
 }
 
 // A push moves bytes and moves a tag. It does not change what any service is

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -36,9 +37,9 @@ var ui embed.FS
 // the person who is only looking at graphs.
 const uiOrigin = "app://hostd/"
 
-// What the panel is: read only. A mutating action is shown as the hostctl
-// command that would do it, ready to copy — the panel does not act, it says
-// what to run.
+// What the panel is: the operator's window on the fleet. It watches by being
+// pushed to, and it acts — always the same API operation the command line
+// calls, behind a confirmation that still shows the terminal equivalent.
 type panel struct {
 	opt   options
 	hosts []string
@@ -53,11 +54,19 @@ type panel struct {
 	// one decision.
 	mu      sync.Mutex
 	clients map[string]*api.Client
-	loops   map[string]*hostLoop
+	// A second pipe per machine, for the actions: one request owns a pipe from
+	// first byte to last, so an action that takes seconds on the rounds' pipe
+	// would starve the telemetry — a frozen screen exactly while somebody is
+	// waiting to see what their click did.
+	actors map[string]*api.Client
+	loops  map[string]*hostLoop
 
 	// one behind a seam: proving a slow machine cannot delay a fast one needs
 	// a machine that is slow on purpose.
 	ask func(ctx context.Context, host string, fromMS, toMS float64, since uint64, wantImages bool) fleetHost
+	// How a machine is reached — ssh normally; the tests hand over a dial to an
+	// in-process daemon, because proving the window acts must not need a fleet.
+	dial func(host string) (*api.Client, error)
 
 	// Where the panel's tree lives, changeable from the Settings page: the
 	// window is also for people who do not live in a terminal, and a path
@@ -111,6 +120,7 @@ func newPanel(opt options, hosts []string) (*panel, error) {
 		hosts:   hosts,
 		cfgDir:  opt.config,
 		clients: map[string]*api.Client{},
+		actors:  map[string]*api.Client{},
 		loops:   map[string]*hostLoop{},
 		since:   map[string]uint64{},
 		held:    map[string]bool{},
@@ -119,6 +129,23 @@ func newPanel(opt options, hosts []string) (*panel, error) {
 		pages:   pages,
 	}
 	view.ask = view.one
+	view.dial = func(host string) (*api.Client, error) {
+		life := view.life
+		// Dialing before start (an action in a panel a test never started)
+		// must not hand exec a nil context.
+		if life == nil {
+			life = context.Background()
+		}
+		// Quiet unless -debug: the rounds retry a machine with no daemon every
+		// two seconds, and its complaint on the terminal every time reads as
+		// the program looping. The card already says the machine is not
+		// answering.
+		diagnostics := io.Discard
+		if view.opt.debug {
+			diagnostics = os.Stderr
+		}
+		return api.DialSSHDiag(life, host, strings.Fields(view.opt.remote), diagnostics)
+	}
 	return view, nil
 }
 
@@ -204,6 +231,13 @@ func (p *panel) reloadFleet() {
 		_ = client.Close()
 		delete(p.clients, host)
 	}
+	for host, client := range p.actors {
+		if kept[host] {
+			continue
+		}
+		_ = client.Close()
+		delete(p.actors, host)
+	}
 	p.hosts = hosts
 	p.mu.Unlock()
 	// A machine taken out of the inventory leaves the picture too: the tree
@@ -213,6 +247,12 @@ func (p *panel) reloadFleet() {
 	p.snapMu.Unlock()
 	p.syncLoops()
 	p.wake()
+}
+
+func (p *panel) configDir() string {
+	p.cfgMu.Lock()
+	defer p.cfgMu.Unlock()
+	return p.cfgDir
 }
 
 func (p *panel) setConfigProblem(text string) {
@@ -306,7 +346,7 @@ func (p *panel) client(host string) (*api.Client, error) {
 	}
 	// Dialed on the panel's own lifetime, never a round's: the round asks and
 	// leaves, the connection stays.
-	opened, err := api.DialSSH(p.life, host, strings.Fields(p.opt.remote))
+	opened, err := p.dial(host)
 	if err != nil {
 		return nil, err
 	}
@@ -319,6 +359,29 @@ func (p *panel) client(host string) (*api.Client, error) {
 	}
 	p.mu.Lock()
 	p.clients[host] = opened
+	p.mu.Unlock()
+	return opened, nil
+}
+
+// actionClient is the machine's second pipe, dialed on first use: an action
+// waits on its own connection, and the rounds keep painting the screen —
+// including the very events the action is causing.
+func (p *panel) actionClient(host string) (*api.Client, error) {
+	p.mu.Lock()
+	existing, ok := p.actors[host]
+	p.mu.Unlock()
+	if ok {
+		return existing, nil
+	}
+	opened, err := p.dial(host)
+	if err != nil {
+		return nil, err
+	}
+	if p.opt.debug {
+		opened.Debug = os.Stderr
+	}
+	p.mu.Lock()
+	p.actors[host] = opened
 	p.mu.Unlock()
 	return opened, nil
 }
@@ -336,12 +399,26 @@ func (p *panel) drop(host string) {
 	}
 }
 
+func (p *panel) dropAction(host string) {
+	p.mu.Lock()
+	client, ok := p.actors[host]
+	delete(p.actors, host)
+	p.mu.Unlock()
+	if ok {
+		_ = client.Close()
+	}
+}
+
 func (p *panel) close() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for host, client := range p.clients {
 		_ = client.Close()
 		delete(p.clients, host)
+	}
+	for host, client := range p.actors {
+		_ = client.Close()
+		delete(p.actors, host)
 	}
 }
 

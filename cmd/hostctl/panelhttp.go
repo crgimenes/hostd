@@ -56,6 +56,8 @@ func (p *panel) routes() *http.ServeMux {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		// #nosec G705 -- every byte of body came out of html/template, which
+		// escaped whatever the request path or a machine supplied
 		_, _ = w.Write([]byte(body))
 	})
 	return mux
@@ -73,6 +75,20 @@ func (p *panel) Act(action string) (string, error) {
 		fmt.Fprintf(os.Stderr, "debug act action=%q\n", action)
 	}
 	parts := strings.Split(action, "/")
+	// The acts that reach the fleet answer with a dialog: what will happen, or
+	// what happened. The push that rides along keeps the rest of the window
+	// current under it.
+	if parts[0] == "confirm" || parts[0] == "run" {
+		dialog, err := p.action(parts)
+		if err != nil {
+			return "", err
+		}
+		rest, err := p.pending(false)
+		if err != nil {
+			return "", err
+		}
+		return rest + dialog, nil
+	}
 	rest := parts[1:]
 	before := p.viewport()
 	switch {
