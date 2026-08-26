@@ -178,10 +178,18 @@ func (s *Supervisor) Adopt(ctx context.Context, declared []service.Service) erro
 // runtime's, and the next hostd picks the reading up where the log store says
 // it stopped.
 func (s *Supervisor) Run(ctx context.Context) {
-	defer s.closed.Do(func() { close(s.done) })
+	// Done says the supervisor stopped, and the scheduler is the half of it
+	// that CREATES containers. A Done that did not wait for it would be a
+	// promise kept only for the loop: a run could begin after everything was
+	// told the daemon had left. Waiting costs one scheduler tick.
+	var running sync.WaitGroup
+	defer func() {
+		running.Wait()
+		s.closed.Do(func() { close(s.done) })
+	}()
 	// The clock and the machine are different questions asked at different
 	// rates: a job every second cannot wait for the drift round.
-	go s.schedule(ctx)
+	running.Go(func() { s.schedule(ctx) })
 	ticker := time.NewTicker(driftInterval)
 	defer ticker.Stop()
 	for {
