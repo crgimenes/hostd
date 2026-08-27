@@ -24,13 +24,17 @@ type alert struct {
 func alertFor(host fleetHost) alert {
 	carried := daemon.Version()
 	if host.Error != "" {
-		if carried == "" {
-			return alert{Text: "not answering"}
+		// ssh got there and nothing answered: that is what an install fixes,
+		// and it is the only unreachable case where offering one is honest. A
+		// machine that is switched off cannot be installed onto, and a button
+		// that cannot work is worse than no button.
+		if host.NoDaemon && carried != "" {
+			return alert{
+				Text: "no hostd answered here",
+				Act:  "do/install/" + host.Host,
+			}
 		}
-		return alert{
-			Text: "not answering — no hostd here yet?",
-			Act:  "do/install/" + host.Host,
-		}
+		return alert{Text: "not answering"}
 	}
 	if carried == "" || host.Version == "" || host.Version == carried {
 		return alert{}

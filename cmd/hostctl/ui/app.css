@@ -408,6 +408,11 @@ body.noLog #console {
 	white-space: nowrap;
 }
 
+#alert button:disabled {
+	background: color-mix(in srgb, var(--alert) 45%, transparent);
+	color: var(--secondary);
+}
+
 #alert button {
 	font-size: 11px;
 	padding: 2px 9px;
@@ -463,6 +468,17 @@ body.noLog #console {
 button {
 	font: inherit;
 	cursor: default;
+}
+
+/* Pressed NOW, by the browser, with nothing in between: a button whose only
+   feedback is the answer from a machine does not feel like a button at all
+   while the machine is being reached. */
+button:active:not(:disabled) {
+	filter: brightness(0.82);
+}
+
+button:disabled {
+	filter: none;
 }
 
 .push {

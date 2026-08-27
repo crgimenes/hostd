@@ -209,7 +209,15 @@ func TestADeployOverwritesAndNarratesItself(t *testing.T) {
 	get(t, view, "/")
 
 	get(t, view, "/act/do/deploy/yuki/caddy")
-	waitFor(t, "the deploy to recreate the container", func() bool { return sup.count(&sup.redeployed) == 1 })
+	// Waited on the last thing the deploy says, not on the supervisor's
+	// counter: the counter moves inside the daemon and the outcome line is
+	// written after the answer comes back.
+	waitFor(t, "the deploy to say it is done", func() bool {
+		return strings.Contains(view.logText(), "caddy is")
+	})
+	if sup.count(&sup.redeployed) != 1 {
+		t.Fatalf("the deploy did not recreate the container: %d", sup.count(&sup.redeployed))
+	}
 	_, err := os.Stat(filepath.Join(services, "caddy.filo"))
 	if err != nil {
 		t.Fatalf("the declaration did not land on the machine: %v", err)
@@ -478,5 +486,53 @@ func TestUpdatingAMachineForgetsItsOldVersion(t *testing.T) {
 	view.sayAlert(fleetHost{Host: "yuki", Version: "v0.0.1"})
 	if strings.Count(view.logText(), "v0.0.1 here") == said {
 		t.Fatal("a warning silenced before the update stays silenced after it")
+	}
+}
+
+// The services screen is read on the way in and not again: it carries a
+// dropdown per service, and a pane the rounds replace is a dropdown that jumps
+// back to its first machine — under the pointer of somebody deploying several
+// services one after another.
+func TestTheCatalogDoesNotRepaintWhileDeploying(t *testing.T) {
+	view, sup, _ := actingPanel(t)
+	get(t, view, "/")
+	first := get(t, view, "/act/select/services").Body.String()
+	if !strings.Contains(first, `class="where"`) {
+		t.Fatalf("the catalog has no machine chooser: %s", first)
+	}
+
+	// Rounds while the screen is open touch nothing on it.
+	for range 3 {
+		if again := get(t, view, "/act/refresh").Body.String(); strings.Contains(again, `id="detail"`) {
+			t.Fatalf("a round replaced the catalog: %q", again)
+		}
+	}
+	// And neither does a deploy, which is the case that mattered: the chooser
+	// must survive being clicked through six times in a row.
+	get(t, view, "/act/do/deploy/yuki/caddy")
+	waitFor(t, "the deploy to land", func() bool { return sup.count(&sup.redeployed) == 1 })
+	after := get(t, view, "/act/refresh").Body.String()
+	if strings.Contains(after, `id="detail"`) {
+		t.Fatalf("a deploy replaced the catalog, resetting its dropdowns: %q", after)
+	}
+}
+
+// A machine that is switched off is not a machine missing a daemon: offering to
+// install onto it would offer something that cannot work. ssh reaching a
+// machine where nothing answers IS that case, and gets the button.
+func TestOnlyAMachineMissingItsDaemonIsOfferedOne(t *testing.T) {
+	if daemon.Version() == "" {
+		t.Skip("this build carries no daemon to offer")
+	}
+	off := alertFor(fleetHost{Host: "cronos", Error: "ssh: connect to host cronos port 22: Operation timed out"})
+	if off.Act != "" {
+		t.Fatalf("a machine that is off was offered an install: %+v", off)
+	}
+	if off.Text == "" {
+		t.Fatal("a machine that is off says nothing at all")
+	}
+	bare := alertFor(fleetHost{Host: "fresh", Error: "hostd on fresh closed the connection", NoDaemon: true})
+	if bare.Act != "do/install/fresh" {
+		t.Fatalf("a machine with no daemon was not offered one: %+v", bare)
 	}
 }

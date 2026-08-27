@@ -81,20 +81,6 @@ func (p *panel) running(action string) bool {
 	return p.busy[action]
 }
 
-// deploying answers for the catalog's own button, whose machine is chosen in a
-// dropdown beside it: the act it will send is not known until the click, so
-// what holds it down is a deploy of this service to anywhere.
-func (p *panel) deploying(name string) bool {
-	p.busyMu.Lock()
-	defer p.busyMu.Unlock()
-	for action := range p.busy {
-		if strings.HasPrefix(action, "do/deploy/") && strings.HasSuffix(action, "/"+name) {
-			return true
-		}
-	}
-	return false
-}
-
 // What each one-request action is about to do, in the words of somebody
 // watching: the log says it before the machine is asked.
 var asking = map[string]string{

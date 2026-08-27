@@ -130,12 +130,17 @@ func DialSSH(ctx context.Context, host string, remote []string) (*Client, error)
 	return DialSSHDiag(ctx, host, remote, os.Stderr)
 }
 
-// DialSSHDiag is DialSSH with a home for the remote side's stderr. The command
-// line hands it the terminal; the panel's rounds hand it nothing unless -debug
-// is on — a machine with no daemon would otherwise write the same complaint
-// into the operator's terminal every two seconds, forever, and that reads as
-// the program looping.
-func DialSSHDiag(ctx context.Context, host string, remote []string, diagnostics io.Writer) (*Client, error) {
+// DialSSHDiag is DialSSH with somewhere to MIRROR the transport's own
+// complaints. The command line hands it the terminal; the panel's rounds hand
+// it nothing unless -debug is on — a machine with no daemon would otherwise
+// write the same complaint into the operator's terminal every two seconds,
+// forever, and that reads as the program looping.
+//
+// Either way the client keeps a bounded copy for itself, readable with
+// Trouble(): a machine that is switched off and a machine with no daemon both
+// end as an empty pipe, and ssh's own words are the only thing that tells them
+// apart.
+func DialSSHDiag(ctx context.Context, host string, remote []string, mirror io.Writer) (*Client, error) {
 	// #nosec G204 -- the remote command comes from the operator's own flag, and
 	// the host cannot be read as an option: see SSHArguments
 	cmd := exec.CommandContext(ctx, "ssh", SSHArguments(host, remote)...)
@@ -147,12 +152,15 @@ func DialSSHDiag(ctx context.Context, host string, remote []string, diagnostics 
 	if err != nil {
 		return nil, err
 	}
-	cmd.Stderr = diagnostics
+	trouble := &tap{mirror: mirror}
+	cmd.Stderr = trouble
 	err = cmd.Start()
 	if err != nil {
 		return nil, fmt.Errorf("cannot run ssh: %w", err)
 	}
-	return newClient(&pipe{in: in, out: out, cmd: cmd}, host), nil
+	client := newClient(&pipe{in: in, out: out, cmd: cmd}, host)
+	client.trouble = trouble
+	return client, nil
 }
 
 // A pair of pipes to another machine, closed by ending the process that owns

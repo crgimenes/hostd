@@ -73,7 +73,7 @@
       <h1 id="title">{{.Title}}</h1>
       <p id="subtitle">{{.Subtitle}}</p>
     </div>
-    {{- if .Alert}}<span id="alert">{{.Alert}}{{if .AlertAct}}<button data-act="{{.AlertAct}}">update hostd</button>{{end}}</span>{{end}}
+    {{- if .Alert}}<span id="alert">{{.Alert}}{{if .AlertAct}}<button data-act="{{.AlertAct}}"{{if .AlertBusy}} disabled{{end}}>{{if .AlertBusy}}updating…{{else}}update hostd{{end}}</button>{{end}}</span>{{end}}
     {{- if .Watching}}
     <div id="controls">
       <span id="range"{{if not .Frozen}} hidden{{end}}><span id="rangeText">{{.RangeText}}</span><button id="rangeReset" data-act="range/live">live</button></span>

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"time"
 )
@@ -29,6 +30,11 @@ type Client struct {
 	conn   transport
 	reader *bufio.Reader
 	target string
+	// What the transport itself complained about, kept because it is often the
+	// only thing that knows WHY: a machine that is switched off and a machine
+	// with no daemon both end as an empty pipe, and only ssh's own words tell
+	// them apart.
+	trouble *tap
 	// One request owns the stream from first byte to last: two requests
 	// interleaved on one pipe corrupt the protocol for both, and the caller
 	// sees a machine that stopped answering rather than its own concurrency.
@@ -52,6 +58,44 @@ func newClient(conn transport, target string) *Client {
 }
 
 func (c *Client) Close() error { return c.conn.Close() }
+
+// Trouble is what the transport said on its way down, if it said anything. A
+// request that ends in silence is not self-explanatory; this usually is.
+func (c *Client) Trouble() string {
+	if c.trouble == nil {
+		return ""
+	}
+	return c.trouble.String()
+}
+
+// A bounded copy of what a command wrote to stderr. Bounded because it is a
+// diagnostic, not a log: the first lines are the ones that say what happened,
+// and a machine that produces more than this is not producing an explanation.
+type tap struct {
+	mu     sync.Mutex
+	held   []byte
+	mirror io.Writer
+}
+
+const maxTroubleBytes = 4 << 10
+
+func (t *tap) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	if len(t.held) < maxTroubleBytes {
+		t.held = append(t.held, p[:min(len(p), maxTroubleBytes-len(t.held))]...)
+	}
+	t.mu.Unlock()
+	if t.mirror != nil {
+		return t.mirror.Write(p)
+	}
+	return len(p), nil
+}
+
+func (t *tap) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return strings.TrimSpace(string(t.held))
+}
 
 // Printed with every answer: "which machine did I just do that to?" is a
 // question that costs a machine in a fleet.

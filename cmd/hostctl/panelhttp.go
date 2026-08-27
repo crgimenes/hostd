@@ -250,13 +250,11 @@ func (p *panel) fragments() []fragment {
 	detail := detailOf(snap, view, p.settings(), p.catalog(view), p.hostsNow())
 	// Held-down buttons are rendered from the panel, not remembered by the
 	// page: a fragment the rounds replace would take a class with it.
+	detail.AlertBusy = detail.AlertAct != "" && p.running(detail.AlertAct)
 	for card := range detail.Cards {
 		for at, button := range detail.Cards[card].Buttons {
 			if button.Act != "" {
 				detail.Cards[card].Buttons[at].Busy = p.running(button.Act)
-			}
-			if button.Deploy != "" {
-				detail.Cards[card].Buttons[at].Busy = p.deploying(button.Deploy)
 			}
 		}
 	}

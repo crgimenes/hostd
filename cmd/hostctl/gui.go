@@ -91,6 +91,12 @@ type panel struct {
 	// repeat one every two seconds.
 	said map[string]bool
 
+	// What the tree describes, as of the last time the services screen was
+	// opened: the rounds never re-read it, so that pane never repaints under
+	// somebody choosing a machine in it.
+	catalogMu   sync.Mutex
+	catalogList []service.Declaration
+
 	viewMu sync.Mutex
 	view   viewState
 
@@ -173,6 +179,10 @@ type fleetHost struct {
 	// when the daemon is replaced, and that is exactly when this window drops
 	// the connection anyway.
 	Version string `json:"version"`
+	// ssh reached the machine and no hostd answered — which is the one failure
+	// an install fixes. A machine that is simply switched off is not this, and
+	// offering to install onto it would be offering something that cannot work.
+	NoDaemon bool `json:"no-daemon,omitempty"`
 }
 
 // forgetVersion drops what this window remembers of a machine's hostd, so the
@@ -282,22 +292,34 @@ func (p *panel) reloadFleet() {
 	p.snap.Fleet = slices.DeleteFunc(p.snap.Fleet, func(known fleetHost) bool { return !kept[known.Host] })
 	p.snapMu.Unlock()
 	p.syncLoops()
+	p.loadCatalog()
 	p.wake()
 }
 
-// catalog is what the tree describes, read only while its screen is open: the
-// other screens have no use for it, and reading a directory twice a second for
-// nobody is work nobody asked for.
+// catalog is what the tree describes, as it was read when its screen was
+// opened. Deliberately NOT re-read by the rounds: this pane carries a dropdown
+// per service, and a pane that is replaced is a dropdown that jumps back to
+// its first machine — under the pointer of somebody deploying six services in
+// a row (crg, 2026-08-27). It is refreshed on entering the screen and when the
+// tree's root changes, which is when it can have changed.
 func (p *panel) catalog(view viewState) []service.Declaration {
 	if view.kind != "services" {
 		return nil
 	}
+	p.catalogMu.Lock()
+	defer p.catalogMu.Unlock()
+	return p.catalogList
+}
+
+func (p *panel) loadCatalog() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	// A tree half of which cannot be read still describes the other half, and
 	// the services screen is where somebody would go to notice.
 	declarations, _ := service.LoadTree(ctx, p.configDir())
-	return declarations
+	p.catalogMu.Lock()
+	p.catalogList = declarations
+	p.catalogMu.Unlock()
 }
 
 func (p *panel) configDir() string {
@@ -347,6 +369,15 @@ func (p *panel) one(ctx context.Context, host string, fromMS, toMS float64, sinc
 	err = ask(ctx, client, api.Request{Op: api.OpStatus}, &answer.Services)
 	if err != nil {
 		answer.Error = err.Error()
+		// Both a machine that is switched off and a machine with no daemon end
+		// as an empty pipe, so the answer to "which is it" comes from ssh
+		// itself: when it complained, IT is the reason, and installing onto a
+		// machine ssh cannot reach is not a thing to offer.
+		trouble := client.Trouble()
+		if trouble != "" {
+			answer.Error = trouble
+		}
+		answer.NoDaemon = trouble == "" && errors.Is(err, api.ErrNoAnswer)
 		p.drop(host)
 		return answer
 	}
@@ -491,6 +522,10 @@ func (p *panel) pick(rest []string) {
 		// A machine's images are only fetched while their screen is open, so
 		// opening it has to ask rather than sit empty until the next tick.
 		p.wake()
+	}
+	if p.view.kind == "services" {
+		// Read on the way in, and not again: see panel.catalog.
+		p.loadCatalog()
 	}
 }
 
