@@ -134,44 +134,58 @@ type hostResult struct {
 // worth having, and the exit status says the picture is incomplete.
 func fanOut(ctx context.Context, opt options, hosts []string, args []string) int {
 	results := make([]hostResult, len(hosts))
+	done := make([]chan struct{}, len(hosts))
 	slots := make(chan struct{}, fleetConcurrency)
 	var wg sync.WaitGroup
 	for i, host := range hosts {
+		done[i] = make(chan struct{})
 		wg.Go(func() {
+			defer close(done[i])
 			slots <- struct{}{}
 			defer func() { <-slots }()
 			results[i] = askOne(ctx, opt, host, args)
 		})
 	}
-	wg.Wait()
 
 	// A machine-readable answer for several machines is ONE document, never a
 	// document per machine with a heading between them: whatever parses it
-	// reads stdout once.
-	if opt.filoOut {
-		printFleetFilo(opt.out, results)
-		return fleetCode(results)
-	}
-	if opt.jsonOut {
+	// reads stdout once. That one costs waiting for every machine.
+	if opt.filoOut || opt.jsonOut {
+		wg.Wait()
+		if opt.filoOut {
+			printFleetFilo(opt.out, results)
+			return fleetCode(results)
+		}
 		printFleetJSON(opt.out, results)
 		return fleetCode(results)
 	}
-	// A machine that did not answer belongs in the picture, in the picture's
-	// own stream: which host is missing is part of the fleet's state, not a
-	// diagnostic about hostctl.
-	for _, result := range results {
-		_, _ = fmt.Fprintf(opt.out, "== %s\n", result.host)
-		if result.answer != "" {
-			_, _ = fmt.Fprint(opt.out, result.answer)
-			continue
-		}
-		if result.err != nil {
-			_, _ = fmt.Fprintf(opt.out, "did not answer: %v\n", result.err)
-			continue
-		}
-		_, _ = fmt.Fprintln(opt.out, "did not answer")
+	// Inventory order, and each machine's block leaves as soon as the machines
+	// before it have had theirs: this used to print nothing at all until the
+	// last machine answered, so `-all install` with one switched-off machine
+	// was a blank screen — and a program that looks frozen is one the operator
+	// interrupts, which is exactly what happened.
+	for i := range hosts {
+		<-done[i]
+		printHostResult(opt.out, results[i])
 	}
+	wg.Wait()
 	return fleetCode(results)
+}
+
+// A machine that did not answer belongs in the picture, in the picture's own
+// stream: which host is missing is part of the fleet's state, not a diagnostic
+// about hostctl.
+func printHostResult(out io.Writer, result hostResult) {
+	_, _ = fmt.Fprintf(out, "== %s\n", result.host)
+	if result.answer != "" {
+		_, _ = fmt.Fprint(out, result.answer)
+		return
+	}
+	if result.err != nil {
+		_, _ = fmt.Fprintf(out, "did not answer: %v\n", result.err)
+		return
+	}
+	_, _ = fmt.Fprintln(out, "did not answer")
 }
 
 // Each machine writes into its own buffer, so two answers arriving at once

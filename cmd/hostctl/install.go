@@ -344,15 +344,17 @@ func remoteOutput(ctx context.Context, host, command string) string {
 	return answer
 }
 
-// One ssh, with the same options every other reach uses. stdin carries what the
-// remote command reads: the file being written, or the script being run.
+// One ssh, with the same options every other reach uses — api.SSHArguments and
+// not a list of its own, which is what this was and what made `-all install`
+// look frozen: without ConnectTimeout a switched-off machine spends the
+// kernel's tens of seconds, and the operator interrupts a program that is
+// merely waiting. It also carries the "--" that keeps an inventory name a name.
+// stdin carries what the remote command reads: the file being written, or the
+// script being run.
 func remoteOutputErr(ctx context.Context, host, command string, stdin []byte) (string, error) {
 	// #nosec G204 -- the host comes from the operator's own flags, which is the
 	// same trust as the shell they typed them in
-	// The "--" ends option parsing: a machine name beginning with a dash would
-	// otherwise be an ssh option rather than a host, and the names come out of
-	// the inventory file as well as out of flags.
-	cmd := exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", "--", host, command)
+	cmd := exec.CommandContext(ctx, "ssh", api.SSHArguments(host, []string{command})...)
 	if len(stdin) > 0 {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}

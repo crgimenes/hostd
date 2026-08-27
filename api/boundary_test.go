@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -32,6 +33,25 @@ func TestAMachineNameCannotBecomeAnSSHOption(t *testing.T) {
 	// And what the operator asked to run stays after the host, in order.
 	if !slices.Equal(arguments[end+2:], []string{"hostd", "-stdio"}) {
 		t.Fatalf("the remote command was rearranged: %q", arguments)
+	}
+}
+
+// Every reach ssh makes has to give up on a machine that is not there. Without
+// this, `hostctl -all install` with one switched-off machine printed nothing for
+// tens of kernel seconds and got interrupted (crg, 2026-08-27) — the install had
+// its own option list, and the option it was missing was this one.
+func TestEverySSHReachGivesUpOnAMachineThatIsNotThere(t *testing.T) {
+	arguments := SSHArguments("yuki.local", nil)
+
+	at := slices.Index(arguments, fmt.Sprintf("ConnectTimeout=%d", connectTimeout))
+	if at < 0 {
+		t.Fatalf("no ConnectTimeout in the ssh options: %q", arguments)
+	}
+	if arguments[at-1] != "-o" {
+		t.Fatalf("ConnectTimeout is not passed as an option: %q", arguments)
+	}
+	if connectTimeout > 15 {
+		t.Fatalf("a %ds wait reads as a program that hung", connectTimeout)
 	}
 }
 
