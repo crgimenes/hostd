@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -807,5 +808,44 @@ func TestRemoveTakesTheServiceOffTheMachine(t *testing.T) {
 	_, err = client.Inspect(ctx, containerName(testService))
 	if !errors.Is(err, docker.ErrNotFound) {
 		t.Fatalf("the container is still on the machine: %v", err)
+	}
+}
+
+// Two removals asked for at once do not wait one behind the other: a container
+// spending its grace period must not hold the machine's other work, which is
+// what holding the converge mutex across the wait did.
+func TestTwoRemovalsDoNotQueueBehindEachOther(t *testing.T) {
+	client, image := requireRuntime(t)
+	h := newHarness(t)
+	first, second := testService, testService+"-2"
+	cleanup(t, client, first, second)
+	h.sup = New(h.buffer, h.services)
+	h.sup.Runtime(client)
+
+	// Long enough that queueing would show as double, short enough for a test.
+	one := container(first, image, "trap '' TERM; sleep 300")
+	one.StopTimeout = 4
+	two := container(second, image, "trap '' TERM; sleep 300")
+	two.StopTimeout = 4
+	h.start2(one, two)
+	h.waitFor("both to run", func() bool {
+		return h.status(first).State == StateRunning && h.status(second).State == StateRunning
+	})
+
+	start := time.Now()
+	var wg sync.WaitGroup
+	for _, name := range []string{first, second} {
+		wg.Go(func() {
+			_, err := h.sup.Remove(name)
+			if err != nil {
+				t.Errorf("Remove %s: %v", name, err)
+			}
+		})
+	}
+	wg.Wait()
+	// Two four-second graces in parallel finish in about four; queued they
+	// would take eight.
+	if elapsed := time.Since(start); elapsed > 7*time.Second {
+		t.Fatalf("two removals took %s, so they queued behind each other", elapsed)
 	}
 }

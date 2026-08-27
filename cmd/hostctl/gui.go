@@ -87,6 +87,9 @@ type panel struct {
 	// page because a fragment the rounds replace would take a class with it.
 	busyMu sync.Mutex
 	busy   map[string]bool
+	// The machine-level warnings already said in the log, so a round does not
+	// repeat one every two seconds.
+	said map[string]bool
 
 	viewMu sync.Mutex
 	view   viewState
@@ -125,6 +128,7 @@ func newPanel(opt options, hosts []string) (*panel, error) {
 		since:   map[string]uint64{},
 		held:    map[string]bool{},
 		busy:    map[string]bool{},
+		said:    map[string]bool{},
 		sent:    map[string]string{},
 		view:    viewState{kind: "fleet", window: 3600, closed: map[string]bool{}},
 		pages:   pages,
@@ -165,6 +169,44 @@ type fleetHost struct {
 	Images      []api.ImageEntry `json:"images"`
 	ImagesError string           `json:"images-error,omitempty"`
 	Since       uint64           `json:"since"`
+	// What hostd the machine runs, asked once per connection: it only changes
+	// when the daemon is replaced, and that is exactly when this window drops
+	// the connection anyway.
+	Version string `json:"version"`
+}
+
+// forgetVersion drops what this window remembers of a machine's hostd, so the
+// next round asks again. Called where the daemon was replaced: a version that
+// stayed cached across an install would leave the amber dot on a machine that
+// had just been brought up to date.
+func (p *panel) forgetVersion(host string) {
+	p.snapMu.Lock()
+	for at := range p.snap.Fleet {
+		if p.snap.Fleet[at].Host == host {
+			p.snap.Fleet[at].Version = ""
+		}
+	}
+	p.snapMu.Unlock()
+	// And the warning it caused can be said again, if it is still true.
+	p.busyMu.Lock()
+	for key := range p.said {
+		if strings.HasPrefix(key, host+"\x00") {
+			delete(p.said, key)
+		}
+	}
+	p.busyMu.Unlock()
+}
+
+// What this window last heard the machine's hostd call itself.
+func (p *panel) knownVersion(host string) string {
+	p.snapMu.RLock()
+	defer p.snapMu.RUnlock()
+	for _, known := range p.snap.Fleet {
+		if known.Host == host {
+			return known.Version
+		}
+	}
+	return ""
 }
 
 func (p *panel) hostsNow() []string {
@@ -307,6 +349,16 @@ func (p *panel) one(ctx context.Context, host string, fromMS, toMS float64, sinc
 		answer.Error = err.Error()
 		p.drop(host)
 		return answer
+	}
+	// Asked only when this window does not know it yet: a version changes when
+	// the daemon is replaced, and replacing it drops the connection.
+	answer.Version = p.knownVersion(host)
+	if answer.Version == "" {
+		var described api.Description
+		describeErr := ask(ctx, client, api.Request{Op: api.OpDescribe}, &described)
+		if describeErr == nil {
+			answer.Version = described.Version
+		}
 	}
 
 	err = ask(ctx, client, api.Request{

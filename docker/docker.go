@@ -260,10 +260,18 @@ func (c *Client) Create(ctx context.Context, spec Spec) (string, error) {
 			"Memory":        spec.Memory,
 			"NanoCpus":      spec.NanoCPU,
 			"Privileged":    false,
-			"NetworkMode":   "bridge",
-			"PidMode":       "",
-			"CapAdd":        []string{},
-			"SecurityOpt":   []string{"no-new-privileges"},
+			// The kernel does not deliver a default-disposition signal to PID
+			// 1, so an image whose process installs no SIGTERM handler — every
+			// busybox applet, most static servers — never sees the ask to
+			// stop, and the runtime kills it after the whole grace period. An
+			// init as PID 1 forwards the signal to a process that is not PID 1
+			// any more, and reaps what it leaves behind. It is what
+			// `docker run --init` is for, and Podman spells it the same way.
+			"Init":        true,
+			"NetworkMode": "bridge",
+			"PidMode":     "",
+			"CapAdd":      []string{},
+			"SecurityOpt": []string{"no-new-privileges"},
 		},
 	}
 	if spec.Dir != "" {

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/crgimenes/hostd/api"
+	"github.com/crgimenes/hostd/daemon"
 	"github.com/crgimenes/hostd/logs"
 	"github.com/crgimenes/hostd/metrics"
 	"github.com/crgimenes/hostd/service"
@@ -232,10 +233,15 @@ func TestARemoveTakesTheServiceOffTheMachine(t *testing.T) {
 	waitFor(t, "the deploy", func() bool { return sup.count(&sup.redeployed) == 1 })
 
 	get(t, view, "/act/do/remove/yuki/caddy")
-	waitFor(t, "the removal to reach the daemon", func() bool { return sup.count(&sup.removed) == 1 })
-	_, err := os.Stat(filepath.Join(services, "caddy.filo"))
-	if !os.IsNotExist(err) {
-		t.Fatalf("the declaration is still on the machine: %v", err)
+	// Waited on the FILE, not on the supervisor's counter: the counter moves
+	// inside the supervisor and the declaration goes after it, so waiting on
+	// the counter would read the directory a moment too early.
+	waitFor(t, "the declaration to leave the machine", func() bool {
+		_, err := os.Stat(filepath.Join(services, "caddy.filo"))
+		return os.IsNotExist(err)
+	})
+	if sup.count(&sup.removed) != 1 {
+		t.Fatalf("the removal did not reach the daemon: %d", sup.count(&sup.removed))
 	}
 }
 
@@ -305,18 +311,6 @@ func TestTheCatalogListsWhatTheTreeDescribes(t *testing.T) {
 	tree := get(t, view, "/").Body.String()
 	if !strings.Contains(tree, `data-act="select/services"`) {
 		t.Fatalf("the tree has no way to reach the catalog: %s", tree)
-	}
-}
-
-// A machine ssh reached where no hostd answered, or one too old for an
-// operation, is not a dead end: this window carries a daemon, and putting it
-// there is a button on the machine's own panel.
-func TestTheMachinePanelCanInstallTheDaemon(t *testing.T) {
-	view, _, _ := actingPanel(t)
-	get(t, view, "/")
-	pane := get(t, view, "/act/select/host/yuki").Body.String()
-	if !strings.Contains(pane, `data-act="do/install/yuki"`) {
-		t.Fatalf("the machine panel cannot put a daemon there: %s", pane)
 	}
 }
 
@@ -411,4 +405,78 @@ func (p *panel) logText() string {
 		out.WriteString(held.Host + " " + held.Service + " " + held.Text + "\n")
 	}
 	return out.String()
+}
+
+// A machine behind this window says so in three places at once: an amber dot
+// beside it in the tree, a line in the log, and a button beside its name.
+func TestAMachineBehindThisWindowSaysSoThreeWays(t *testing.T) {
+	view, _, _ := actingPanel(t)
+	// The window carries whatever this build carries; the machine is made to
+	// look older than any of it.
+	view.snapMu.Lock()
+	view.snap.Fleet[0].Version = "v0.0.1"
+	view.snapMu.Unlock()
+	if daemon.Version() == "" {
+		t.Skip("this build carries no daemon, so nothing can differ from it")
+	}
+
+	page := get(t, view, "/").Body.String()
+	if !strings.Contains(page, `class="dot alert"`) {
+		t.Fatalf("the machine's dot is not amber: %s", page)
+	}
+	pane := get(t, view, "/act/select/host/yuki").Body.String()
+	if !strings.Contains(pane, `id="alert"`) || !strings.Contains(pane, `data-act="do/install/yuki"`) {
+		t.Fatalf("no alert beside the machine's name: %s", pane)
+	}
+	if !strings.Contains(pane, "hostd v0.0.1 here") {
+		t.Fatalf("the alert does not name both versions: %s", pane)
+	}
+
+	view.sayAlert(view.snap.Fleet[0])
+	if !strings.Contains(view.logText(), "v0.0.1 here") {
+		t.Fatalf("the alert is not in the log: %s", view.logText())
+	}
+	// Said once, not every round: a round is two seconds apart.
+	before := strings.Count(view.logText(), "v0.0.1 here")
+	for range 3 {
+		view.sayAlert(view.snap.Fleet[0])
+	}
+	if strings.Count(view.logText(), "v0.0.1 here") != before {
+		t.Fatal("the alert repeats itself every round")
+	}
+}
+
+// A machine level-with this window is quiet: no dot, no line, no button.
+func TestAMachineThatIsCurrentSaysNothing(t *testing.T) {
+	view, _, _ := actingPanel(t)
+	view.snapMu.Lock()
+	view.snap.Fleet[0].Version = daemon.Version()
+	view.snapMu.Unlock()
+
+	pane := get(t, view, "/act/select/host/yuki").Body.String()
+	if strings.Contains(pane, `id="alert"`) {
+		t.Fatalf("a current machine is warned about anyway: %s", pane)
+	}
+}
+
+// The warning clears itself: an install replaces the daemon, so what this
+// window remembers of its version is dropped and the next round asks again.
+// Left cached, the amber dot would stay on a machine that is now current.
+func TestUpdatingAMachineForgetsItsOldVersion(t *testing.T) {
+	view, _, _ := actingPanel(t)
+	view.snapMu.Lock()
+	view.snap.Fleet[0].Version = "v0.0.1"
+	view.snapMu.Unlock()
+	view.sayAlert(view.snap.Fleet[0])
+
+	view.forgetVersion("yuki")
+	if view.knownVersion("yuki") != "" {
+		t.Fatal("the old version survived the update, so the dot would stay amber")
+	}
+	// And the same warning can be said again if it turns out to still be true.
+	said := strings.Count(view.logText(), "v0.0.1 here")
+	view.sayAlert(fleetHost{Host: "yuki", Version: "v0.0.1"})
+	if strings.Count(view.logText(), "v0.0.1 here") == said {
+		t.Fatal("a warning silenced before the update stays silenced after it")
+	}
 }

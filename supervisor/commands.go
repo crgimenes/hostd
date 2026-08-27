@@ -304,12 +304,21 @@ func (s *Supervisor) Remove(name string) (bool, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), svc.StopGrace()+2*runtimeTimeout)
 	defer cancel()
-	s.converge.Lock()
-	defer s.converge.Unlock()
-	s.retire(ctx, svc)
+	// The declaration goes FIRST, and that is what makes the converge mutex
+	// unnecessary here: a drift round finding no declaration cannot recreate
+	// what is being taken away, so nothing has to be locked out while the
+	// container spends its grace period dying. Holding the mutex across that
+	// wait blocked every other converge on the machine — two removals asked
+	// for at once waited one behind the other, which is what "I clicked both
+	// and they went a long time later" was.
+	//
+	// The order costs one visible failure mode instead: a daemon that dies in
+	// between leaves a container no file declares, which the status reports as
+	// an orphan. Visible beats blocking.
 	s.mu.Lock()
 	delete(s.declared, name)
 	s.mu.Unlock()
+	s.retire(ctx, svc)
 	s.event(logs.EventStopped, name, "removed from this machine; the tree still describes it, and a deploy puts it back")
 	s.nudge()
 	return true, nil

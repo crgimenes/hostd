@@ -540,3 +540,26 @@ func TestAPruneWithoutAuthorisationRemovesNothing(t *testing.T) {
 		t.Fatalf("the machine held %d images and now holds %d", len(before), len(after))
 	}
 }
+
+// Which images a removal may take away, and which it must leave: the same rule
+// the cleanup follows. A public base image carries no stamp — it cannot even be
+// pushed — so deleting it would cost the machine a download off the internet on
+// the very next deploy. Measured before this: fifty megabytes, fifteen seconds.
+func TestOnlyWhatHostdPutHereIsHostdsToRemove(t *testing.T) {
+	held := []docker.ImageSummary{
+		{Digest: "sha256:aa", Tags: []string{"site:laptop", "site:hostd-abc123def456"}},
+		{Digest: "sha256:bb", Tags: []string{"caddy:2-alpine"}},
+	}
+	if !ourImage(held, "site:laptop") {
+		t.Fatal("an image hostd pushed was not recognised as hostd's")
+	}
+	if !ourImage(held, "site:hostd-abc123def456") {
+		t.Fatal("the stamp itself was not recognised")
+	}
+	if ourImage(held, "caddy:2-alpine") {
+		t.Fatal("a public base image was claimed as hostd's, so a removal would delete it")
+	}
+	if ourImage(held, "nothing:here") {
+		t.Fatal("an image the machine does not hold was claimed; not knowing is not permission")
+	}
+}

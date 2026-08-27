@@ -34,6 +34,11 @@ type detailView struct {
 	Window    int
 	Frozen    bool
 	RangeText string
+	// What is wrong with the machine itself, beside its name, with the button
+	// that fixes it: there is no way to miss it and no way to mistake it for a
+	// service's problem.
+	Alert    string
+	AlertAct string
 }
 
 type cardView struct {
@@ -131,7 +136,8 @@ type statusView struct {
 // their own fragments. A pane replaced under a pointer eats the click.
 func (d detailView) StructureKey() string {
 	var key strings.Builder
-	fmt.Fprintf(&key, "%s|%s|%v|%s|%d|%v|%v|%s\n", d.Title, d.Subtitle, d.Single, d.Empty, d.Window, d.Watching, d.Frozen, d.RangeText)
+	fmt.Fprintf(&key, "%s|%s|%v|%s|%d|%v|%v|%s|%s|%s\n", d.Title, d.Subtitle, d.Single, d.Empty,
+		d.Window, d.Watching, d.Frozen, d.RangeText, d.Alert, d.AlertAct)
 	for _, card := range d.Cards {
 		fmt.Fprintf(&key, "%s|%s|%s|%s|%d|%d|%v\n", card.Key, card.Heading, card.Link, card.Problem, len(card.Charts), len(card.Numbers), card.Machines)
 		for _, row := range card.Rows {
@@ -443,6 +449,8 @@ func hostDetail(snap snapshot, view viewState) detailView {
 		// rebuilt under a pointer eats the click.
 		out.Subtitle = host.Error
 	}
+	warning := alertFor(host)
+	out.Alert, out.AlertAct = warning.Text, warning.Act
 	if host.Error != "" && len(host.Services) == 0 {
 		out.Empty = host.Error
 		return out
@@ -465,14 +473,6 @@ func hostDetail(snap snapshot, view viewState) detailView {
 		Heading: "Load",
 		Numbers: numbersOf(host),
 		Charts:  []chartView{load},
-		// The machine's own operation: put this window's hostd there. It is
-		// what a machine with no daemon, or one too old for an operation,
-		// needs — and it is where that error leads.
-		Buttons: []buttonView{{
-			Label: "install hostd",
-			Icon:  "box-arrow-up",
-			Act:   "do/install/" + host.Host,
-		}},
 	})
 
 	stacked := stackedLayers(host)

@@ -24,6 +24,7 @@
 	--grid: rgba(0, 0, 0, 0.07);
 
 	--running: #34c759;
+	--alert: #ffcc00;
 	--scheduled: #007aff;
 	--starting: #ff9f0a;
 	--stopped: rgba(60, 60, 67, 0.35);
@@ -288,6 +289,7 @@ body.narrow .narrowOnly {
 }
 
 .dot.running { background: var(--running); }
+.dot.alert { background: var(--alert); }
 .dot.scheduled { background: var(--scheduled); }
 .dot.starting { background: var(--starting); }
 .dot.failed { background: var(--failed); }
@@ -389,6 +391,31 @@ body.noLog #console {
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
+}
+
+/* The machine asking for attention, beside its own name, with the one button
+   that answers it. Amber because it is not broken — it is behind. */
+#alert {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 11px;
+	color: var(--label);
+	background: color-mix(in srgb, var(--alert) 22%, transparent);
+	border: 0.5px solid var(--alert);
+	border-radius: 20px;
+	padding: 3px 4px 3px 10px;
+	white-space: nowrap;
+}
+
+#alert button {
+	font-size: 11px;
+	padding: 2px 9px;
+	border-radius: 14px;
+	border: 0;
+	background: var(--alert);
+	color: #000;
+	font-weight: 500;
 }
 
 #controls {

@@ -483,6 +483,11 @@ func worst(host fleetHost) string {
 	if host.Error != "" {
 		return "unreachable"
 	}
+	// Amber is the machine itself asking for attention — a daemon behind this
+	// window — and it loses to anything actually broken below it.
+	if alertFor(host).Act != "" {
+		return "alert"
+	}
 	order := []string{supervisor.StateFailed, supervisor.StateStarting, supervisor.StateStopped,
 		supervisor.StateScheduled, supervisor.StateRunning}
 	found := len(order) - 1

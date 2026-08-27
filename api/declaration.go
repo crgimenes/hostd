@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/crgimenes/hostd/docker"
 	"github.com/crgimenes/hostd/filoconf"
 	"github.com/crgimenes/hostd/service"
 	"github.com/crgimenes/hostd/state"
@@ -276,11 +277,37 @@ func (s *Server) releaseImage(ctx context.Context, image string) string {
 			return fmt.Sprintf("kept: %s still declares it", other.Name)
 		}
 	}
+	// Only what hostd put here is hostd's to take away — the same rule the
+	// cleanup follows, and it has to be the same rule: a public base image
+	// carries no stamp because it cannot be pushed at all, so removing a
+	// service that used one would delete something this machine has to fetch
+	// off the internet again on the very next deploy. Measured: fifty
+	// megabytes and fifteen seconds, every time.
+	held, listErr := s.runtime.Images(ctx)
+	if listErr != nil {
+		return "kept: cannot tell whether hostd put it here: " + listErr.Error()
+	}
+	if !ourImage(held, image) {
+		return "kept: hostd did not put it here, so it is not hostd's to remove"
+	}
 	err := s.runtime.RemoveImage(ctx, image)
 	if err != nil {
 		return "kept: " + err.Error()
 	}
 	return "removed " + image
+}
+
+// Whether the machine holds this name as an image hostd stamped. A name the
+// runtime does not hold at all answers false: not knowing is not permission.
+func ourImage(held []docker.ImageSummary, image string) bool {
+	for _, candidate := range held {
+		if !slices.Contains(candidate.Tags, image) {
+			continue
+		}
+		_, marked := managedTag(candidate.Tags)
+		return marked
+	}
+	return false
 }
 
 // The set of services a tree carries, and what a machine stopped holding

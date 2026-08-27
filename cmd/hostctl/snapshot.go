@@ -138,7 +138,28 @@ func (p *panel) roundOne(ctx context.Context, host string) {
 	}
 	answer := p.ask(asking, host, fromMS, toMS, p.sequences()[host], host == imagesHost(view))
 	p.absorb([]fleetHost{answer})
+	p.sayAlert(answer)
 	p.push()
+}
+
+// sayAlert puts a machine-level warning in the log, ONCE for as long as it
+// stays the same thing: a round says it every two seconds, and a line repeated
+// every two seconds is a log nobody reads. Keyed by what the warning is, so a
+// machine that moves to another old version says so again.
+func (p *panel) sayAlert(host fleetHost) {
+	warning := alertFor(host)
+	if warning.Act == "" {
+		return
+	}
+	key := host.Host + "\x00" + warning.Text
+	p.busyMu.Lock()
+	already := p.said[key]
+	p.said[key] = true
+	p.busyMu.Unlock()
+	if already {
+		return
+	}
+	p.sayLine(host.Host, "hostd", warning.Text+" — the button beside the machine's name updates it", false)
 }
 
 // Which machine, if any, is being asked for its images this round: the one
@@ -177,6 +198,7 @@ func (p *panel) absorb(fleet []fleetHost) {
 				host.Services = known.Services
 				host.Metrics = known.Metrics
 			}
+			host.Version = known.Version
 			// A failed round asked for no images either, so what is on the
 			// image screen would empty itself every time ssh hiccups.
 			if len(known.Images) > 0 {

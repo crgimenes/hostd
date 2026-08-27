@@ -210,8 +210,11 @@ func (p *panel) install(host string) {
 		return
 	}
 	// The daemon this window was talking to has been replaced, so the rounds'
-	// pipe is dead: let it go, and the next round dials the one that came up.
+	// pipe is dead: let it go, and the next round dials the one that came up
+	// and asks it what it is — a version left in the cache would keep the
+	// amber dot on a machine that is now current.
 	p.drop(host)
+	p.forgetVersion(host)
 	p.wake()
 }
 
