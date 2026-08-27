@@ -482,11 +482,11 @@ type ImagePrune struct {
 }
 
 // imagesToPrune is the whole policy, in one function, so the plan and the
-// removal cannot drift apart: only what hostd marked is ever a candidate, the
-// newest few of each repository stay, and anything a container or a declaration
-// holds stays whatever its age. Kept counts only marked images — what something
-// else on this machine built is neither kept nor removed by us, it is simply
-// not ours.
+// removal cannot drift apart: only what hostd marked is ever a candidate,
+// anything a container or a declaration holds stays whatever its age, and the
+// newest few of each repository this machine still names stay so a bad deploy
+// can be rolled back. Kept counts only marked images — what something else on
+// this machine built is neither kept nor removed by us, it is simply not ours.
 func imagesToPrune(held []docker.ImageSummary, holders map[string]string, keep int) (remove []ImageChange, kept int) {
 	lines := make(map[string][]docker.ImageSummary)
 	for _, image := range held {
@@ -496,6 +496,7 @@ func imagesToPrune(held []docker.ImageSummary, holders map[string]string, keep i
 		}
 		lines[repo] = append(lines[repo], image)
 	}
+	named := namedRepositories(held, holders)
 	for _, repo := range slices.Sorted(maps.Keys(lines)) {
 		versions := lines[repo]
 		// Newest first, the same order the list answers in, so what an operator
@@ -506,8 +507,18 @@ func imagesToPrune(held []docker.ImageSummary, holders map[string]string, keep i
 			}
 			return strings.Compare(a.Digest, b.Digest)
 		})
+		// Keeping versions is for going back, and there is nowhere to go back
+		// to for a repository this machine no longer names: the last service
+		// that used it was removed, and putting it back is a deploy, which
+		// resolves the image on its own. Without this a repository with a
+		// single version was kept for ever, which is how the image of a
+		// service removed by a daemon older than 2026-08-26 stayed on disk.
+		floor := keep
+		if !named[repo] {
+			floor = 0
+		}
 		for at, image := range versions {
-			if at < keep || heldBy(image, holders) != "" {
+			if at < floor || heldBy(image, holders) != "" {
 				kept++
 				continue
 			}
@@ -520,6 +531,29 @@ func imagesToPrune(held []docker.ImageSummary, holders map[string]string, keep i
 		}
 	}
 	return remove, kept
+}
+
+// The repositories something on this machine still names: a declaration naming
+// any version of one, or a container running any version of one. A declaration
+// pointing at a version the machine does not hold yet still names the
+// repository — the older versions of that service are exactly what a rollback
+// needs, so the tag it names is enough.
+func namedRepositories(held []docker.ImageSummary, holders map[string]string) map[string]bool {
+	named := make(map[string]bool)
+	for name, by := range holders {
+		if by == UsedByDeclared {
+			named[RepositoryOf(name)] = true
+		}
+	}
+	// A container holds an image by digest, which says nothing about the
+	// repository, so the marked image itself is what connects the two.
+	for _, image := range held {
+		repo, marked := markedRepository(image.Tags)
+		if marked && heldBy(image, holders) != "" {
+			named[repo] = true
+		}
+	}
+	return named
 }
 
 // pruneImages plans, and carries the plan out only when told to. It is one

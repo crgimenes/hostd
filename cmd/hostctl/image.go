@@ -70,7 +70,7 @@ func runImagePrune(ctx context.Context, client *api.Client, opt options) (int, e
 }
 
 func printPrune(out io.Writer, target string, plan api.ImagePrune) {
-	_, _ = fmt.Fprintf(out, "host %s, keeping %d version(s) of each image\n", target, plan.Keep)
+	_, _ = fmt.Fprintf(out, "host %s, keeping %d version(s) of each image still declared here\n", target, plan.Keep)
 	if len(plan.Remove) == 0 {
 		_, _ = fmt.Fprintf(out, "nothing to remove; %d image(s) of ours are held or within the %d kept\n", plan.Kept, plan.Keep)
 		return

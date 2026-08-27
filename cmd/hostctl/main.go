@@ -101,7 +101,7 @@ func run(args []string) int {
 	flags.BoolVar(&opt.filoOut, "filo", false, "write the result as Filo and nothing else")
 	flags.BoolVar(&opt.jsonOut, "json", false, "write the result as JSON and nothing else")
 	flags.IntVar(&opt.limit, "limit", 200, "maximum number of log lines")
-	flags.IntVar(&opt.keep, "keep", api.DefaultImageKeep, "versions of each image a prune leaves behind")
+	flags.IntVar(&opt.keep, "keep", api.DefaultImageKeep, "versions of each still-declared image a prune leaves behind")
 	flags.StringVar(&opt.stream, "stream", "", "only stdout, stderr or event")
 	flags.StringVar(&opt.service, "service", "", "only this service")
 	flags.StringVar(&opt.kind, "kind", "", "only events of this kind, e.g. service.exited")

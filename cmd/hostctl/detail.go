@@ -313,7 +313,7 @@ func imagesDetail(snap snapshot, view viewState) detailView {
 	managed := cardView{
 		Key:      "images",
 		Heading:  "Managed by hostd",
-		Aside:    fmt.Sprintf("a cleanup keeps %d of each", api.DefaultImageKeep),
+		Aside:    fmt.Sprintf("a cleanup keeps %d of each still declared", api.DefaultImageKeep),
 		GridHead: []string{"image", "size", "created", "used by", "digest"},
 		Numbers:  imageNumbers(ours, true),
 		Grid:     imageRows(ours),

@@ -411,7 +411,8 @@ func markedImage(digest, repo string, created time.Time, bytes int64) docker.Ima
 }
 
 // The policy, which is the part a mistake cannot be taken back from: the newest
-// few of each repository stay, and each repository is its own line of versions.
+// few of each repository this machine still names stay, and each repository is
+// its own line of versions.
 func TestPruneKeepsTheNewestFewOfEachRepository(t *testing.T) {
 	now := time.Now()
 	held := []docker.ImageSummary{
@@ -421,7 +422,13 @@ func TestPruneKeepsTheNewestFewOfEachRepository(t *testing.T) {
 		markedImage("site2", "site", now.Add(-time.Hour), 20),
 		markedImage("api1", "api", now, 50),
 	}
-	remove, kept := imagesToPrune(held, nil, 3)
+	// Both services are declared here, which is what buys their older versions
+	// the keep-N floor.
+	holders := map[string]string{
+		"site:" + ManagedTag("site1"): UsedByDeclared,
+		"api:" + ManagedTag("api1"):   UsedByDeclared,
+	}
+	remove, kept := imagesToPrune(held, holders, 3)
 
 	if len(remove) != 1 {
 		t.Fatalf("removing %d image(s), want the one oldest of site: %+v", len(remove), remove)
@@ -561,5 +568,47 @@ func TestOnlyWhatHostdPutHereIsHostdsToRemove(t *testing.T) {
 	}
 	if ourImage(held, "nothing:here") {
 		t.Fatal("an image the machine does not hold was claimed; not knowing is not permission")
+	}
+}
+
+// Versions are kept so a bad deploy can be gone back on, and a repository this
+// machine no longer names has nowhere to go back to: the service was removed,
+// and putting it back is a deploy, which resolves the image on its own. Without
+// this, a repository holding a single version was kept for ever — which is how
+// the image of a service removed by a daemon older than the 2026-08-26 fix
+// stayed on disk with nothing able to reclaim it.
+func TestPruneRemovesEveryVersionOfARepositoryNothingNames(t *testing.T) {
+	now := time.Now()
+	held := []docker.ImageSummary{
+		markedImage("live1", "site", now, 10),
+		markedImage("gone1", "removed-service", now, 20),
+	}
+	holders := map[string]string{"site:" + ManagedTag("live1"): UsedByDeclared}
+	remove, kept := imagesToPrune(held, holders, 3)
+
+	if len(remove) != 1 || remove[0].Digest != "gone1" {
+		t.Fatalf("removing %+v, want only the version of the repository nothing names", remove)
+	}
+	if kept != 1 {
+		t.Fatalf("kept %d, want the declared one", kept)
+	}
+}
+
+// A declaration naming a version this machine does not hold yet still names the
+// repository, and the versions it holds are exactly what a rollback would need.
+func TestPruneKeepsOldVersionsOfADeclaredServiceNotYetPulled(t *testing.T) {
+	now := time.Now()
+	held := []docker.ImageSummary{
+		markedImage("v1", "site", now, 10),
+		markedImage("v2", "site", now.Add(-time.Hour), 10),
+	}
+	holders := map[string]string{"site:v3": UsedByDeclared}
+	remove, kept := imagesToPrune(held, holders, 3)
+
+	if len(remove) != 0 {
+		t.Fatalf("a prune offered up the versions a declared service could go back to: %+v", remove)
+	}
+	if kept != 2 {
+		t.Fatalf("kept %d, want both", kept)
 	}
 }
