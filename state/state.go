@@ -75,21 +75,80 @@ func Open(ctx context.Context, dir string) (*Store, error) {
 		return nil, err
 	}
 	s := &Store{dir: dir, generation: FirstGeneration}
+	err = s.readSnapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	s.recent = s.loadAudit(ctx)
+	return s, nil
+}
+
+func (s *Store) readSnapshot(ctx context.Context) error {
 	data, err := os.ReadFile(s.snapshotPath()) // #nosec G304 -- inside hostd's own state directory
 	if err != nil {
 		if os.IsNotExist(err) {
-			return s, nil
+			return nil
 		}
-		return nil, err
+		return err
 	}
 	snap := snapshot{Generation: FirstGeneration}
 	err = filoconf.Decode(ctx, "generation.filo", string(data), &snap)
 	if err != nil {
-		return nil, fmt.Errorf("read state: %w", err)
+		return fmt.Errorf("read state: %w", err)
 	}
 	s.generation = snap.Generation
 	s.seq = snap.AuditSeq
-	return s, nil
+	return nil
+}
+
+// The history a client asks for is the one on disk. Answering from what THIS
+// process happened to record makes a machine whose daemon restarted say
+// "nothing has changed this host yet" at generation 33, with the entries
+// sitting in audit.filo — and comparing two machines like that turned an
+// investigation on 2026-08-26 into a hunt for a problem that was not there.
+func (s *Store) loadAudit(ctx context.Context) []Entry {
+	// Both files, oldest first: after a rotation the current one can hold a
+	// single line. Two reads of at most maxAuditBytes, once, at startup.
+	out := s.readAudit(ctx, s.auditPath()+".prev")
+	out = append(out, s.readAudit(ctx, s.auditPath())...)
+	if len(out) > maxAuditMemory {
+		out = out[len(out)-maxAuditMemory:]
+	}
+	return out
+}
+
+// A daemon that will not start because its own audit is unreadable is worse
+// than one that starts having lost the history: the machine still has services
+// to supervise. So this reports and carries on.
+func (s *Store) readAudit(ctx context.Context, path string) []Entry {
+	data, err := os.ReadFile(path) // #nosec G304 -- inside hostd's own state directory
+	if err != nil {
+		if !os.IsNotExist(err) {
+			_, _ = fmt.Fprintf(os.Stderr, "hostd: could not read the audit log %s: %v\n", path, err)
+		}
+		return nil
+	}
+	var out []Entry
+	unreadable := 0
+	for line := range strings.Lines(string(data)) {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var e Entry
+		err = filoconf.Decode(ctx, filepath.Base(path), line, &e)
+		if err != nil {
+			// A kill in the middle of an append leaves half a line, and the
+			// half is the newest one. Counted, never silent.
+			unreadable++
+			continue
+		}
+		out = append(out, e)
+	}
+	if unreadable > 0 {
+		_, _ = fmt.Fprintf(os.Stderr, "hostd: %s: %d audit line(s) could not be read\n", path, unreadable)
+	}
+	return out
 }
 
 func (s *Store) snapshotPath() string { return filepath.Join(s.dir, "generation.filo") }

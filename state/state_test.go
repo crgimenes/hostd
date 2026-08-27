@@ -229,3 +229,80 @@ func TestAnAcceptedOperationThatChangedNothingHoldsTheGeneration(t *testing.T) {
 		t.Fatalf("the attempt was not audited at the generation it did not change: %#v", recent)
 	}
 }
+
+// The history has to survive a restart of the daemon: it is on disk, and a
+// machine whose daemon reloaded answering "nothing has changed this host yet"
+// sent a real investigation looking for a problem that was not there.
+func TestAuditSurvivesReopen(t *testing.T) {
+	s, dir := open(t)
+	s.Record(Entry{Operation: "service.stop", Target: "api", Result: ResultOK}, true)
+	s.Record(Entry{Operation: "service.start", Target: "api", Result: ResultOK}, true)
+
+	reopened, err := Open(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	entries := reopened.Recent(0)
+	if len(entries) != 2 {
+		t.Fatalf("audit after reopen has %d entries, want 2", len(entries))
+	}
+	if entries[1].Operation != "service.start" || entries[1].Target != "api" {
+		t.Fatalf("newest entry after reopen = %+v", entries[1])
+	}
+	if entries[0].Seq != 1 || entries[1].Seq != 2 {
+		t.Fatalf("sequence numbers did not come back: %d, %d", entries[0].Seq, entries[1].Seq)
+	}
+}
+
+// A kill in the middle of an append leaves half a line, and refusing to start
+// over it would leave the machine unsupervised over lost history.
+func TestHalfWrittenAuditLineDoesNotStopTheDaemon(t *testing.T) {
+	s, dir := open(t)
+	s.Record(Entry{Operation: "apply", Result: ResultOK}, true)
+
+	f, err := os.OpenFile(filepath.Join(dir, "audit.filo"), os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatalf("open the audit: %v", err)
+	}
+	_, err = f.WriteString(`(list (tuple "seq" 2) (tuple "operat`)
+	if err != nil {
+		t.Fatalf("write half a line: %v", err)
+	}
+	err = f.Close()
+	if err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	reopened, err := Open(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("reopen over a half-written line: %v", err)
+	}
+	entries := reopened.Recent(0)
+	if len(entries) != 1 || entries[0].Operation != "apply" {
+		t.Fatalf("audit after a half-written line = %+v", entries)
+	}
+}
+
+// After a rotation the current file can hold a single line, and the window is
+// the ceiling on entries, not on files.
+func TestRotatedAuditStillAnswers(t *testing.T) {
+	s, dir := open(t)
+	s.Record(Entry{Operation: "service.put", Target: "old", Result: ResultOK}, false)
+	err := os.Rename(filepath.Join(dir, "audit.filo"), filepath.Join(dir, "audit.filo.prev"))
+	if err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	s.Record(Entry{Operation: "service.put", Target: "new", Result: ResultOK}, false)
+
+	reopened, err := Open(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	entries := reopened.Recent(0)
+	if len(entries) != 2 {
+		t.Fatalf("audit across the rotation has %d entries, want 2", len(entries))
+	}
+	if entries[0].Target != "old" || entries[1].Target != "new" {
+		t.Fatalf("rotation lost the order: %+v", entries)
+	}
+}
