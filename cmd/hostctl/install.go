@@ -49,15 +49,12 @@ func runInstall(ctx context.Context, opt options, args []string) (int, error) {
 	// honest before-state of a first install.
 	before := strings.TrimSpace(remoteOutput(ctx, host, "/usr/local/bin/hostd -version 2>/dev/null || true"))
 
-	// An old client installing "its" daemon over a newer one is a downgrade
-	// wearing the word upgrade, and it is the mistake this whole comparison
-	// exists to catch: the operator forgot to update hostctl, and -all install
-	// would walk the fleet backwards. Refused before anything is sent, because
-	// after the restart the damage is already done.
-	behind, refusal := goingBackwards(host, before, daemon.Version())
-	if behind && !opt.allowDestr {
-		return exitRefused, refusal
-	}
+	// Nothing is refused on version grounds (crg, 2026-08-27): neither end needs
+	// to know which of two versions is newer, and putting an older daemon back
+	// is a legitimate thing to want — a machine that just went amber may be
+	// amber BECAUSE of the newest one. What the operator gets instead is the
+	// transition named in the report, and the amber dot until the two agree.
+	//
 	// A diagnostic, not a refusal: a development build installing its own zips
 	// is ordinary, and this only says the two stamps disagree. The window says
 	// the same thing into its log, where its operator is looking.
@@ -192,10 +189,6 @@ func runningServices(ctx context.Context, opt options, host string) []supervisor
 	return runningIn(statuses)
 }
 
-// goingBackwards reads the version line the machine answered and says whether
-// installing would take it back. A machine that answers nothing has no hostd
-// yet, and a line neither side can rank is not called a downgrade: refusing on
-// a guess would block the install that repairs a machine answering nonsense.
 // The daemon this binary carries comes from daemon/zips, which `make` writes
 // and a bare `go build ./cmd/hostctl` leaves exactly as it found it. Same
 // build, same string. Different strings mean the embedded daemon is from
@@ -216,33 +209,23 @@ func staleDaemon() string {
 		version.Version, carried)
 }
 
-func goingBackwards(host, before, carried string) (bool, error) {
-	running := versionIn(before)
-	if running == "" || carried == "" {
-		return false, nil
-	}
-	order, comparable := version.Compare(running, carried)
-	if !comparable || order <= 0 {
-		return false, nil
-	}
-	return true, fmt.Errorf(
-		"%s runs %s and this hostctl carries %s, so installing would take it backwards; update hostctl, or pass -allow-destructive if going back is what you mean",
-		host, running, carried)
-}
-
 // "hostd <version> (protocol N, schema N)" is what a daemon answers, but a
-// machine can answer anything: what cannot be read is reported as no version
-// rather than indexed into.
+// machine can answer anything: what does not read as that answer is reported as
+// no version rather than indexed into. Only the field count was checked before,
+// so "something went wrong" produced the version "went".
 func versionIn(line string) string {
 	fields := strings.Fields(line)
-	if len(fields) < 2 {
+	if len(fields) < 2 || fields[0] != "hostd" {
 		return ""
 	}
 	return fields[1]
 }
 
-// What changed, in the words an operator is asking in: a first install, an
-// upgrade from a named version, or a machine that already had this one.
+// What changed, in the words an operator is asking in: a first install, a
+// machine that already had this one, or the version it had before. Not
+// "upgraded" and not "downgraded" — naming which direction it went would need
+// an order this program deliberately does not compute, and calling a downgrade
+// an upgrade is the kind of small lie that gets believed later.
 func transition(before, now string) string {
 	switch {
 	case before == "":
@@ -252,15 +235,9 @@ func transition(before, now string) string {
 	}
 	was := versionIn(before)
 	if was == "" {
-		return "upgraded"
+		return "replaced"
 	}
-	// Calling a downgrade an upgrade is the kind of small lie that gets
-	// believed later, when somebody reads the line and stops looking.
-	order, comparable := version.Compare(was, now)
-	if comparable && order > 0 {
-		return "downgraded from " + was
-	}
-	return "upgraded from " + was
+	return "replaced " + was
 }
 
 // The daemon for the machine's architecture, or the reason there is none. A

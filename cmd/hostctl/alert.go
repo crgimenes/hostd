@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/crgimenes/hostd/daemon"
-	"github.com/crgimenes/hostd/version"
 )
 
 // What is wrong with a machine that is not wrong with a service on it: no
@@ -18,9 +17,9 @@ type alert struct {
 }
 
 // alertFor reads a machine and answers what is wrong with the machine itself.
-// A daemon that cannot be ranked against this window's — a development build,
-// a release candidate — is NOT called behind: guessing an order is how a fleet
-// walks backwards in silence, and the version command already refuses to.
+// The whole version test is an equality (crg, 2026-08-27): different means one
+// of the two ends is the wrong one for the other, and which one is the
+// operator's call — they may be putting an older daemon back on purpose.
 func alertFor(host fleetHost) alert {
 	carried := daemon.Version()
 	if host.Error != "" {
@@ -39,15 +38,9 @@ func alertFor(host fleetHost) alert {
 	if carried == "" || host.Version == "" || host.Version == carried {
 		return alert{}
 	}
-	// Order when the two can be ranked, and no claim of order when they
-	// cannot: a development build carries a stamp nothing can sort, and
-	// guessing is how a fleet walks backwards in silence. What is left is
-	// still worth saying — the two differ — so the alert NAMES BOTH and lets
-	// the operator decide, instead of asserting which is newer.
-	order, comparable := version.Compare(host.Version, carried)
-	if comparable && order >= 0 {
-		return alert{}
-	}
+	// Both versions named, and no claim about which is newer: the operator
+	// decides what to do about a difference, and the button offers the one
+	// thing this window can do about it.
 	return alert{
 		Text: fmt.Sprintf("hostd %s here, %s in this window", host.Version, carried),
 		Act:  "do/install/" + host.Host,

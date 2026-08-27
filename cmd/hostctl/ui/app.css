@@ -394,7 +394,7 @@ body.noLog #console {
 }
 
 /* The machine asking for attention, beside its own name, with the one button
-   that answers it. Amber because it is not broken — it is behind. */
+   that answers it. Amber because it is not broken — it just does not match. */
 #alert {
 	display: inline-flex;
 	align-items: center;

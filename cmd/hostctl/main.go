@@ -255,8 +255,8 @@ usage:
   hostctl -all status                  ask every machine at once
   hostctl status                       what every service is doing
   hostctl describe                     versions and capabilities of the daemon
-  hostctl -all version                 which machines are behind the daemon this
-                                       hostctl carries, and which are ahead of it
+  hostctl -all version                 which machines are not on the daemon this
+                                       hostctl carries
   hostctl service deploy <name>        put a service from the tree on that
                                        machine — declaration, image and a fresh
                                        container; deploying again overwrites,

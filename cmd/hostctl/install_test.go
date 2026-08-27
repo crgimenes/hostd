@@ -23,17 +23,32 @@ func TestTheInstallReportsWhatChanged(t *testing.T) {
 			now:    "v0.0.3",
 			want:   "unchanged",
 		},
-		"an upgrade names what it replaced": {
+		"a change names what it replaced": {
 			before: "hostd v0.0.1 (protocol 1, schema 1)",
 			now:    "v0.0.3",
-			want:   "upgraded from v0.0.1",
+			want:   "replaced v0.0.1",
+		},
+		// No direction is claimed (crg, 2026-08-27): naming one would need an
+		// order this program does not compute, and an older daemon going back on
+		// purpose is a legitimate install.
+		"a newer daemon replaced by an older one, with no word about direction": {
+			before: "hostd v0.1.0 (protocol 1, schema 1)",
+			now:    "v0.0.3",
+			want:   "replaced v0.1.0",
 		},
 		// A machine can answer anything at all; indexing into it would turn a
 		// strange banner into a panic in the middle of a fleet-wide install.
 		"an answer nothing can be read out of": {
 			before: "???",
 			now:    "v0.0.3",
-			want:   "upgraded",
+			want:   "replaced",
+		},
+		// It used to be read as the version "went", because only the field count
+		// was checked.
+		"an answer with enough words to look like one": {
+			before: "something went wrong",
+			now:    "v0.0.3",
+			want:   "replaced",
 		},
 	}
 	for name, one := range cases {
