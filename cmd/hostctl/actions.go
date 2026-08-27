@@ -190,6 +190,12 @@ func (p *panel) install(host string) {
 	opt := p.opt
 	opt.host = host
 	opt.out = lineWriter{say: func(text string) { p.sayLine(host, "hostd", text, false) }}
+	// The CLI writes this to stderr; a window has no stderr its operator reads,
+	// and the log is where they are looking.
+	stale := staleDaemon()
+	if stale != "" {
+		p.sayLine(host, "hostd", stale, false)
+	}
 	_, err := runInstall(ctx, opt, nil)
 	if err != nil {
 		p.problem(host, "hostd", err)

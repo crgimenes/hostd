@@ -58,6 +58,13 @@ func runInstall(ctx context.Context, opt options, args []string) (int, error) {
 	if behind && !opt.allowDestr {
 		return exitRefused, refusal
 	}
+	// A diagnostic, not a refusal: a development build installing its own zips
+	// is ordinary, and this only says the two stamps disagree. The window says
+	// the same thing into its log, where its operator is looking.
+	stale := staleDaemon()
+	if stale != "" {
+		_, _ = fmt.Fprintf(os.Stderr, "hostctl: %s\n", stale)
+	}
 
 	// And what it is DOING now, which is what the upgrade must not change. A
 	// machine with no daemon yet has nothing to lose, and says so by answering
@@ -189,6 +196,26 @@ func runningServices(ctx context.Context, opt options, host string) []supervisor
 // installing would take it back. A machine that answers nothing has no hostd
 // yet, and a line neither side can rank is not called a downgrade: refusing on
 // a guess would block the install that repairs a machine answering nonsense.
+// The daemon this binary carries comes from daemon/zips, which `make` writes
+// and a bare `go build ./cmd/hostctl` leaves exactly as it found it. Same
+// build, same string. Different strings mean the embedded daemon is from
+// another build, and then an install sends a version nobody meant and the
+// amber alert compares against it — which on 2026-08-27 cost a real hunt for
+// a button that was correctly absent. `make` is the fix and the default now;
+// this is the belt.
+func staleDaemon() string {
+	carried := daemon.Version()
+	if carried == "" || carried == version.Version {
+		return ""
+	}
+	// One sentence that is true both ways: a stamped binary whose zips are from
+	// an older build, and an unstamped `go build` that cannot vouch for zips
+	// that may well be its own.
+	return fmt.Sprintf(
+		"this hostctl is %s and carries hostd %s: the stamps disagree, so the embedded daemon may be from another build — make builds both together",
+		version.Version, carried)
+}
+
 func goingBackwards(host, before, carried string) (bool, error) {
 	running := versionIn(before)
 	if running == "" || carried == "" {

@@ -3,6 +3,9 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/crgimenes/hostd/daemon"
+	"github.com/crgimenes/hostd/version"
 )
 
 // The ordinary case, and the one the command exists for: a machine on an older
@@ -117,5 +120,31 @@ func TestTheSameStampOnBothSidesIsTheSameDaemon(t *testing.T) {
 	answer := compareVersions("yuki.local", "v0.0.3-1-gf5059ca-dirty", "v0.0.3-1-gf5059ca-dirty")
 	if answer.State != stateCurrent {
 		t.Fatalf("state = %q, want %q: %+v", answer.State, stateCurrent, answer)
+	}
+}
+
+// The zips are written by `make` and left alone by a bare `go build`, so two
+// disagreeing stamps mean the embedded daemon is from another build — which is
+// how a correctly absent amber button cost a real hunt (crg, 2026-08-27).
+func TestADaemonFromAnotherBuildIsReported(t *testing.T) {
+	carried := daemon.Version()
+	if carried == "" {
+		t.Skip("this build carries no daemon, so there is nothing to disagree with")
+	}
+	was := version.Version
+	t.Cleanup(func() { version.Version = was })
+
+	version.Version = carried
+	if staleDaemon() != "" {
+		t.Fatalf("the same stamp was reported as another build: %q", staleDaemon())
+	}
+
+	version.Version = carried + "-something-else"
+	note := staleDaemon()
+	if note == "" {
+		t.Fatal("a daemon from another build went unreported")
+	}
+	if !strings.Contains(note, carried) || !strings.Contains(note, version.Version) {
+		t.Fatalf("the note names neither stamp: %q", note)
 	}
 }

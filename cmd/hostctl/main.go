@@ -141,6 +141,10 @@ func run(args []string) int {
 			return exitOK
 		}
 		fmt.Printf("carries hostd %s for linux/%s\n", daemon.Version(), strings.Join(carried, ", linux/"))
+		stale := staleDaemon()
+		if stale != "" {
+			fmt.Println(stale)
+		}
 		return exitOK
 	}
 	// No command is the command an operator gives most: watching. Asking for
