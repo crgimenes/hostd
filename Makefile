@@ -8,7 +8,13 @@ VERSION ?= $(shell git describe --tags --always --dirty)
 DIST_DIR ?= dist
 LDFLAGS := -s -w -X main.Version=$(VERSION)
 
-all: build
+# The default is the WHOLE build, which is what anyone typing `make` expects.
+# It was `build` — a plain `go build ./...` — and that leaves daemon/zips as a
+# previous run wrote it: on 2026-08-27 `make` produced a hostctl carrying the
+# daemon of an older version, the amber alert had two identical strings to
+# compare, and a forgotten `make dist` was indistinguishable from a fleet in
+# date. Use `make build` for the quick compile check.
+all: dist
 
 build:
 	go build -trimpath ./...

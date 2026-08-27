@@ -224,8 +224,8 @@ daemon a given client carries.
 It also puts the account you ssh in as into the `hostd` group, which is the
 permission to operate that machine.
 
-From a clone, `make dist` builds a `hostctl` with the daemon embedded, and that
-binary installs the machine the same way.
+From a clone, `make` builds a `hostctl` with the daemon of that same tree
+embedded, and that binary installs the machine the same way.
 
 Only the daemon goes on the machine. `hostctl` is the operator's client and
 runs on the operator's computer; a host that needs the client installed to be
