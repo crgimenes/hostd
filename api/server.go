@@ -735,8 +735,6 @@ func (s *Server) dispatch(ctx context.Context, req Request, actor string) Respon
 		return s.apply(ctx, req, actor)
 	case OpServicePut:
 		return s.stamp(s.putService(ctx, req, actor))
-	case OpServicePrune:
-		return s.stamp(s.pruneServices(ctx, req, actor))
 	default:
 		return Response{
 			Code:    CodeUnknownOp,
@@ -894,7 +892,7 @@ func (s *Server) describe(ctx context.Context) Response {
 			OpDescribe, OpStatus, OpServiceList,
 			OpServiceStart, OpServiceStop, OpServiceRestrt, OpServiceRedeploy, OpServiceRemove,
 			OpPlan, OpApply, OpAudit, OpLogSearch, OpLogFollow, OpMetrics,
-			OpImagePush, OpImagePull, OpImageList, OpImagePrune, OpServicePut, OpServicePrune,
+			OpImagePush, OpImagePull, OpImageList, OpImagePrune, OpServicePut,
 			OpServiceVersions, OpJobRun,
 		},
 	})

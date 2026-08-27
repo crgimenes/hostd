@@ -32,20 +32,12 @@ func runCaddyfile(ctx context.Context, opt options, args []string) (int, error) 
 	if err != nil {
 		return exitFailed, err
 	}
-	// Which machine's proxy this is for. The tree already says where a service
-	// belongs, so no machine has to be reachable to answer it — and a Caddyfile
-	// for yuki must not carry the service that only lives on selene.
-	wanted := declared
-	if opt.host != "" {
-		entry := opt.entry(ctx, opt.host)
-		wanted = nil
-		for _, svc := range declared {
-			if svc.BelongsTo(opt.host, entry.Tags) {
-				wanted = append(wanted, svc)
-			}
-		}
-	}
-	out, err := caddyfile(wanted, opt.config, opt.host)
+	// Every service the tree describes with a domain. Where a service RUNS is
+	// not in the tree any more — it is a per-machine decision — and this
+	// command deliberately needs no machine to be reachable, so it cannot know
+	// and does not guess. What comes out is a file to redirect and then edit,
+	// which is what it always was.
+	out, err := caddyfile(declared, opt.config, opt.host)
 	if err != nil {
 		return exitFailed, err
 	}

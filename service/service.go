@@ -82,12 +82,6 @@ type Service struct {
 	// keep, "/host/path:/path" is the machine's. Nothing is mounted that the
 	// file did not name.
 	Volumes []string `filo:"volumes"`
-	// Which machines this belongs on. A declaration that names neither
-	// belongs on every machine it is pushed to, which is what a fleet of one
-	// wants and what a heterogeneous fleet must be able to say otherwise: the
-	// tree is shared, and the database does not belong on the web machines.
-	Hosts []string `filo:"hosts"`
-	Tags  []string `filo:"tags"`
 	// What a reverse proxy answers on this service's behalf: a name, or a bare
 	// port like ":80" for a machine that serves one thing and matches no name.
 	// Nothing in hostd reads them at runtime — they are what `hostctl caddyfile`
@@ -552,25 +546,4 @@ func LoadDir(ctx context.Context, dir string) ([]Service, error) {
 		return services, fmt.Errorf("%w:\n  %s", ErrInvalid, strings.Join(problems, "\n  "))
 	}
 	return services, nil
-}
-
-// BelongsTo answers whether this declaration is meant for a machine. The name
-// is the one ssh is given, which is the one in ~/.ssh/config: a machine has one
-// name here for the same reason it has one there.
-//
-// Naming neither hosts nor tags means everywhere: a tree that says nothing
-// about placement is a tree whose services all belong wherever it is pushed.
-func (s Service) BelongsTo(name string, tags []string) bool {
-	if len(s.Hosts) == 0 && len(s.Tags) == 0 {
-		return true
-	}
-	if slices.Contains(s.Hosts, name) {
-		return true
-	}
-	for _, tag := range tags {
-		if slices.Contains(s.Tags, tag) {
-			return true
-		}
-	}
-	return false
 }

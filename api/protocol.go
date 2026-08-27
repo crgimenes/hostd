@@ -40,7 +40,6 @@ const (
 	OpImagePrune      = "image.prune"
 	OpServiceVersions = "service.versions"
 	OpServicePut      = "service.put"
-	OpServicePrune    = "service.prune"
 	OpJobRun          = "job.run"
 )
 

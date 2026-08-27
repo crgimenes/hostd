@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/crgimenes/hostd/api"
 	"github.com/crgimenes/hostd/daemon"
 	"github.com/crgimenes/hostd/supervisor"
 	"github.com/crgimenes/hostd/version"
@@ -141,6 +142,31 @@ func kept(wasRunning []supervisor.Status) string {
 		return "no service was running"
 	}
 	return fmt.Sprintf("%d service(s) kept running", len(wasRunning))
+}
+
+// Reaching one named machine, when the caller already knows which. The install
+// and its self-test are the two that do: everything else arrives here through
+// the fan-out, which has connected already.
+func connectTo(ctx context.Context, opt options, host string) (*api.Client, error) {
+	one := opt
+	one.host = host
+	return connect(ctx, one)
+}
+
+func fetchStatuses(ctx context.Context, client *api.Client) ([]supervisor.Status, error) {
+	resp, err := client.Do(ctx, api.Request{Op: api.OpStatus})
+	if err != nil {
+		return nil, err
+	}
+	if resp.Failed() {
+		return nil, resp.Err()
+	}
+	var statuses []supervisor.Status
+	err = decode(ctx, resp.Body, &statuses)
+	if err != nil {
+		return nil, err
+	}
+	return statuses, nil
 }
 
 // runningServices asks the daemon that is there now what it is doing. A machine

@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/crgimenes/hostd/docker"
@@ -308,73 +307,4 @@ func ourImage(held []docker.ImageSummary, image string) bool {
 		return marked
 	}
 	return false
-}
-
-// The set of services a tree carries, and what a machine stopped holding
-// because of it.
-type ServiceSet struct {
-	Names []string `filo:"names"`
-	// Asking: how many services the whole tree holds, so a machine can tell
-	// "the tree declares none of mine" — which is ordinary in a fleet where
-	// placement is declared — from "the tree declares nothing", which is what
-	// a push from the wrong directory looks like.
-	// Answering: how many declarations the machine holds now.
-	Declared int `filo:"declared"`
-}
-
-// pruneServices takes away the declarations the operator's tree no longer
-// carries. Removing a file is not removing a service: what runs keeps running
-// until an apply says otherwise, and the plan is where somebody reviews that.
-func (s *Server) pruneServices(ctx context.Context, req Request, actor string) Response {
-	var keep ServiceSet
-	err := filoconf.Decode(ctx, "prune", req.Body, &keep)
-	if err != nil {
-		return Response{Code: CodeInvalid, Message: err.Error()}
-	}
-	if keep.Declared == 0 {
-		return Response{Code: CodeInvalid, Message: "a prune needs a tree that declares something; this one declares nothing"}
-	}
-	held, err := os.ReadDir(s.services)
-	if os.IsNotExist(err) {
-		return body(ServiceSet{})
-	}
-	if err != nil {
-		return Response{Code: CodeFailed, Message: err.Error()}
-	}
-
-	kept := 0
-	var removed []string
-	for _, entry := range held {
-		name, is := strings.CutSuffix(entry.Name(), service.Extension)
-		if !is {
-			continue
-		}
-		if slices.Contains(keep.Names, name) {
-			kept++
-			continue
-		}
-		err = os.Remove(filepath.Join(s.services, name+service.Extension))
-		if err != nil && !os.IsNotExist(err) {
-			return Response{Code: CodeFailed, Message: err.Error()}
-		}
-		err = os.RemoveAll(filepath.Join(s.services, name+service.ArtifactSuffix))
-		if err != nil {
-			return Response{Code: CodeFailed, Message: err.Error()}
-		}
-		removed = append(removed, name)
-	}
-	if len(removed) == 0 {
-		return body(ServiceSet{Declared: kept})
-	}
-
-	entry := state.Entry{
-		Operation: OpServicePrune, Target: strings.Join(removed, ","),
-		Actor: actor, OnBehalfOf: req.OnBehalfOf, Result: state.ResultOK,
-		Detail: fmt.Sprintf("%d declaration(s) the tree no longer carries", len(removed)),
-	}
-	// What runs has not changed, so the generation does not move either.
-	generation := s.store.Record(entry, false)
-	resp := body(ServiceSet{Names: removed, Declared: kept})
-	resp.Generation = generation
-	return resp
 }

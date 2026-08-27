@@ -4,8 +4,9 @@ A control plane for a small fleet of Linux machines.
 
 `hostd` runs on each machine and reconciles the containers declared there.
 `hostctl` runs on yours and operates the fleet: it is where you look at what
-every machine is doing, read logs, start and stop services, and apply
-configuration. The daemon is headless — it has no interface of its own.
+every machine is doing, read logs, and put services onto machines and take them
+off again — from a window or from the command line, over the same operations.
+The daemon is headless: it has no interface of its own.
 
 ## What it replaces
 
@@ -44,7 +45,9 @@ The core is running on the Linux bench. What works today:
   after that;
 - fleet operation over SSH, with no hostd port or key system of its own;
 - image transfer between runtimes, streamed and verified by SHA-256;
-- a read-only graphical panel over the same API as the command line;
+- a graphical panel that operates the fleet over the same API as the command
+  line: two inventories (the machines, and the services the tree describes),
+  one click per action, and everything it does narrated in the log;
 - **restarting `hostd` does not stop the services**: they keep running and the
   new daemon asks the runtime what it already holds.
 
@@ -94,34 +97,44 @@ A service is one file until it needs something beside it; then it is a
 directory with an `init.filo` and its files, and nothing else about it changes.
 The directory is the name.
 
+The tree is a **catalogue**: it describes what there is to run. **Where each
+service runs is not written in any file** — it is your decision, per machine,
+at the moment you make it:
+
 ```bash
-hostctl -host yuki.local push     send the declarations and their files
-hostctl -host yuki.local apply    converge, with a plan and a generation
+hostctl -host yuki.local service deploy site     put it there
+hostctl -host yuki.local service remove site     take it off there
 ```
 
-Sending is not applying: a file on a machine has not changed what runs there.
-The files land beside the machine's own declarations (`/etc/hostd/services/`,
-with `caddy.d/` for what travels with `caddy.filo`), read only inside the
-container at the path the declaration names. Editing a `Caddyfile` in the tree
-and pushing makes the next plan say `configuration files changed`, because what
-travels with a declaration is part of it.
+A deploy sends the declaration and the files beside it, gets the image onto the
+machine, and starts a fresh container. **Deploying again overwrites** — that is
+how a new version goes live, not an error. The image arrives by whichever path
+is true, and the command says which one it used: built here, it is sent from
+here; already on the machine, it stays; otherwise the machine pulls it from its
+registry.
 
-One tree describes a whole fleet, so a declaration may say where it belongs:
+A remove stops the service and takes its container, its declaration and the
+image hostd put there off that machine. **Volumes and their data are never
+touched**, and the catalogue still describes the service — so a deploy puts it
+back. An image hostd did not put there (a public base image, which cannot be
+pushed at all) is reported and left alone: the same rule the image cleanup
+follows.
 
-```lisp
-(tuple "hosts" (list "yuki" "selene"))    only these machines
-(tuple "tags"  (list "web"))              machines carrying this tag
+What a machine keeps in `/etc/hostd/services/` is the record of what was put on
+it — that machine's desired state, written by deploy and erased by remove. The
+files land there (with `caddy.d/` for what travels with `caddy.filo`), read only
+inside the container at the path the declaration names.
+
+```bash
+hostctl -host yuki.local push     refresh the descriptions of what it already
+                                  runs, from the tree — it neither places nor
+                                  removes anything
+hostctl -host yuki.local apply    converge that machine with what it holds
 ```
 
-A declaration that says neither belongs on every machine it is pushed to. The
-tags are the inventory's, so `push -all` sends each machine the services
-declared for it and nothing else.
-
-The tree is the source, so deleting a service from it takes its files off the
-machine on the next push, and the plan after that proposes removing what still
-runs — which `apply` refuses without `-allow-destructive`. A tree that declares
-nothing is refused outright: that is what a push from the wrong directory looks
-like.
+`apply` is the same computation `plan` shows, and it is what the drift round
+runs on its own every fifteen seconds: a container removed by hand comes back
+without anyone connected.
 
 ## A service is one file
 
@@ -302,8 +315,9 @@ an id is not portable across the fleet.
 ## The fleet
 
 The fleet is a file you keep — which machines exist, and what to call groups of
-them. Reaching any of them is ssh's business, and ssh already knows its own
-hosts.
+them, for asking several at once. Reaching any of them is ssh's business, and
+ssh already knows its own hosts. **Where a service runs is not in this file
+either**: a machine's tags group machines, they do not place services.
 
 ```bash
 hostctl -all status                    every machine in the inventory
@@ -348,15 +362,27 @@ generation from one host means nothing on another.
 hostctl gui
 ```
 
-One window over every machine in the inventory: what each one is running, its
-CPU and memory over the last hour, and the log of the whole fleet in one place.
-The backend asks every two seconds off the UI thread; only changed fragments
-reach the page. `-host`, `-hosts` and `-tag` narrow it.
+Two inventories: the machines, with what each one is running, its CPU and
+memory over the last hour; and the services the tree describes, one small card
+each with the machines in a dropdown beside a deploy. The log of the whole fleet
+sits under both. Each machine is asked on its own loop, so one that is switched
+off spends its ssh timeout on its own line and delays nothing else; only changed
+fragments reach the page. `-host`, `-hosts` and `-tag` narrow it.
 
-It is **read only**. A restart or a stop is shown as the `hostctl` command that
-would do it, ready to copy — a dashboard that acts is a dashboard that acts by
-accident. Every number on the screen came from the same operation the command
-line calls, over the same ssh, so the panel and the terminal cannot disagree.
+**It operates the fleet.** One click is one action — deploy, remove, restart,
+stop, start, image cleanup, installing the daemon — with no confirmation and no
+dialog: what it is doing arrives in the **log**, line by line, and the button
+that started it stays held down until it is over. A progress indicator with
+nothing behind it is somewhere for impatience to pile up; a log going by is
+somebody watching their machine work, and able to act when it goes wrong. Every
+action is the same API operation the command line calls, over its own ssh
+connection, so the panel and the terminal cannot disagree — and the equivalent
+command is printed beside each screen for whoever prefers the terminal.
+
+A machine asking for attention says so three ways at once: an amber dot beside
+it, a line in the log, and a button beside its name. Today that means a daemon
+that differs from the one this window carries, or a machine ssh reached where no
+hostd answered — the button installs it.
 
 The page is served from a custom `app://` scheme out of the binary: nothing on
 your machine listens on a port, and there is no CDN, no framework and no file on
@@ -369,9 +395,12 @@ dependency at all.
 hostctl status                    what every service is doing
 hostctl describe                  versions and capabilities of the daemon
 hostctl service list
+hostctl service deploy <name>     put a service from the tree on this machine
+hostctl service remove <name>     take it off this machine
 hostctl service start <name>
 hostctl service stop <name>
 hostctl service restart <name>
+hostctl service redeploy <name>   a fresh container from the declaration
 hostctl plan                      what an apply would do, without doing it
 hostctl apply                     re-read the services directory and converge
 hostctl audit                     who changed what, and when

@@ -338,31 +338,6 @@ func TestABrokenScheduleIsRefusedWhereItIsWritten(t *testing.T) {
 
 // A shared tree in a heterogeneous fleet: the database does not belong on the
 // web machines, and saying nothing about placement still means everywhere.
-func TestWhereADeclarationBelongs(t *testing.T) {
-	cases := []struct {
-		name    string
-		svc     Service
-		machine string
-		tags    []string
-		want    bool
-	}{
-		{"nothing declared goes everywhere", Service{}, "yuki", nil, true},
-		{"named machine", Service{Hosts: []string{"yuki", "selene"}}, "yuki", nil, true},
-		{"another machine", Service{Hosts: []string{"selene"}}, "yuki", nil, false},
-		{"the ssh name, not the hostname behind it", Service{Hosts: []string{"yuki.local"}}, "yuki", nil, false},
-		{"by tag", Service{Tags: []string{"web"}}, "yuki", []string{"web", "amd64"}, true},
-		{"another tag", Service{Tags: []string{"db"}}, "yuki", []string{"web"}, false},
-		{"named despite the tags", Service{Hosts: []string{"yuki"}, Tags: []string{"db"}}, "yuki", []string{"web"}, true},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			got := c.svc.BelongsTo(c.machine, c.tags)
-			if got != c.want {
-				t.Fatalf("BelongsTo = %v, want %v", got, c.want)
-			}
-		})
-	}
-}
 
 // A domain is written straight into a Caddyfile, so what is wrong with it has
 // to be caught where the declaration is read. Pasting a URL out of a browser is
