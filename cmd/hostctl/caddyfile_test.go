@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -108,5 +111,44 @@ func TestTheFileSaysItIsOrdinaryFromHereOn(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("the header does not carry %q:\n%s", want, out)
 		}
+	}
+}
+
+// The command reads the operator's TREE, which has an inventory.filo and
+// services that are directories. It read it with LoadDir once — the loader for
+// a machine's services directory, where every .filo is a service — so the
+// inventory came back as a broken service and a directory service was
+// invisible. Found the day the first directory service declared a domain.
+func TestTheCommandReadsATreeWithAnInventoryAndDirectoryServices(t *testing.T) {
+	tree := t.TempDir()
+	write := func(path, content string) {
+		t.Helper()
+		err := os.MkdirAll(filepath.Dir(filepath.Join(tree, path)), 0o700)
+		if err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		err = os.WriteFile(filepath.Join(tree, path), []byte(content), 0o600)
+		if err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+	write("inventory.filo", `(inventory (host (tuple "name" "yuki.local")))`)
+	write("watcher/init.filo", `(service
+  (tuple "name" "watcher")
+  (tuple "image" "watcher:1")
+  (tuple "domain" (list ":8317"))
+  (tuple "upstream-port" 8317))`)
+	write("watcher/config.filo", `(set Listen "0.0.0.0:8317")`)
+
+	var out strings.Builder
+	code, err := runCaddyfile(context.Background(), options{config: tree, out: &out}, nil)
+	if err != nil {
+		t.Fatalf("runCaddyfile: %v", err)
+	}
+	if code != exitOK {
+		t.Fatalf("exit %d, want %d", code, exitOK)
+	}
+	if !strings.Contains(out.String(), "reverse_proxy watcher:8317") {
+		t.Fatalf("the directory service is missing from the Caddyfile:\n%s", out.String())
 	}
 }

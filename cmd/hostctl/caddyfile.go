@@ -28,9 +28,18 @@ func runCaddyfile(ctx context.Context, opt options, args []string) (int, error) 
 	if opt.filoOut || opt.jsonOut {
 		return exitUsage, fmt.Errorf("caddyfile writes a Caddyfile, so -filo and -json do not apply to it")
 	}
-	declared, err := service.LoadDir(ctx, opt.config)
+	// The TREE, not a services directory: LoadDir is for what a machine holds,
+	// where every .filo is a service. The tree also has inventory.filo and
+	// services that are directories, so LoadDir read the inventory as a broken
+	// service and never saw a directory service at all — found the day the
+	// first directory service declared a domain.
+	declarations, err := service.LoadTree(ctx, opt.config)
 	if err != nil {
 		return exitFailed, err
+	}
+	declared := make([]service.Service, 0, len(declarations))
+	for _, held := range declarations {
+		declared = append(declared, held.Service)
 	}
 	// Every service the tree describes with a domain. Where a service RUNS is
 	// not in the tree any more — it is a per-machine decision — and this
