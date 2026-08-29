@@ -729,6 +729,45 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	}
 }
 
+// appendLogs writes what a program on this machine sent into the same timeline
+// the containers write to — same store, same retention, same query. It is how
+// something running outside a container (a cron script, a service hostd does
+// not supervise) gets its lines beside everything else's; a shell needs no
+// library for it:
+//
+//	printf '(list (tuple "op" "log.append") (tuple "service" "backup") (tuple "body" "done"))\n' \
+//	  | nc -U /run/hostd/hostd.sock
+//
+// Not audited and no generation: lines are observations, not changes to what
+// this machine is meant to run.
+func (s *Server) appendLogs(req Request) Response {
+	if !service.ValidName(req.Service) {
+		return Response{Code: CodeInvalid, Message: fmt.Sprintf("%q is not a service name", req.Service)}
+	}
+	stream := req.Stream
+	if stream == "" {
+		stream = logs.StreamOut
+	}
+	// Never "event": events are hostd's own facts about lifecycles, and a
+	// timeline where anything can write them is one nobody can trust.
+	if stream != logs.StreamOut && stream != logs.StreamErr {
+		return Response{Code: CodeInvalid, Message: fmt.Sprintf(
+			"stream %q is not %q or %q; events are hostd's own", stream, logs.StreamOut, logs.StreamErr)}
+	}
+	lines := 0
+	for line := range strings.Lines(req.Body) {
+		line = strings.TrimRight(line, "\r\n")
+		if line == "" {
+			continue
+		}
+		s.log.Append(logs.Record{Service: req.Service, Stream: stream, Text: line})
+		lines++
+	}
+	return body(struct {
+		Lines int `filo:"lines" json:"lines"`
+	}{lines})
+}
+
 // Reads answer straight away; mutations pass the generation check first and
 // are audited whether carried out or refused.
 func (s *Server) dispatch(ctx context.Context, req Request, actor string) Response {
@@ -743,6 +782,8 @@ func (s *Server) dispatch(ctx context.Context, req Request, actor string) Respon
 		return s.stamp(body(s.store.Recent(req.Limit)))
 	case OpLogSearch:
 		return s.stamp(s.searchLogs(req))
+	case OpLogAppend:
+		return s.stamp(s.appendLogs(req))
 	case OpMetrics:
 		return s.stamp(s.readMetrics(req))
 	case OpImageList:

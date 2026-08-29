@@ -33,6 +33,7 @@ const (
 	OpAudit           = "audit"
 	OpLogSearch       = "log.search"
 	OpLogFollow       = "log.follow"
+	OpLogAppend       = "log.append"
 	OpMetrics         = "metrics"
 	OpImagePush       = "image.push"
 	OpImagePull       = "image.pull"

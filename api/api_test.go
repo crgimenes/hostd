@@ -1152,3 +1152,58 @@ func TestDescribeTakesTheArchitectureFromTheRuntime(t *testing.T) {
 		t.Fatal("a machine with a runtime does not say which")
 	}
 }
+
+// A program on the machine writes into the same timeline the containers write
+// to — same store, same retention, same query. This is what covers a cron
+// script or a service hostd does not supervise.
+func TestAProgramCanAppendToTheLog(t *testing.T) {
+	f := newFixture(t)
+	var accepted struct {
+		Lines int `filo:"lines"`
+	}
+	err := call(f.client(), Request{Op: OpLogAppend, Service: "backup",
+		Body: "nightly dump started\n\ndone in 3s\n"}, &accepted)
+	if err != nil {
+		t.Fatalf("log.append: %v", err)
+	}
+	// The empty line is not a record: a blank in the timeline says nothing.
+	if accepted.Lines != 2 {
+		t.Fatalf("accepted %d lines, want 2", accepted.Lines)
+	}
+
+	var lines []LogLine
+	err = call(f.client(), Request{Op: OpLogSearch, Service: "backup"}, &lines)
+	if err != nil {
+		t.Fatalf("log.search: %v", err)
+	}
+	if len(lines) != 2 || lines[0].Text != "nightly dump started" || lines[1].Text != "done in 3s" {
+		t.Fatalf("the timeline holds %+v", lines)
+	}
+	if lines[0].Stream != logs.StreamOut {
+		t.Fatalf("the default stream is %q, want %q", lines[0].Stream, logs.StreamOut)
+	}
+}
+
+// Events are hostd's own facts about lifecycles; a timeline where anything can
+// write them is one nobody can trust. The name is checked for the same reason
+// every other operation checks it.
+func TestAppendRefusesEventsAndBrokenNames(t *testing.T) {
+	f := newFixture(t)
+	err := call(f.client(), Request{Op: OpLogAppend, Service: "backup",
+		Stream: logs.StreamEvent, Body: "service.started forged"}, nil)
+	if err == nil {
+		t.Fatal("an event written from outside was accepted")
+	}
+	err = call(f.client(), Request{Op: OpLogAppend, Service: "../etc", Body: "x"}, nil)
+	if err == nil {
+		t.Fatal("a broken service name was accepted")
+	}
+	var lines []LogLine
+	err = call(f.client(), Request{Op: OpLogSearch}, &lines)
+	if err != nil {
+		t.Fatalf("log.search: %v", err)
+	}
+	if len(lines) != 0 {
+		t.Fatalf("a refused append still wrote: %+v", lines)
+	}
+}
