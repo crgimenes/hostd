@@ -706,6 +706,20 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 			s.backupService(ctx, conn, req, actor)
 			continue
 		}
+		// So does a download; an upload reads bytes after the request line the
+		// way an image push does.
+		if req.Op == OpFileGet {
+			s.getFile(ctx, conn, req, actor)
+			continue
+		}
+		if req.Op == OpFilePut {
+			resp := s.putFile(ctx, reader, req, actor)
+			err = WriteMessage(conn, s.stamp(resp))
+			if err != nil {
+				return
+			}
+			continue
+		}
 		// An image arrives as bytes after the request line, so this one reads
 		// from the connection instead of only writing to it.
 		if req.Op == OpImagePush {
@@ -791,6 +805,8 @@ func (s *Server) dispatch(ctx context.Context, req Request, actor string) Respon
 		return s.stamp(s.searchLogs(req))
 	case OpLogAppend:
 		return s.stamp(s.appendLogs(req))
+	case OpFileList:
+		return s.stamp(s.listFiles(ctx, req))
 	case OpMetrics:
 		return s.stamp(s.readMetrics(req))
 	case OpImageList:
@@ -987,6 +1003,7 @@ func (s *Server) describe(ctx context.Context) Response {
 			OpPlan, OpApply, OpAudit, OpLogSearch, OpLogFollow, OpLogAppend, OpMetrics,
 			OpImagePush, OpImagePull, OpImageList, OpImagePrune, OpServicePut,
 			OpServiceVersions, OpJobRun, OpServiceBackup,
+			OpFileList, OpFileGet, OpFilePut,
 		},
 	})
 }

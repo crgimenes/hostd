@@ -20,13 +20,19 @@ import (
 // because every fragment is rendered from it: the window holds no state of its
 // own beyond what it was last sent.
 type viewState struct {
-	kind   string
-	host   string
-	name   string
+	kind string
+	host string
+	name string
+	// Where inside a service's data the files screen is: "volume/sub/dir".
+	path   string
 	window int
 	from   float64
 	to     float64
 	closed map[string]bool
+	// Per-service folds in the tree, closed by default — the opposite default
+	// from machines, so it is its own map rather than a sign convention nobody
+	// would remember.
+	opened map[string]bool
 }
 
 // A copy nobody else can move under the reader: the struct copies by value but
@@ -38,6 +44,8 @@ func (p *panel) viewport() viewState {
 	out := p.view
 	out.closed = make(map[string]bool, len(p.view.closed))
 	maps.Copy(out.closed, p.view.closed)
+	out.opened = make(map[string]bool, len(p.view.opened))
+	maps.Copy(out.opened, p.view.opened)
 	return out
 }
 
@@ -104,6 +112,8 @@ func (p *panel) Act(action string) (string, error) {
 		p.pick(rest)
 	case parts[0] == "toggle" && len(rest) == 1:
 		p.toggle(rest[0])
+	case parts[0] == "toggle" && len(rest) == 2:
+		p.toggleService(rest[0], rest[1])
 	case parts[0] == "window" && len(rest) == 1:
 		p.pickWindow(rest[0])
 	case parts[0] == "range" && len(rest) == 1 && rest[0] == "live":
@@ -247,7 +257,7 @@ func (p *panel) fragments() []fragment {
 	snap := p.latest()
 	view := p.viewport()
 	tree := treeOf(snap, view)
-	detail := detailOf(snap, view, p.settings(), p.catalog(view), p.hostsNow())
+	detail := detailOf(snap, view, p.settings(), p.catalog(view), p.hostsNow(), p.filesNow())
 	// Held-down buttons are rendered from the panel, not remembered by the
 	// page: a fragment the rounds replace would take a class with it.
 	detail.AlertBusy = detail.AlertAct != "" && p.running(detail.AlertAct)
@@ -414,7 +424,8 @@ func treeOf(snap snapshot, view viewState) treeView {
 			continue
 		}
 		for _, service := range services {
-			out.Rows = append(out.Rows, rowView{
+			svcOpen := view.opened[host.Host+"/"+service.Name]
+			row := rowView{
 				Key:   "svc:" + host.Host + "/" + service.Name,
 				Label: service.Name,
 				Dot:   service.State,
@@ -422,7 +433,25 @@ func treeOf(snap snapshot, view viewState) treeView {
 				Child: true,
 				Selected: view.kind == "service" && view.host == host.Host &&
 					view.name == service.Name,
-				Link: "select/service/" + host.Host + "/" + service.Name,
+				Link:   "select/service/" + host.Host + "/" + service.Name,
+				Twist:  "closed",
+				Toggle: "toggle/" + host.Host + "/" + service.Name,
+			}
+			if svcOpen {
+				row.Twist = "open"
+			}
+			out.Rows = append(out.Rows, row)
+			if !svcOpen {
+				continue
+			}
+			out.Rows = append(out.Rows, rowView{
+				Key:   "files:" + host.Host + "/" + service.Name,
+				Label: "Files",
+				Icon:  "folder2-open",
+				Child: true,
+				Selected: view.kind == "files" && view.host == host.Host &&
+					view.name == service.Name,
+				Link: "select/files/" + host.Host + "/" + service.Name,
 			})
 		}
 		out.Rows = append(out.Rows, rowView{

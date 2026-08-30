@@ -235,6 +235,76 @@ func (c *Client) Backup(ctx context.Context, name string, open func(Backup) (io.
 	return resp, nil
 }
 
+// FetchFile downloads one file of a service's data. open sees the announced
+// path and size before the first byte, like a backup's.
+func (c *Client) FetchFile(ctx context.Context, svc, wirePath string, open func(FileTransfer) (io.Writer, error)) (Response, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	err := c.conn.SetDeadline(time.Time{})
+	if err != nil {
+		return Response{}, err
+	}
+	err = WriteMessage(c.conn, Request{Op: OpFileGet, Service: svc, Name: wirePath})
+	if err != nil {
+		return Response{}, err
+	}
+	var resp Response
+	err = ReadMessage(ctx, c.reader, &resp)
+	if err != nil {
+		return Response{}, err
+	}
+	if resp.Failed() {
+		return resp, nil
+	}
+	var told FileTransfer
+	err = filoconf.Decode(ctx, "file", resp.Body, &told)
+	if err != nil {
+		return resp, err
+	}
+	sink, err := open(told)
+	if err != nil {
+		return resp, err
+	}
+	received, err := ReadChunks(c.reader, sink, nil)
+	if err != nil {
+		return resp, fmt.Errorf("the transfer broke after %d bytes: %w", received, err)
+	}
+	if float64(received) != told.Bytes {
+		return resp, fmt.Errorf("the machine announced %.0f bytes and sent %d", told.Bytes, received)
+	}
+	return resp, nil
+}
+
+// SendFile uploads one file into a service's data, the request first and the
+// bytes behind it, the way an image travels.
+func (c *Client) SendFile(ctx context.Context, svc, wirePath string, content io.Reader) (Response, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	err := c.conn.SetDeadline(time.Time{})
+	if err != nil {
+		return Response{}, err
+	}
+	err = WriteMessage(c.conn, Request{Op: OpFilePut, Service: svc, Name: wirePath})
+	if err != nil {
+		return Response{}, err
+	}
+	err = WriteChunks(c.conn, content)
+	if err != nil {
+		return Response{}, err
+	}
+	var resp Response
+	err = ReadMessage(ctx, c.reader, &resp)
+	if errors.Is(err, io.EOF) {
+		return Response{}, fmt.Errorf(
+			"hostd on %s took the file and closed the connection without answering; it restarted, or this pipe was already dead: %w",
+			c.target, ErrNoAnswer)
+	}
+	if err != nil {
+		return Response{}, err
+	}
+	return resp, nil
+}
+
 // Consumes the connection: a client that follows issues no further requests
 // on it.
 func (c *Client) Follow(ctx context.Context, req Request, fn func(LogLine) error) error {

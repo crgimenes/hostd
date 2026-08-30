@@ -3,11 +3,16 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/crgimenes/hostd/api"
 	"github.com/crgimenes/hostd/logs"
+
+	"github.com/crgimenes/glaze"
 )
 
 // One click is one action (crg, 2026-08-26). There is no confirmation and no
@@ -53,8 +58,123 @@ func (p *panel) action(parts []string) (func(), error) {
 		return func() { p.prune(host) }, nil
 	case verb == "install":
 		return func() { p.install(host) }, nil
+	case verb == "filedl" && len(parts) > 3:
+		wire := strings.Join(parts[2:], "/")
+		return func() { p.downloadFile(host, wire) }, nil
+	case verb == "fileup" && len(parts) > 3:
+		// parts[2] is the service, the rest the directory being looked at.
+		wire := strings.Join(parts[3:], "/")
+		return func() { p.uploadFile(host, parts[2], wire) }, nil
 	}
 	return nil, refuse
+}
+
+// Where a download lands: the user's own Downloads when there is one, the
+// working directory when there is not. No dialog — the log says where it went,
+// which is the same channel everything else answers on.
+func downloadsDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "."
+	}
+	downloads := filepath.Join(home, "Downloads")
+	info, err := os.Stat(downloads)
+	if err != nil || !info.IsDir() {
+		return home
+	}
+	return downloads
+}
+
+// downloadFile brings one file of a service's data here. The wire path is
+// service/volume/inside — the service first, the same shape the click built.
+func (p *panel) downloadFile(host, wire string) {
+	svc, rest, _ := strings.Cut(wire, "/")
+	client, err := p.reach(host)
+	if err != nil {
+		p.problem(host, svc, err)
+		return
+	}
+	defer func() { _ = client.Close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), deployTimeout)
+	defer cancel()
+
+	var saved *os.File
+	var into string
+	resp, err := client.FetchFile(ctx, svc, rest, func(told api.FileTransfer) (io.Writer, error) {
+		into = filepath.Join(downloadsDir(), filepath.Base(told.Path))
+		file, createErr := os.Create(into) // #nosec G304 -- the user's own downloads directory
+		if createErr != nil {
+			return nil, createErr
+		}
+		saved = file
+		return file, nil
+	})
+	if saved != nil {
+		closeErr := saved.Close()
+		if err == nil && closeErr != nil {
+			err = closeErr
+		}
+	}
+	if err != nil {
+		if into != "" {
+			// Half a file under the real name reads later as the whole one.
+			_ = os.Remove(into)
+		}
+		p.problem(host, svc, err)
+		return
+	}
+	if resp.Failed() {
+		p.problem(host, svc, resp.Err())
+		return
+	}
+	p.sayLine(host, svc, fmt.Sprintf("saved %s here as %s", rest, into), false)
+}
+
+// uploadFile asks with the system's own file chooser and places the choice in
+// the directory the files screen is looking at.
+func (p *panel) uploadFile(host, svc, dir string) {
+	if p.dialogs == nil {
+		p.problem(host, svc, fmt.Errorf("uploading needs the window; use hostctl file put on the command line here"))
+		return
+	}
+	local, err := p.dialogs.OpenFile(glaze.FileDialogOptions{Title: "Upload into " + svc + ":/" + dir})
+	if err != nil {
+		p.problem(host, svc, err)
+		return
+	}
+	if local == "" {
+		return
+	}
+	file, err := os.Open(local) // #nosec G304 -- the file the person just chose
+	if err != nil {
+		p.problem(host, svc, err)
+		return
+	}
+	defer func() { _ = file.Close() }()
+
+	client, err := p.reach(host)
+	if err != nil {
+		p.problem(host, svc, err)
+		return
+	}
+	defer func() { _ = client.Close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), deployTimeout)
+	defer cancel()
+	wire := dir + "/" + filepath.Base(local)
+	resp, err := client.SendFile(ctx, svc, wire, file)
+	if err != nil {
+		p.problem(host, svc, err)
+		return
+	}
+	if resp.Failed() {
+		p.problem(host, svc, resp.Err())
+		return
+	}
+	var told api.FileTransfer
+	_ = decode(ctx, resp.Body, &told)
+	p.sayLine(host, svc, fmt.Sprintf("placed %s as %s (%s)", filepath.Base(local), wire, formatBytes(told.Bytes)), false)
+	// What the screen shows includes the new file now.
+	p.loadFiles(host, svc, dir)
 }
 
 // hold marks an action as running, so its button renders held down and a

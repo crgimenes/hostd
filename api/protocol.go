@@ -43,6 +43,9 @@ const (
 	OpServicePut      = "service.put"
 	OpJobRun          = "job.run"
 	OpServiceBackup   = "service.backup"
+	OpFileList        = "file.list"
+	OpFileGet         = "file.get"
+	OpFilePut         = "file.put"
 )
 
 // Codes are what programs read; messages are for people and may be rewritten.

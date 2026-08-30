@@ -68,6 +68,10 @@ type gridRow struct {
 	// Nothing on the machine is holding this row's subject. It is the row a
 	// cleanup is about, so it is worth seeing without reading the column.
 	Loose bool
+	// Navigation on the first cell — a directory in a file listing.
+	Link string
+	// One action at the row's end — download, for a file.
+	Buttons []buttonView
 }
 
 func (c cardView) AsideID() string { return "aside-" + safeID(c.Key) }
@@ -204,7 +208,7 @@ func statusOf(snap snapshot) statusView {
 	return statusView{Text: fmt.Sprintf("watching %d machine(s)", len(snap.Fleet))}
 }
 
-func detailOf(snap snapshot, view viewState, info settingsInfo, catalog []service.Declaration, machines []string) detailView {
+func detailOf(snap snapshot, view viewState, info settingsInfo, catalog []service.Declaration, machines []string, files filesState) detailView {
 	var out detailView
 	switch view.kind {
 	case "host":
@@ -215,6 +219,8 @@ func detailOf(snap snapshot, view viewState, info settingsInfo, catalog []servic
 		out = imagesDetail(snap, view)
 	case "services":
 		out = catalogDetail(catalog, machines, info)
+	case "files":
+		out = filesDetail(view, files)
 	case "settings":
 		out = settingsDetail(info)
 	default:
@@ -508,6 +514,79 @@ func machineClock(host fleetHost) string {
 	zone := time.FixedZone(host.Zone, int(host.ZoneOffsetMS/1000))
 	now := time.Now().Add(time.Duration(host.ClockSkewMS) * time.Millisecond).In(zone)
 	return " · " + now.Format("15:04 MST")
+}
+
+// filesDetail is one directory of one service's data: the named volumes at the
+// top, directories to walk into, files to download, and an upload into the
+// directory being looked at. Data only — configuration comes from the tree.
+func filesDetail(view viewState, files filesState) detailView {
+	out := detailView{
+		Title:    view.name,
+		Subtitle: "files on " + view.host + " · /" + view.path,
+		Single:   true,
+	}
+	if files.Host != view.host || files.Service != view.name || files.Path != view.path {
+		out.Empty = "asking " + view.host + "…"
+		return out
+	}
+	if files.Busy {
+		out.Empty = "asking " + view.host + "…"
+		return out
+	}
+	if files.Problem != "" {
+		out.Empty = files.Problem
+		return out
+	}
+
+	base := "select/files/" + view.host + "/" + view.name
+	card := cardView{
+		Key:      "files",
+		Heading:  "Data",
+		Aside:    "what lives in the service's volumes; configuration comes from the tree",
+		GridHead: []string{"name", "size", "modified", ""},
+	}
+	if view.path != "" {
+		// Inside a volume: uploads land in the directory being looked at.
+		card.Buttons = []buttonView{{
+			Label: "Upload here",
+			Icon:  "box-arrow-up",
+			Act:   "do/fileup/" + view.host + "/" + view.name + "/" + view.path,
+		}}
+		up := base
+		at := strings.LastIndex(view.path, "/")
+		if at > 0 {
+			up += "/" + view.path[:at]
+		}
+		card.Grid = append(card.Grid, gridRow{Cells: []string{"..", "", "", ""}, Link: up})
+	}
+	for _, entry := range files.Entries {
+		here := view.path
+		if here != "" {
+			here += "/"
+		}
+		here += entry.Name
+		if entry.Dir {
+			card.Grid = append(card.Grid, gridRow{
+				Cells: []string{entry.Name + "/", "", "", ""},
+				Link:  base + "/" + here,
+			})
+			continue
+		}
+		card.Grid = append(card.Grid, gridRow{
+			Cells: []string{entry.Name, formatBytes(entry.Bytes),
+				time.UnixMilli(int64(entry.MS)).Format("2006-01-02 15:04"), ""},
+			Buttons: []buttonView{{
+				Icon: "box-arrow-down",
+				Act:  "do/filedl/" + view.host + "/" + view.name + "/" + here,
+			}},
+		})
+	}
+	if len(card.Grid) == 0 {
+		out.Empty = view.name + " declares no named volume, so it has no data here"
+		return out
+	}
+	out.Cards = append(out.Cards, card)
+	return out
 }
 
 func serviceDetail(snap snapshot, view viewState) detailView {

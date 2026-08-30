@@ -541,3 +541,21 @@ func TestOnlyAMachineMissingItsDaemonIsOfferedOne(t *testing.T) {
 		t.Fatalf("a machine with no daemon was not offered one: %+v", bare)
 	}
 }
+
+// The file actions carry the whole wire path through the click, service first,
+// and refuse the shapes that carry too little to act on.
+func TestFileActionsParse(t *testing.T) {
+	view, _, _ := actingPanel(t)
+	work, err := view.action([]string{"filedl", "yuki", "site", "data", "x.txt"})
+	if err != nil || work == nil {
+		t.Fatalf("a download click did not become work: %v", err)
+	}
+	work, err = view.action([]string{"fileup", "yuki", "site", "data"})
+	if err != nil || work == nil {
+		t.Fatalf("an upload click did not become work: %v", err)
+	}
+	_, err = view.action([]string{"filedl", "yuki", "site"})
+	if err == nil {
+		t.Fatal("a download with no file to download was accepted")
+	}
+}

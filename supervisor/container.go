@@ -36,7 +36,9 @@ func containerName(service string) string { return "hostd-" + service }
 // Named storage carries the service in its name: two services asking for
 // "data" are asking for their own, and sharing has to be deliberate rather
 // than a collision.
-func volumeName(service, volume string) string { return "hostd-" + service + "-" + volume }
+// VolumeName is the one place the naming lives; the file operations resolve a
+// declaration's "data" to the same volume the container was given.
+func VolumeName(service, volume string) string { return "hostd-" + service + "-" + volume }
 
 // Talking to the runtime is a local socket call, but a runtime that is wedged
 // must not hold a command.
@@ -183,7 +185,7 @@ func (s *Supervisor) prepareMounts(ctx context.Context, svc service.Service) ([]
 	for _, mount := range declared {
 		source := mount.Source
 		if mount.Named {
-			source = volumeName(svc.Name, mount.Source)
+			source = VolumeName(svc.Name, mount.Source)
 			err = client.EnsureVolume(ctx, source, map[string]string{labelService: svc.Name})
 			if err != nil {
 				return nil, err

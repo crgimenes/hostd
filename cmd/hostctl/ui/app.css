@@ -936,3 +936,10 @@ td.problem {
 ::-webkit-scrollbar-track {
 	background: transparent;
 }
+
+/* File rows: the name of a directory is the way in, and the one action a file
+   has sits at the row's end, small — the row is the subject, not the button. */
+.grid td.navCell { cursor: pointer; }
+.grid td.navCell:hover { text-decoration: underline; }
+.grid td.actCell { text-align: right; padding: 0.1rem 0.4rem; }
+button.push.tiny { padding: 0.1rem 0.35rem; font-size: 0.85em; }

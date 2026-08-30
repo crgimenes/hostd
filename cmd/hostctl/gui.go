@@ -74,6 +74,7 @@ type panel struct {
 	// harness): choosing needs a desktop, reading does not.
 	dialogs interface {
 		OpenDirectory(glaze.FileDialogOptions) (string, error)
+		OpenFile(glaze.FileDialogOptions) (string, error)
 	}
 
 	snapMu sync.RWMutex
@@ -96,6 +97,11 @@ type panel struct {
 	// somebody choosing a machine in it.
 	catalogMu   sync.Mutex
 	catalogList []service.Declaration
+
+	// One directory of one service's data, for the files screen. Same rule as
+	// the catalog: read on the way in and on navigation, never on the poll.
+	filesMu sync.Mutex
+	files   filesState
 
 	viewMu sync.Mutex
 	view   viewState
@@ -120,7 +126,11 @@ type panel struct {
 
 func newPanel(opt options, hosts []string) (*panel, error) {
 	pages, err := template.New("panel.tmpl").
-		Funcs(template.FuncMap{"icon": iconSVG}).
+		Funcs(template.FuncMap{
+			"icon": iconSVG,
+			// The last cell of a grid row is where a row action renders.
+			"lastCell": func(cells []string) int { return len(cells) - 1 },
+		}).
 		ParseFS(ui, "ui/panel.tmpl")
 	if err != nil {
 		return nil, err
@@ -136,7 +146,7 @@ func newPanel(opt options, hosts []string) (*panel, error) {
 		busy:    map[string]bool{},
 		said:    map[string]bool{},
 		sent:    map[string]string{},
-		view:    viewState{kind: "fleet", window: 3600, closed: map[string]bool{}},
+		view:    viewState{kind: "fleet", window: 3600, closed: map[string]bool{}, opened: map[string]bool{}},
 		pages:   pages,
 	}
 	view.ask = view.one
@@ -524,29 +534,41 @@ func (p *panel) close() {
 // pick is ["fleet"] or ["host", name] or ["service", host, name].
 func (p *panel) pick(rest []string) {
 	p.viewMu.Lock()
-	defer p.viewMu.Unlock()
 	p.view.kind = rest[0]
 	p.view.host = ""
 	p.view.name = ""
+	p.view.path = ""
 	if len(rest) > 1 {
 		p.view.host = rest[1]
 	}
 	if len(rest) > 2 {
 		p.view.name = rest[2]
 	}
+	if len(rest) > 3 {
+		// The rest is a path inside the service's data, slashes and all.
+		p.view.path = strings.Join(rest[3:], "/")
+	}
 	if p.view.host != "" {
 		// Asking about a machine is asking what is on it. Leaving it shut
 		// would answer with the name of the machine the operator just named.
 		p.view.closed[p.view.host] = false
 	}
-	if p.view.kind == "images" {
+	kind, host, name, path := p.view.kind, p.view.host, p.view.name, p.view.path
+	p.viewMu.Unlock()
+	if kind == "images" {
 		// A machine's images are only fetched while their screen is open, so
 		// opening it has to ask rather than sit empty until the next tick.
 		p.wake()
 	}
-	if p.view.kind == "services" {
+	if kind == "services" {
 		// Read on the way in, and not again: see panel.catalog.
 		p.loadCatalog()
+	}
+	if kind == "files" {
+		// Same rule as the catalog: read on the way in and on navigation,
+		// never on the poll — a listing repainting under the pointer is how a
+		// click lands on the wrong file.
+		p.loadFiles(host, name, path)
 	}
 }
 
@@ -554,6 +576,14 @@ func (p *panel) toggle(host string) {
 	p.viewMu.Lock()
 	defer p.viewMu.Unlock()
 	p.view.closed[host] = !p.view.closed[host]
+}
+
+// A service's own fold, closed by default: its one child is the Files row.
+func (p *panel) toggleService(host, name string) {
+	p.viewMu.Lock()
+	defer p.viewMu.Unlock()
+	key := host + "/" + name
+	p.view.opened[key] = !p.view.opened[key]
 }
 
 func (p *panel) pickWindow(value string) {
@@ -712,4 +742,64 @@ func (a *answered) WriteHeader(code int) {
 	if a.code == 0 {
 		a.code = code
 	}
+}
+
+// What the files screen is showing: one directory of one service's data,
+// fetched on the way in and on navigation, never on the poll.
+type filesState struct {
+	Host    string
+	Service string
+	Path    string
+	Entries []api.FileEntry
+	Problem string
+	Busy    bool
+}
+
+func (p *panel) filesNow() filesState {
+	p.filesMu.Lock()
+	defer p.filesMu.Unlock()
+	return p.files
+}
+
+// loadFiles asks the machine for one directory listing, on a connection of the
+// action's own. The screen shows "asking…" until the answer lands.
+func (p *panel) loadFiles(host, svc, path string) {
+	p.filesMu.Lock()
+	p.files = filesState{Host: host, Service: svc, Path: path, Busy: true}
+	p.filesMu.Unlock()
+	go func() {
+		entries, problem := p.fetchFiles(host, svc, path)
+		p.filesMu.Lock()
+		// A stale answer must not overwrite a newer navigation.
+		if p.files.Host == host && p.files.Service == svc && p.files.Path == path {
+			p.files.Entries = entries
+			p.files.Problem = problem
+			p.files.Busy = false
+		}
+		p.filesMu.Unlock()
+		p.push()
+	}()
+}
+
+func (p *panel) fetchFiles(host, svc, path string) ([]api.FileEntry, string) {
+	client, err := p.reach(host)
+	if err != nil {
+		return nil, err.Error()
+	}
+	defer func() { _ = client.Close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	resp, err := client.Do(ctx, api.Request{Op: api.OpFileList, Service: svc, Name: path})
+	if err != nil {
+		return nil, err.Error()
+	}
+	if resp.Failed() {
+		return nil, resp.Message
+	}
+	var entries []api.FileEntry
+	err = decode(ctx, resp.Body, &entries)
+	if err != nil {
+		return nil, err.Error()
+	}
+	return entries, ""
 }

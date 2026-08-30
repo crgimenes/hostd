@@ -481,6 +481,26 @@ func (c *Client) EnsureNetwork(ctx context.Context, name string) error {
 	return nil
 }
 
+// VolumeMountpoint answers where on THIS machine a named volume's data lives,
+// in the runtime's own words. It is what lets the daemon read and write a
+// service's files directly, container running or not.
+//
+// https://docs.docker.com/reference/api/engine/version/v1.43/#tag/Volume/operation/VolumeInspect
+// curl --unix-socket /var/run/docker.sock http://d/volumes/hostd-healthcheck-data
+func (c *Client) VolumeMountpoint(ctx context.Context, name string) (string, error) {
+	var answer struct {
+		Mountpoint string `json:"Mountpoint"`
+	}
+	err := c.call(ctx, http.MethodGet, "/volumes/"+url.PathEscape(name), nil, nil, &answer)
+	if err != nil {
+		return "", err
+	}
+	if answer.Mountpoint == "" {
+		return "", fmt.Errorf("the runtime holds volume %s but does not say where", name)
+	}
+	return answer.Mountpoint, nil
+}
+
 // EnsureVolume creates named storage if it is not there. It is never removed
 // here: a service that goes away leaves its data behind, because deleting
 // somebody's data is not something a converge loop should decide.
