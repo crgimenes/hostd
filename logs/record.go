@@ -39,6 +39,7 @@ const (
 	EventJobSkipped  = "job.skipped"
 	EventJobOverran  = "job.overran"
 	EventImage       = "image.received"
+	EventBackup      = "backup"
 	EventDaemon      = "hostd.started"
 	EventProblem     = "hostd.problem"
 )

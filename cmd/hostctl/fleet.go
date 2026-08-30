@@ -49,22 +49,6 @@ func readInventory(ctx context.Context, path string) ([]inventoryEntry, error) {
 	return entries, nil
 }
 
-// entry is what the inventory knows about a machine. One the file does not
-// list is still a machine — naming a machine that is not in the file is how
-// somebody reaches a new one — it just carries no tags.
-func (o options) entry(ctx context.Context, name string) inventoryEntry {
-	entries, err := readInventory(ctx, o.inventoryPath())
-	if err != nil {
-		return inventoryEntry{Name: name}
-	}
-	for _, candidate := range entries {
-		if candidate.Name == name {
-			return candidate
-		}
-	}
-	return inventoryEntry{Name: name}
-}
-
 // selection turns the flags into the machines to ask. Exactly one selector is
 // allowed: mixing them would leave the operator guessing which one won.
 func (o options) selection(ctx context.Context) ([]string, error) {

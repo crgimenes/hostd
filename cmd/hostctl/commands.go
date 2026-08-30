@@ -83,6 +83,11 @@ func runDescribe(ctx context.Context, client *api.Client, opt options) (int, err
 		_, _ = fmt.Fprintf(out, "schema    %d\n", d.Schema)
 		_, _ = fmt.Fprintf(out, "runtime   %s\n", runtimeText(d))
 		_, _ = fmt.Fprintf(out, "hardware  %d cpu(s), %s\n", d.CPUs, formatBytes(d.MemoryBytes))
+		if d.TimeMS > 0 {
+			zone := time.FixedZone(d.Zone, int(d.ZoneOffsetMS/1000))
+			_, _ = fmt.Fprintf(out, "clock     %s\n",
+				time.UnixMilli(int64(d.TimeMS)).In(zone).Format("2006-01-02 15:04:05 MST"))
+		}
 		_, _ = fmt.Fprintf(out, "supports  %s\n", strings.Join(d.Operations, " "))
 	})
 	return exitOK, nil
@@ -103,7 +108,7 @@ func runStatus(ctx context.Context, client *api.Client, opt options) (int, error
 
 func runService(ctx context.Context, client *api.Client, opt options, args []string) (int, error) {
 	if len(args) == 0 {
-		return exitUsage, fmt.Errorf("service needs a subcommand: list, versions, deploy, remove, start, stop, restart or redeploy")
+		return exitUsage, fmt.Errorf("service needs a subcommand: list, versions, deploy, remove, backup, start, stop, restart or redeploy")
 	}
 	switch args[0] {
 	case "list":
@@ -120,6 +125,11 @@ func runService(ctx context.Context, client *api.Client, opt options, args []str
 			return exitUsage, fmt.Errorf("service remove needs a service name")
 		}
 		return runServiceRemove(ctx, client, opt, args[1])
+	case "backup":
+		if len(args) < 2 {
+			return exitUsage, fmt.Errorf("service backup needs a service name")
+		}
+		return runServiceBackup(ctx, client, opt, args[1])
 	case "start", "stop", "restart", "redeploy":
 		if len(args) < 2 {
 			return exitUsage, fmt.Errorf("service %s needs a service name", args[0])

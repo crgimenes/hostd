@@ -85,6 +85,10 @@ func (s *scriptedSup) Remove(name string) (bool, error) {
 
 func (s *scriptedSup) RunNow(name string) (string, error) { return "", nil }
 
+func (s *scriptedSup) Backup(ctx context.Context, name string) (supervisor.BackupRun, error) {
+	return supervisor.BackupRun{}, supervisor.ErrNoBackup{Name: name}
+}
+
 func (s *scriptedSup) Plan(declared []service.Service) []supervisor.Change {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -478,7 +482,8 @@ func TestUpdatingAMachineForgetsItsOldVersion(t *testing.T) {
 	view.sayAlert(view.snap.Fleet[0])
 
 	view.forgetVersion("yuki")
-	if view.knownVersion("yuki") != "" {
+	version, _, _, _ := view.knownClock("yuki")
+	if version != "" {
 		t.Fatal("the old version survived the update, so the dot would stay amber")
 	}
 	// And the same warning can be said again if it turns out to still be true.

@@ -59,6 +59,7 @@ type options struct {
 	jsonOut    bool
 	limit      int
 	keep       int
+	outDir     string
 	stream     string
 	kind       string
 	run        string
@@ -102,6 +103,7 @@ func run(args []string) int {
 	flags.BoolVar(&opt.jsonOut, "json", false, "write the result as JSON and nothing else")
 	flags.IntVar(&opt.limit, "limit", 200, "maximum number of log lines")
 	flags.IntVar(&opt.keep, "keep", api.DefaultImageKeep, "versions of each still-declared image a prune leaves behind")
+	flags.StringVar(&opt.outDir, "out", ".", "directory a backup is saved into")
 	flags.StringVar(&opt.stream, "stream", "", "only stdout, stderr or event")
 	flags.StringVar(&opt.service, "service", "", "only this service")
 	flags.StringVar(&opt.kind, "kind", "", "only events of this kind, e.g. service.exited")
@@ -264,6 +266,10 @@ usage:
   hostctl service remove <name>        take it off that machine — container,
                                        declaration and image; the tree still
                                        describes it, and a deploy puts it back
+  hostctl service backup <name>        run the service's own backup_data.sh on
+                                       the machine and save the file it makes
+                                       here (-out says where); everything the
+                                       script says lands in the machine's log
   hostctl service list                 same as status, by service
   hostctl service versions <name>      which versions it could be put back on
   hostctl job run <name>               run a job now, without waiting for it

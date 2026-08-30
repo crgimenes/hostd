@@ -179,6 +179,14 @@ type fleetHost struct {
 	// when the daemon is replaced, and that is exactly when this window drops
 	// the connection anyway.
 	Version string `json:"version"`
+	// The machine's clock against this window's, and its timezone, from the
+	// same describe. The skew is what lets the header show the machine's
+	// CURRENT time instead of a stale instant; timezone is the operator's
+	// responsibility, and showing it is the reminder. Zone empty means a
+	// daemon from before the field.
+	ClockSkewMS  float64 `json:"clock-skew-ms"`
+	Zone         string  `json:"zone"`
+	ZoneOffsetMS float64 `json:"zone-offset-ms"`
 	// ssh reached the machine and no hostd answered — which is the one failure
 	// an install fixes. A machine that is simply switched off is not this, and
 	// offering to install onto it would be offering something that cannot work.
@@ -207,16 +215,17 @@ func (p *panel) forgetVersion(host string) {
 	p.busyMu.Unlock()
 }
 
-// What this window last heard the machine's hostd call itself.
-func (p *panel) knownVersion(host string) string {
+// What this window last heard the machine's hostd call itself, and the clock
+// that came with it.
+func (p *panel) knownClock(host string) (version string, skewMS float64, zone string, offsetMS float64) {
 	p.snapMu.RLock()
 	defer p.snapMu.RUnlock()
 	for _, known := range p.snap.Fleet {
 		if known.Host == host {
-			return known.Version
+			return known.Version, known.ClockSkewMS, known.Zone, known.ZoneOffsetMS
 		}
 	}
-	return ""
+	return "", 0, "", 0
 }
 
 func (p *panel) hostsNow() []string {
@@ -383,12 +392,17 @@ func (p *panel) one(ctx context.Context, host string, fromMS, toMS float64, sinc
 	}
 	// Asked only when this window does not know it yet: a version changes when
 	// the daemon is replaced, and replacing it drops the connection.
-	answer.Version = p.knownVersion(host)
+	answer.Version, answer.ClockSkewMS, answer.Zone, answer.ZoneOffsetMS = p.knownClock(host)
 	if answer.Version == "" {
 		var described api.Description
 		describeErr := ask(ctx, client, api.Request{Op: api.OpDescribe}, &described)
 		if describeErr == nil {
 			answer.Version = described.Version
+			if described.TimeMS > 0 {
+				answer.ClockSkewMS = described.TimeMS - float64(time.Now().UnixMilli())
+				answer.Zone = described.Zone
+				answer.ZoneOffsetMS = described.ZoneOffsetMS
+			}
 		}
 	}
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -723,8 +724,13 @@ func TestADeathTheRuntimeAnnouncesLandsInTheTimeline(t *testing.T) {
 	h.start2(container(testService, image, "exit 7"))
 
 	h.waitFor("the runtime to announce the death", func() bool {
+		// ANY record, not the oldest: the watcher is anchored before the start
+		// on purpose, so a death from the previous test's cleanup — same
+		// service name, exit 143 — can legitimately be first in line.
 		records := h.search(logs.Query{Service: testService, Kind: logs.EventExited})
-		return len(records) > 0 && strings.Contains(records[0].Text, "exited with code 7")
+		return slices.ContainsFunc(records, func(r logs.Record) bool {
+			return strings.Contains(r.Text, "exited with code 7")
+		})
 	})
 }
 

@@ -51,6 +51,7 @@ type Supervisor interface {
 	Deploy(svc service.Service) (bool, error)
 	Remove(name string) (bool, error)
 	RunNow(name string) (string, error)
+	Backup(ctx context.Context, name string) (supervisor.BackupRun, error)
 	Plan(declared []service.Service) []supervisor.Change
 	Apply(declared []service.Service) []supervisor.Change
 }
@@ -699,6 +700,12 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 			s.follow(ctx, conn, req)
 			return
 		}
+		// A backup answers with a file after the response line, so it owns
+		// the writing side for longer than a line.
+		if req.Op == OpServiceBackup {
+			s.backupService(ctx, conn, req, actor)
+			continue
+		}
 		// An image arrives as bytes after the request line, so this one reads
 		// from the connection instead of only writing to it.
 		if req.Op == OpImagePush {
@@ -951,24 +958,35 @@ type Description struct {
 	Runtime     string  `filo:"runtime" json:"runtime"`
 	CPUs        int     `filo:"cpus" json:"cpus"`
 	MemoryBytes float64 `filo:"memory-bytes" json:"memory-bytes"`
+	// The machine's own clock, so an operator setting a schedule knows which
+	// wall it fires on. Timezone is the operator's responsibility; showing the
+	// clock is the reminder. Zero TimeMS is a daemon from before this field.
+	TimeMS       float64 `filo:"time-ms" json:"time-ms"`
+	Zone         string  `filo:"zone" json:"zone"`
+	ZoneOffsetMS float64 `filo:"zone-offset-ms" json:"zone-offset-ms"`
 }
 
 func (s *Server) describe(ctx context.Context) Response {
 	info := s.runtimeInfo(ctx)
+	now := time.Now()
+	zone, offset := now.Zone()
 	return body(Description{
-		Version:     version.Version,
-		Protocol:    version.Protocol,
-		Schema:      version.Schema,
-		Arch:        info.Arch,
-		Runtime:     info.Version,
-		CPUs:        goruntime.NumCPU(),
-		MemoryBytes: s.hostMemory(),
+		Version:      version.Version,
+		Protocol:     version.Protocol,
+		Schema:       version.Schema,
+		Arch:         info.Arch,
+		Runtime:      info.Version,
+		CPUs:         goruntime.NumCPU(),
+		MemoryBytes:  s.hostMemory(),
+		TimeMS:       float64(now.UnixMilli()),
+		Zone:         zone,
+		ZoneOffsetMS: float64(offset) * 1000,
 		Operations: []string{
 			OpDescribe, OpStatus, OpServiceList,
 			OpServiceStart, OpServiceStop, OpServiceRestrt, OpServiceRedeploy, OpServiceRemove,
-			OpPlan, OpApply, OpAudit, OpLogSearch, OpLogFollow, OpMetrics,
+			OpPlan, OpApply, OpAudit, OpLogSearch, OpLogFollow, OpLogAppend, OpMetrics,
 			OpImagePush, OpImagePull, OpImageList, OpImagePrune, OpServicePut,
-			OpServiceVersions, OpJobRun,
+			OpServiceVersions, OpJobRun, OpServiceBackup,
 		},
 	})
 }

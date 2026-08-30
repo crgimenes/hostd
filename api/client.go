@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/crgimenes/hostd/filoconf"
 )
 
 const dialTimeout = 10 * time.Second
@@ -181,6 +183,54 @@ func (c *Client) Push(ctx context.Context, image, arch string, content io.Reader
 	}
 	if err != nil {
 		return Response{}, err
+	}
+	return resp, nil
+}
+
+// Backup asks the machine to run a service's own backup script and streams the
+// file it produced into what open returns. open sees the name and size first,
+// so the caller decides where the bytes land before any arrive.
+func (c *Client) Backup(ctx context.Context, name string, open func(Backup) (io.Writer, error)) (Response, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// The script may legitimately take minutes; what bounds the wait is the
+	// daemon's own ceiling and the context the caller holds.
+	err := c.conn.SetDeadline(time.Time{})
+	if err != nil {
+		return Response{}, err
+	}
+	err = WriteMessage(c.conn, Request{Op: OpServiceBackup, Name: name})
+	if err != nil {
+		return Response{}, err
+	}
+	var resp Response
+	err = ReadMessage(ctx, c.reader, &resp)
+	if errors.Is(err, io.EOF) {
+		return Response{}, fmt.Errorf(
+			"hostd on %s closed the connection without answering; it is not installed there, just restarted, or this user cannot open its socket: %w",
+			c.target, ErrNoAnswer)
+	}
+	if err != nil {
+		return Response{}, err
+	}
+	if resp.Failed() {
+		return resp, nil
+	}
+	var told Backup
+	err = filoconf.Decode(ctx, "backup", resp.Body, &told)
+	if err != nil {
+		return resp, err
+	}
+	sink, err := open(told)
+	if err != nil {
+		return resp, err
+	}
+	received, err := ReadChunks(c.reader, sink, nil)
+	if err != nil {
+		return resp, fmt.Errorf("the transfer broke after %d bytes: %w", received, err)
+	}
+	if float64(received) != told.Bytes {
+		return resp, fmt.Errorf("the machine announced %.0f bytes and sent %d", told.Bytes, received)
 	}
 	return resp, nil
 }

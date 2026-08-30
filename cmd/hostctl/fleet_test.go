@@ -163,23 +163,3 @@ func TestTheFleetAnswerIsOneExpression(t *testing.T) {
 		t.Fatalf("a machine that failed did not carry its reason: %#v", fleet[1])
 	}
 }
-
-// A machine is called here what ~/.ssh/config calls it. The inventory adds tags
-// to that name and nothing else: where it goes, who it logs in as and with
-// which key are already written down once, in the file ssh itself reads.
-func TestAMachineIsKnownByItsSSHName(t *testing.T) {
-	opt := fleetOptions(t, `(inventory
-	  (host (tuple "name" "web1") (tuple "tags" (list "web")))
-	  (host (tuple "name" "yuki.local")))`)
-
-	entry := opt.entry(context.Background(), "web1")
-	if !slices.Equal(entry.Tags, []string{"web"}) {
-		t.Fatalf("the machine came back as %#v", entry)
-	}
-	// Naming a machine the file does not know is how somebody reaches a new
-	// one: it is still a machine, it just carries no tags.
-	entry = opt.entry(context.Background(), "brand.new")
-	if entry.Name != "brand.new" || len(entry.Tags) != 0 {
-		t.Fatalf("an unknown machine came back as %#v", entry)
-	}
-}

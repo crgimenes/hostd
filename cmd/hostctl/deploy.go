@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -175,5 +178,49 @@ func runServiceRemove(ctx context.Context, client *api.Client, opt options, name
 		_, _ = fmt.Fprintf(opt.out, "%s: %s removed; the tree still describes it, and a deploy puts it back\n",
 			client.Target(), report.Service)
 	})
+	return exitOK, nil
+}
+
+// runServiceBackup asks the machine to run the service's own backup_data.sh
+// and saves the file it produced. The script's whole life is in the machine's
+// log — every line and the exit code — so a backup that went wrong is read
+// with hostctl log like anything else that went wrong.
+func runServiceBackup(ctx context.Context, client *api.Client, opt options, name string) (int, error) {
+	var saved *os.File
+	var into string
+	resp, err := client.Backup(ctx, name, func(told api.Backup) (io.Writer, error) {
+		into = filepath.Join(opt.outDir, told.File)
+		file, createErr := os.Create(into) // #nosec G304 -- the operator's own -out directory
+		if createErr != nil {
+			return nil, createErr
+		}
+		saved = file
+		return file, nil
+	})
+	if saved != nil {
+		closeErr := saved.Close()
+		if err == nil && closeErr != nil {
+			err = closeErr
+		}
+	}
+	if err != nil {
+		// Half a backup on disk reads later as a whole one, which is the worst
+		// outcome a backup can have.
+		if into != "" {
+			_ = os.Remove(into)
+		}
+		return exitComms, err
+	}
+	if resp.Failed() {
+		return codeFor(resp.Err()), resp.Err()
+	}
+	var told api.Backup
+	decodeErr := decode(ctx, resp.Body, &told)
+	if decodeErr != nil {
+		return exitFailed, decodeErr
+	}
+	_, _ = fmt.Fprintf(opt.out, "%s (%s)\n", into, formatBytes(told.Bytes))
+	_, _ = fmt.Fprintf(opt.out, "what the script said: hostctl -host %s log -service %s -run %s\n",
+		client.Target(), name, told.Run)
 	return exitOK, nil
 }

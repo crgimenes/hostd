@@ -447,7 +447,7 @@ func hostDetail(snap snapshot, view viewState) detailView {
 	}
 	out := detailView{
 		Title:    host.Host,
-		Subtitle: fmt.Sprintf("%d service(s) declared", len(host.Services)),
+		Subtitle: fmt.Sprintf("%d service(s) declared%s", len(host.Services), machineClock(host)),
 		Single:   true,
 	}
 	if host.Error != "" {
@@ -494,6 +494,20 @@ func hostDetail(snap snapshot, view viewState) detailView {
 		})
 	}
 	return out
+}
+
+// machineClock renders the machine's CURRENT time in the machine's own zone,
+// from the skew the connection measured — an instant shown as it was received
+// would be a clock that stopped. Minutes, so the header repaints once a minute
+// instead of every round. Timezone is the operator's responsibility; this is
+// the reminder, and two machines configured differently show it side by side.
+func machineClock(host fleetHost) string {
+	if host.Zone == "" {
+		return ""
+	}
+	zone := time.FixedZone(host.Zone, int(host.ZoneOffsetMS/1000))
+	now := time.Now().Add(time.Duration(host.ClockSkewMS) * time.Millisecond).In(zone)
+	return " · " + now.Format("15:04 MST")
 }
 
 func serviceDetail(snap snapshot, view viewState) detailView {

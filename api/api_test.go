@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -111,6 +112,10 @@ func (f *fakeSupervisor) Remove(name string) (bool, error) {
 // The run id the real supervisor answers with is the instant it was asked for,
 // so the fake answers with a fixed one: what the tests check is which outcome
 // came back, not what the clock said.
+func (f *fakeSupervisor) Backup(ctx context.Context, name string) (supervisor.BackupRun, error) {
+	return supervisor.BackupRun{}, supervisor.ErrNoBackup{Name: name}
+}
+
 func (f *fakeSupervisor) RunNow(name string) (string, error) {
 	err := f.act("run", name)
 	if err != nil {
@@ -1205,5 +1210,27 @@ func TestAppendRefusesEventsAndBrokenNames(t *testing.T) {
 	}
 	if len(lines) != 0 {
 		t.Fatalf("a refused append still wrote: %+v", lines)
+	}
+}
+
+// A service that carries no backup_data.sh is refused with the reason, and
+// nothing is audited as having worked.
+func TestBackupOfAServiceWithoutTheScriptSaysSo(t *testing.T) {
+	f := newFixture(t)
+	client := f.client()
+	defer func() { _ = client.Close() }()
+	resp, err := client.Backup(context.Background(), "api", func(api Backup) (io.Writer, error) {
+		t.Fatal("a refused backup offered bytes")
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatalf("backup: %v", err)
+	}
+	if resp.Code != CodeNotFound {
+		t.Fatalf("code = %q, want %q: %s", resp.Code, CodeNotFound, resp.Message)
+	}
+	recent := f.store.Recent(1)
+	if len(recent) != 1 || recent[0].Operation != OpServiceBackup || recent[0].Result != state.ResultFailed {
+		t.Fatalf("the audit does not carry the refused backup: %+v", recent)
 	}
 }

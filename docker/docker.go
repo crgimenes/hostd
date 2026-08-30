@@ -627,6 +627,21 @@ type Line struct {
 	At     time.Time
 }
 
+// Archive streams one path out of a container's filesystem as a tar, the way
+// the runtime hands it over. It works on a stopped container, which is what
+// lets a finished backup run be read before it is removed.
+//
+// https://docs.docker.com/reference/api/engine/version/v1.43/#tag/Container/operation/ContainerArchive
+// curl --unix-socket /var/run/docker.sock "http://d/containers/${ID}/archive?path=/tmp/x" -o x.tar
+func (c *Client) Archive(ctx context.Context, id, path string) (io.ReadCloser, error) {
+	query := url.Values{"path": {path}}
+	resp, err := c.do(ctx, http.MethodGet, "/containers/"+url.PathEscape(id)+"/archive", query, nil)
+	if err != nil {
+		return nil, err
+	}
+	return resp.Body, nil
+}
+
 // Logs follows a container's output until the context ends or the container
 // does. The runtime keeps the log; hostd copies it into the timeline where the
 // service's own events already are, so a death and the last lines before it

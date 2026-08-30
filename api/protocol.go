@@ -42,6 +42,7 @@ const (
 	OpServiceVersions = "service.versions"
 	OpServicePut      = "service.put"
 	OpJobRun          = "job.run"
+	OpServiceBackup   = "service.backup"
 )
 
 // Codes are what programs read; messages are for people and may be rewritten.

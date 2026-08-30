@@ -199,6 +199,9 @@ func (p *panel) absorb(fleet []fleetHost) {
 				host.Metrics = known.Metrics
 			}
 			host.Version = known.Version
+			host.ClockSkewMS = known.ClockSkewMS
+			host.Zone = known.Zone
+			host.ZoneOffsetMS = known.ZoneOffsetMS
 			// A failed round asked for no images either, so what is on the
 			// image screen would empty itself every time ssh hiccups.
 			if len(known.Images) > 0 {
