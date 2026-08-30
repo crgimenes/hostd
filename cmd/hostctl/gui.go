@@ -386,7 +386,14 @@ func (p *panel) one(ctx context.Context, host string, fromMS, toMS float64, sinc
 		if trouble != "" {
 			answer.Error = trouble
 		}
-		answer.NoDaemon = trouble == "" && errors.Is(err, api.ErrNoAnswer)
+		// Silence means ssh reached it and no hostd answered — and so does the
+		// remote shell saying it has no hostd to run: that is a live machine
+		// with nothing installed, which is exactly the case the install button
+		// exists for. A fresh VPS was read as "not answering" before this,
+		// because its shell's complaint counted as trouble (crg, 2026-08-30).
+		noBinary := strings.Contains(trouble, "command not found") ||
+			strings.Contains(trouble, "not found: hostd")
+		answer.NoDaemon = (trouble == "" || noBinary) && errors.Is(err, api.ErrNoAnswer)
 		p.drop(host)
 		return answer
 	}

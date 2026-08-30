@@ -305,13 +305,17 @@ func scratchPath(answer string) (string, error) {
 	return path, nil
 }
 
-// What hostd targets, from what the machine says it is.
+// What hostd targets, from what the machine says it is. The system is asked
+// along with the machine, because uname -m alone cannot tell a Linux host from
+// a Mac: both answer arm64, only one of them can run what this binary embeds —
+// and without the check, an install pointed at the operator's own macOS
+// happily copied a Linux ELF towards /usr/local/bin (crg, 2026-08-30).
 func remoteArch(ctx context.Context, host string) (string, error) {
-	machine, err := remoteOutputErr(ctx, host, "uname -m", nil)
+	answer, err := remoteOutputErr(ctx, host, "uname -sm", nil)
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", host, err)
 	}
-	arch, err := hostdArch(machine)
+	arch, err := hostdArch(answer)
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", host, err)
 	}
@@ -321,7 +325,17 @@ func remoteArch(ctx context.Context, host string) (string, error) {
 // hostdArch maps what uname says onto what a release carries. A machine that
 // is neither is refused with both names in it: "unsupported" alone leaves the
 // operator guessing whether the fault is theirs.
-func hostdArch(machine string) (string, error) {
+func hostdArch(answer string) (string, error) {
+	system, machine, _ := strings.Cut(strings.TrimSpace(answer), " ")
+	if system == "Darwin" {
+		// A Mac is a developer's machine, not a host (crg, 2026-08-30):
+		// services live on Linux, and macOS itself objects to daemons another
+		// program installed. Loopback needs no install at all.
+		return "", fmt.Errorf("this is a Mac, and hostd services belong on Linux; to test in loopback, run hostd there as yourself — it keeps its state under the user's own config directory")
+	}
+	if system != "Linux" {
+		return "", fmt.Errorf("hostd runs on Linux, and this machine answers %q", strings.TrimSpace(answer))
+	}
 	switch strings.TrimSpace(machine) {
 	case "x86_64":
 		return "amd64", nil
@@ -377,6 +391,14 @@ var installScript = []byte(`set -eu
 sudo=""
 if [ "$(id -u)" -ne 0 ]; then
 	sudo="sudo -n"
+	# Checked before anything happens, so the answer is a sentence instead of
+	# sudo's own "a password is required" with half an install behind it. -n is
+	# not negotiable: an install fanned out over the fleet cannot stop at a
+	# password prompt.
+	if ! $sudo true 2>/dev/null; then
+		echo "installing needs passwordless sudo for $(id -un) on this machine, and sudo asked for a password" >&2
+		exit 1
+	fi
 fi
 # Keep what is on the machine before replacing it. It is the one binary known
 # to have worked HERE, which is worth more than any version number when the new

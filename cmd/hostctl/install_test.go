@@ -65,11 +65,11 @@ func TestTheInstallReportsWhatChanged(t *testing.T) {
 // A machine that is neither is refused with its own name in the message.
 func TestTheArchitectureMapCoversWhatAReleaseCarries(t *testing.T) {
 	for machine, want := range map[string]string{
-		"x86_64":    "amd64",
-		"aarch64":   "arm64",
-		"arm64":     "arm64",
-		"x86_64\n":  "amd64",
-		" aarch64 ": "arm64",
+		"Linux x86_64":    "amd64",
+		"Linux aarch64":   "arm64",
+		"Linux arm64":     "arm64",
+		"Linux x86_64\n":  "amd64",
+		" Linux aarch64 ": "arm64",
 	} {
 		got, err := hostdArch(machine)
 		if err != nil {
@@ -83,7 +83,7 @@ func TestTheArchitectureMapCoversWhatAReleaseCarries(t *testing.T) {
 
 	// The 32-bit ARM of an older board is the realistic wrong answer here, and
 	// it has to come back naming itself.
-	_, err := hostdArch("armv7l")
+	_, err := hostdArch("Linux armv7l")
 	if err == nil {
 		t.Fatal("a machine hostd does not target was accepted")
 	}
@@ -151,5 +151,22 @@ func TestTheScratchPathIsRefusedRatherThanRepaired(t *testing.T) {
 		if !strings.Contains(err.Error(), because) {
 			t.Errorf("scratchPath(%q) refused with %q, which does not say %q", answer, err, because)
 		}
+	}
+}
+
+// uname -m alone cannot tell a Linux host from a Mac — both answer arm64, only
+// one can run what this binary embeds. A Mac is a developer's machine, not a
+// host (crg, 2026-08-30): refused with where loopback lives instead.
+func TestAMacIsRefusedAsAnInstallTarget(t *testing.T) {
+	_, err := hostdArch("Darwin arm64")
+	if err == nil {
+		t.Fatal("a Mac was accepted as a target for a Linux daemon")
+	}
+	if !strings.Contains(err.Error(), "loopback") {
+		t.Fatalf("the refusal does not say what to do instead: %v", err)
+	}
+	_, err = hostdArch("FreeBSD amd64")
+	if err == nil || !strings.Contains(err.Error(), "FreeBSD") {
+		t.Fatalf("another system was not refused by name: %v", err)
 	}
 }
