@@ -17,7 +17,7 @@ import (
 // deploy, and a hand edit on the machine would be a change nobody committed.
 func runFile(ctx context.Context, client *api.Client, opt options, args []string) (int, error) {
 	if len(args) == 0 {
-		return exitUsage, fmt.Errorf("file needs a subcommand: ls, get or put")
+		return exitUsage, fmt.Errorf("file needs a subcommand: ls, get, put or rm")
 	}
 	switch args[0] {
 	case "ls", "list":
@@ -39,8 +39,13 @@ func runFile(ctx context.Context, client *api.Client, opt options, args []string
 			return exitUsage, fmt.Errorf("file put needs a service, a local file, and volume/path/to/write")
 		}
 		return runFilePut(ctx, client, opt, args[1], args[2], args[3])
+	case "rm":
+		if len(args) < 3 {
+			return exitUsage, fmt.Errorf("file rm needs a service and volume/path/to/file")
+		}
+		return runFileDelete(ctx, client, opt, args[1], args[2])
 	default:
-		return exitUsage, fmt.Errorf("file %s does not exist; ls, get and put do", args[0])
+		return exitUsage, fmt.Errorf("file %s does not exist; ls, get, put and rm do", args[0])
 	}
 }
 
@@ -132,5 +137,22 @@ func runFilePut(ctx context.Context, client *api.Client, opt options, svc, local
 		return exitFailed, err
 	}
 	_, _ = fmt.Fprintf(opt.out, "%s: %s now holds %s (%s)\n", client.Target(), svc, told.Path, formatBytes(told.Bytes))
+	return exitOK, nil
+}
+
+func runFileDelete(ctx context.Context, client *api.Client, opt options, svc, wire string) (int, error) {
+	resp, err := client.Do(ctx, api.Request{Op: api.OpFileDelete, Service: svc, Name: wire})
+	if err != nil {
+		return exitComms, err
+	}
+	if resp.Failed() {
+		return codeFor(resp.Err()), resp.Err()
+	}
+	var told api.FileTransfer
+	err = decode(ctx, resp.Body, &told)
+	if err != nil {
+		return exitFailed, err
+	}
+	_, _ = fmt.Fprintf(opt.out, "%s: %s no longer holds %s (%s)\n", client.Target(), svc, told.Path, formatBytes(told.Bytes))
 	return exitOK, nil
 }

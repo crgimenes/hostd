@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/crgimenes/hostd/service"
+	"github.com/crgimenes/hostd/state"
 	"github.com/crgimenes/hostd/supervisor"
 )
 
@@ -157,5 +158,36 @@ func TestFileOperationsAgainstARealVolume(t *testing.T) {
 	}
 	if !resp.Failed() {
 		t.Fatalf("a symlink out of the volume was followed: %q", got.String())
+	}
+
+	// rm by name: the file goes, a directory does not.
+	err = call(client, Request{Op: OpFileDelete, Service: "probe", Name: "data/x.txt"}, nil)
+	if err != nil {
+		t.Fatalf("file.delete: %v", err)
+	}
+	err = call(client, Request{Op: OpFileList, Service: "probe", Name: "data"}, &entries)
+	if err != nil {
+		t.Fatalf("file.list: %v", err)
+	}
+	for _, entry := range entries {
+		if entry.Name == "x.txt" {
+			t.Fatal("the deleted file is still listed")
+		}
+	}
+}
+
+// rm is by name and takes one file: a directory is refused, and so is the
+// volume itself. What was refused is audited like what was done.
+func TestDeleteRefusesDirectoriesAndBareVolumes(t *testing.T) {
+	f := newFixture(t)
+	declare(t, f, "site", `(service (tuple "name" "site") (tuple "image" "site:1")
+	  (tuple "volumes" (list "data:/var/lib/site")))`)
+	err := call(f.client(), Request{Op: OpFileDelete, Service: "site", Name: "data"}, nil)
+	if err == nil {
+		t.Fatal("deleting the volume itself was accepted")
+	}
+	recent := f.store.Recent(1)
+	if len(recent) != 1 || recent[0].Operation != OpFileDelete || recent[0].Result != state.ResultFailed {
+		t.Fatalf("the refused delete is not in the audit: %+v", recent)
 	}
 }

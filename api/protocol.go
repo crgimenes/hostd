@@ -46,6 +46,7 @@ const (
 	OpFileList        = "file.list"
 	OpFileGet         = "file.get"
 	OpFilePut         = "file.put"
+	OpFileDelete      = "file.delete"
 )
 
 // Codes are what programs read; messages are for people and may be rewritten.

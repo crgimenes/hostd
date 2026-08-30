@@ -113,6 +113,9 @@ type buttonView struct {
 	// A catalog button instead names the SERVICE, and takes the machine from
 	// the dropdown beside it — the act is built at the click.
 	Deploy string
+	// Waiting for the second click that confirms it: rendered as the warning
+	// it is.
+	Armed bool
 	// Running right now: rendered held down, and a second click is nothing.
 	Busy bool
 }
@@ -157,7 +160,12 @@ func (d detailView) StructureKey() string {
 			fmt.Fprintf(&key, " g:%s|%v\n", strings.Join(row.Cells, "\x1f"), row.Loose)
 		}
 		for _, button := range card.Buttons {
-			fmt.Fprintf(&key, " b:%s|%s|%v\n", button.Act, button.Deploy, button.Busy)
+			fmt.Fprintf(&key, " b:%s|%s|%v|%v\n", button.Act, button.Deploy, button.Busy, button.Armed)
+		}
+		for _, row := range card.Grid {
+			for _, button := range row.Buttons {
+				fmt.Fprintf(&key, " rb:%s|%v|%v\n", button.Act, button.Busy, button.Armed)
+			}
 		}
 	}
 	return key.String()
@@ -578,6 +586,12 @@ func filesDetail(view viewState, files filesState) detailView {
 			Buttons: []buttonView{{
 				Icon: "box-arrow-down",
 				Act:  "do/filedl/" + view.host + "/" + view.name + "/" + here,
+			}, {
+				// Discreet, and armed rather than instant: beside the download
+				// button, a slip must cost a second click, not a file
+				// (crg, 2026-08-30).
+				Icon: "trash",
+				Act:  "do/filerm/" + view.host + "/" + view.name + "/" + here,
 			}},
 		})
 	}
@@ -670,7 +684,7 @@ func serviceActions(host, service string) []buttonView {
 		{"start", "play-fill"},
 		{"remove", "trash"},
 	}
-	out := make([]buttonView, 0, len(verbs))
+	out := make([]buttonView, 0, len(verbs)+1)
 	for _, verb := range verbs {
 		out = append(out, buttonView{
 			Label: verb.label,
@@ -678,6 +692,15 @@ func serviceActions(host, service string) []buttonView {
 			Act:   fmt.Sprintf("do/%s/%s/%s", verb.label, host, service),
 		})
 	}
+	// Not a do/: it navigates. The same screen the tree's fold under the
+	// service reaches — which is 9px wide, and the first person who went
+	// looking for Files did not find it there (crg, 2026-08-30). The detail
+	// header is where the eyes already are.
+	out = append(out, buttonView{
+		Label: "files",
+		Icon:  "folder2-open",
+		Act:   fmt.Sprintf("select/files/%s/%s", host, service),
+	})
 	return out
 }
 

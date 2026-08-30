@@ -126,7 +126,7 @@
             {{- range $at, $cell := .Cells}}
             {{- if and (eq $at 0) $row.Link}}<td class="navCell" data-act="{{$row.Link}}">{{$cell}}</td>
             {{- else if and (eq $at (lastCell $row.Cells)) $row.Buttons}}<td class="actCell">
-              {{- range $row.Buttons}}<button class="push tiny"{{if .Act}} data-act="{{.Act}}"{{end}}{{if .Busy}} disabled{{end}}>{{if .Icon}}{{icon .Icon}}{{end}}{{if .Label}}<span>{{.Label}}</span>{{end}}</button>{{end}}</td>
+              {{- range $row.Buttons}}<button class="push tiny{{if .Armed}} armed{{end}}"{{if .Act}} data-act="{{.Act}}"{{end}}{{if .Busy}} disabled{{end}}>{{if .Icon}}{{icon .Icon}}{{end}}{{if .Armed}}<span>delete?</span>{{else if .Label}}<span>{{.Label}}</span>{{end}}</button>{{end}}</td>
             {{- else}}<td>{{$cell}}</td>{{end}}
             {{- end}}</tr>
           {{- end}}

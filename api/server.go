@@ -807,6 +807,8 @@ func (s *Server) dispatch(ctx context.Context, req Request, actor string) Respon
 		return s.stamp(s.appendLogs(req))
 	case OpFileList:
 		return s.stamp(s.listFiles(ctx, req))
+	case OpFileDelete:
+		return s.stamp(s.deleteFile(ctx, req, actor))
 	case OpMetrics:
 		return s.stamp(s.readMetrics(req))
 	case OpImageList:
@@ -1003,7 +1005,7 @@ func (s *Server) describe(ctx context.Context) Response {
 			OpPlan, OpApply, OpAudit, OpLogSearch, OpLogFollow, OpLogAppend, OpMetrics,
 			OpImagePush, OpImagePull, OpImageList, OpImagePrune, OpServicePut,
 			OpServiceVersions, OpJobRun, OpServiceBackup,
-			OpFileList, OpFileGet, OpFilePut,
+			OpFileList, OpFileGet, OpFilePut, OpFileDelete,
 		},
 	})
 }

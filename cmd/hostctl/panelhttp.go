@@ -267,6 +267,15 @@ func (p *panel) fragments() []fragment {
 				detail.Cards[card].Buttons[at].Busy = p.running(button.Act)
 			}
 		}
+		for row := range detail.Cards[card].Grid {
+			for at, button := range detail.Cards[card].Grid[row].Buttons {
+				if button.Act == "" {
+					continue
+				}
+				detail.Cards[card].Grid[row].Buttons[at].Busy = p.running(button.Act)
+				detail.Cards[card].Grid[row].Buttons[at].Armed = p.isArmed(button.Act)
+			}
+		}
 	}
 
 	out := []fragment{

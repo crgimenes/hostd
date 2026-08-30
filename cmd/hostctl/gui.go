@@ -103,6 +103,12 @@ type panel struct {
 	filesMu sync.Mutex
 	files   filesState
 
+	// Destructive buttons arm on the first click and act on the second, so a
+	// slip beside the download button deletes nothing. Armed is a moment, not
+	// a mode: it expires by itself.
+	armedMu sync.Mutex
+	armed   map[string]time.Time
+
 	viewMu sync.Mutex
 	view   viewState
 

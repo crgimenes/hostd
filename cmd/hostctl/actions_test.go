@@ -559,3 +559,44 @@ func TestFileActionsParse(t *testing.T) {
 		t.Fatal("a download with no file to download was accepted")
 	}
 }
+
+// A delete beside the download button must cost two clicks: the first arms the
+// button and removes nothing, the second within the window acts, and an armed
+// button somebody walked away from stands down by itself.
+func TestADeleteArmsOnTheFirstClickAndActsOnTheSecond(t *testing.T) {
+	view, _, _ := actingPanel(t)
+	parts := []string{"filerm", "yuki", "site", "data", "x.txt"}
+	act := "do/" + strings.Join(parts, "/")
+
+	work, err := view.action(parts)
+	if err != nil {
+		t.Fatalf("first click: %v", err)
+	}
+	work()
+	if !view.isArmed(act) {
+		t.Fatal("the first click did not arm the button")
+	}
+
+	// The second click disarms and hands back the real work. It is not run
+	// here — running it would dial a machine — but it must consume the arming.
+	_, err = view.action(parts)
+	if err != nil {
+		t.Fatalf("second click: %v", err)
+	}
+	if view.isArmed(act) {
+		t.Fatal("the second click left the button armed")
+	}
+
+	// Armed again and left alone: it stands down on its own.
+	work, _ = view.action(parts)
+	work()
+	view.armedMu.Lock()
+	view.armed[act] = time.Now().Add(-time.Second)
+	view.armedMu.Unlock()
+	if view.isArmed(act) {
+		t.Fatal("an expired arming still reads as armed")
+	}
+	if view.disarm(act) {
+		t.Fatal("an expired arming still spends as a confirmation")
+	}
+}

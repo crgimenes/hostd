@@ -277,6 +277,7 @@ usage:
   hostctl file get <name> <vol/path>   download one of them (-out says where)
   hostctl file put <name> <local> <vol/path>
                                        place a file in a service's data
+  hostctl file rm <name> <vol/path>    delete one file of it, by name
   hostctl service start <name>         ask a service to run
   hostctl service stop <name>          ask a service to stop
   hostctl service restart <name>       stop and start a service

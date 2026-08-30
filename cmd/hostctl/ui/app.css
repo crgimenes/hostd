@@ -943,3 +943,11 @@ td.problem {
 .grid td.navCell:hover { text-decoration: underline; }
 .grid td.actCell { text-align: right; padding: 0.1rem 0.4rem; }
 button.push.tiny { padding: 0.1rem 0.35rem; font-size: 0.85em; }
+
+/* A delete waiting for its second click: the button says what the click will
+   do, in the color that means it. It stands down by itself. */
+button.push.armed {
+	background: var(--failed);
+	color: #fff;
+	border-color: transparent;
+}

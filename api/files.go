@@ -158,6 +158,48 @@ func (s *Server) listVolumes(ctx context.Context, svcName string) Response {
 	return body(out)
 }
 
+// deleteFile removes ONE file of a service's data, by name — never a
+// directory, and never anything a redeploy would bring back: this is the undo
+// of an upload, not a cleanup tool. Audited, because "who deleted that file"
+// is exactly what an audit is for.
+func (s *Server) deleteFile(ctx context.Context, req Request, actor string) Response {
+	entry := state.Entry{Operation: OpFileDelete, Target: req.Service + ":" + req.Name, Actor: actor, OnBehalfOf: req.OnBehalfOf}
+	fail := func(resp Response) Response {
+		entry.Result = state.ResultFailed
+		entry.Detail = resp.Message
+		resp.Generation = s.store.Record(entry, false)
+		return resp
+	}
+	if !service.ValidName(req.Service) {
+		return fail(Response{Code: CodeInvalid, Message: fmt.Sprintf("%q is not a service name", req.Service)})
+	}
+	root, inside, err := s.fileRoot(ctx, req.Service, req.Name)
+	if err != nil {
+		return fail(Response{Code: CodeFailed, Message: err.Error()})
+	}
+	defer func() { _ = root.Close() }()
+	if inside == "." {
+		return fail(Response{Code: CodeInvalid, Message: "name the file to delete, not the volume"})
+	}
+	info, err := root.Lstat(inside)
+	if err != nil {
+		return fail(Response{Code: CodeFailed, Message: err.Error()})
+	}
+	if info.IsDir() {
+		return fail(Response{Code: CodeInvalid, Message: fmt.Sprintf("%s is a directory, and this deletes one file by name", req.Name)})
+	}
+	err = root.Remove(inside)
+	if err != nil {
+		return fail(Response{Code: CodeFailed, Message: err.Error()})
+	}
+	entry.Result = state.ResultOK
+	entry.Detail = fmt.Sprintf("%d bytes", info.Size())
+	generation := s.store.Record(entry, false)
+	resp := body(FileTransfer{Path: req.Name, Bytes: float64(info.Size())})
+	resp.Generation = generation
+	return resp
+}
+
 // getFile owns the connection like a backup does: the response line announces
 // path and size, the bytes follow in chunks. Audited — who took which file is
 // the question an audit answers.

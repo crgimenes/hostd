@@ -58,6 +58,14 @@ func (p *panel) action(parts []string) (func(), error) {
 		return func() { p.prune(host) }, nil
 	case verb == "install":
 		return func() { p.install(host) }, nil
+	case verb == "filerm" && len(parts) > 3:
+		wire := strings.Join(parts[2:], "/")
+		act := "do/" + strings.Join(parts, "/")
+		if !p.disarm(act) {
+			// First click arms; the button says so and nothing is deleted.
+			return func() { p.arm(act) }, nil
+		}
+		return func() { p.deleteFile(host, wire) }, nil
 	case verb == "filedl" && len(parts) > 3:
 		wire := strings.Join(parts[2:], "/")
 		return func() { p.downloadFile(host, wire) }, nil
@@ -67,6 +75,80 @@ func (p *panel) action(parts []string) (func(), error) {
 		return func() { p.uploadFile(host, parts[2], wire) }, nil
 	}
 	return nil, refuse
+}
+
+// How long an armed delete waits for its second click before standing down.
+const armedFor = 5 * time.Second
+
+func (p *panel) arm(act string) {
+	p.armedMu.Lock()
+	if p.armed == nil {
+		p.armed = map[string]time.Time{}
+	}
+	p.armed[act] = time.Now().Add(armedFor)
+	p.armedMu.Unlock()
+	p.push()
+	// Stand down by itself: an armed button somebody walked away from must not
+	// still be armed when they come back.
+	time.AfterFunc(armedFor, func() {
+		p.armedMu.Lock()
+		expired := !p.armed[act].After(time.Now())
+		if expired {
+			delete(p.armed, act)
+		}
+		p.armedMu.Unlock()
+		if expired {
+			p.push()
+		}
+	})
+}
+
+// disarm answers whether the act was armed, and spends the arming either way.
+func (p *panel) disarm(act string) bool {
+	p.armedMu.Lock()
+	defer p.armedMu.Unlock()
+	until, held := p.armed[act]
+	if !held {
+		return false
+	}
+	delete(p.armed, act)
+	return until.After(time.Now())
+}
+
+func (p *panel) isArmed(act string) bool {
+	p.armedMu.Lock()
+	defer p.armedMu.Unlock()
+	return p.armed[act].After(time.Now())
+}
+
+// deleteFile is the second click: the file goes, the log says so, the listing
+// refreshes. The wire is service/volume/path, the same shape the click built.
+func (p *panel) deleteFile(host, wire string) {
+	svc, rest, _ := strings.Cut(wire, "/")
+	client, err := p.reach(host)
+	if err != nil {
+		p.problem(host, svc, err)
+		return
+	}
+	defer func() { _ = client.Close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), deployTimeout)
+	defer cancel()
+	resp, err := client.Do(ctx, api.Request{Op: api.OpFileDelete, Service: svc, Name: rest})
+	if err != nil {
+		p.problem(host, svc, err)
+		return
+	}
+	if resp.Failed() {
+		p.problem(host, svc, resp.Err())
+		return
+	}
+	p.sayLine(host, svc, "deleted "+rest, false)
+	at := strings.LastIndex(rest, "/")
+	dir := ""
+	if at > 0 {
+		dir = rest[:at]
+	}
+	p.loadFiles(host, svc, dir)
 }
 
 // Where a download lands: the user's own Downloads when there is one, the
