@@ -39,8 +39,9 @@ usage:
   hostd [flags]
 
 It has no interface of its own: operate it with hostctl.
-Paths default to /etc/hostd, /var/lib/hostd and /run/hostd, and HOSTD_ROOT
-redirects all of them.
+Paths default to /etc/hostd, /var/lib/hostd and /run/hostd on Linux, and to
+the same layout under the user's config directory (hostd-local) anywhere else,
+where /etc belongs to root. HOSTD_ROOT redirects all of them.
 
 flags:
 `)

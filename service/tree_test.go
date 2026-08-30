@@ -30,7 +30,7 @@ func writeTree(t *testing.T, files map[string]string) string {
 func TestATreeHoldsBothShapes(t *testing.T) {
 	dir := writeTree(t, map[string]string{
 		"site.filo":       `(service (tuple "name" "site") (tuple "image" "site:1"))`,
-		"caddy/init.filo": `(service (tuple "name" "caddy") (tuple "image" "caddy:2") (tuple "config" "/etc/caddy"))`,
+		"caddy/init.filo": `(service (tuple "name" "caddy") (tuple "image" "caddy:2"))`,
 		"caddy/Caddyfile": ":80 {\n\treverse_proxy site:80\n}\n",
 		"inventory.filo":  `(inventory (host (tuple "name" "yuki.local")))`,
 		".hidden":         "ignored",
@@ -105,7 +105,7 @@ func TestTheDirectoryIsTheName(t *testing.T) {
 // refused where it is written.
 func TestArtifactsHaveACeiling(t *testing.T) {
 	dir := writeTree(t, map[string]string{
-		"big/init.filo": `(service (tuple "name" "big") (tuple "image" "big:1") (tuple "config" "/etc/big"))`,
+		"big/init.filo": `(service (tuple "name" "big") (tuple "image" "big:1"))`,
 		"big/blob":      strings.Repeat("x", MaxArtifactBytes+1),
 	})
 	_, err := LoadTree(context.Background(), dir)

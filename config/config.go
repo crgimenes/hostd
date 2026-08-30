@@ -8,6 +8,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	"github.com/crgimenes/hostd/filoconf"
@@ -24,6 +25,24 @@ const (
 // RootEnv redirects every path under one directory. Unset, hostd behaves
 // exactly as it does on a real host: this is a redirection, not a test mode.
 const RootEnv = "HOSTD_ROOT"
+
+// A host is Linux; anywhere else is an operator's own machine running hostd in
+// loopback, where /etc and /var belong to root and a sandbox forbids them. The
+// OS convention is the default there — the same layout, under the user's own
+// config directory — so hostd and hostctl on one macOS agree on the socket
+// with nothing exported (crg, 2026-08-30). Not "hostd": that directory is the
+// operator's own tree of declarations, and the daemon's state mixed into it
+// would read as files somebody wrote.
+func fallbackRoot() string {
+	if runtime.GOOS == "linux" {
+		return ""
+	}
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, "hostd-local")
+}
 
 type Config struct {
 	LogRetentionDays float64 `filo:"log-retention-days"`
@@ -50,6 +69,9 @@ type Paths struct {
 
 func Locate() Paths {
 	root := os.Getenv(RootEnv)
+	if root == "" {
+		root = fallbackRoot()
+	}
 	if root == "" {
 		return Paths{ConfigDir: DefaultConfigDir, DataDir: DefaultDataDir, RunDir: DefaultRunDir}
 	}

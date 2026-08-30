@@ -164,7 +164,6 @@ func (h *harness) logText() string {
 func container(name, image, script string) service.Service {
 	return service.Service{
 		Name:        name,
-		Kind:        service.KindContainer,
 		Image:       image,
 		Args:        []string{"sh", "-c", script},
 		State:       service.StateRunning,
@@ -663,7 +662,7 @@ func TestApplyingAJobDoesNotStartIt(t *testing.T) {
 
 	// It starts life as a service, so the apply has something to take away.
 	svc := service.Service{
-		Name: testService, Kind: service.KindContainer, Image: image,
+		Name: testService, Image: image,
 		Args: []string{"sh", "-c", "sleep 300"}, State: service.StateRunning,
 	}
 	h.start2(svc)
@@ -853,5 +852,32 @@ func TestTwoRemovalsDoNotQueueBehindEachOther(t *testing.T) {
 	// would take eight.
 	if elapsed := time.Since(start); elapsed > 7*time.Second {
 		t.Fatalf("two removals took %s, so they queued behind each other", elapsed)
+	}
+}
+
+// The artifacts directory reaches the container at the convention path, read
+// only, exactly when it exists — a field said where once, and both real
+// services had chosen /etc/<name> by hand anyway (crg, 2026-08-30). The hostd
+// segment keeps the convention off paths the image owns.
+func TestArtifactsAreMountedAtTheConventionPath(t *testing.T) {
+	h := newHarness(t)
+	h.sup = New(h.buffer, h.services)
+	svc := service.Service{Name: testService}
+
+	if got := h.sup.configMount(svc); len(got) != 0 {
+		t.Fatalf("a service with no artifacts got a mount: %+v", got)
+	}
+
+	artifacts := filepath.Join(h.services, testService+service.ArtifactSuffix)
+	err := os.MkdirAll(artifacts, 0o700)
+	if err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	got := h.sup.configMount(svc)
+	if len(got) != 1 {
+		t.Fatalf("a service with artifacts got %d mount(s)", len(got))
+	}
+	if got[0].Target != "/etc/hostd/"+testService || !got[0].ReadOnly || got[0].Source != artifacts {
+		t.Fatalf("the mount is %+v", got[0])
 	}
 }

@@ -57,20 +57,13 @@ func (s *Supervisor) Backup(ctx context.Context, name string) (BackupRun, error)
 	if err != nil {
 		return BackupRun{}, ErrNoBackup{Name: name}
 	}
-	// The script reaches the container through the config mount, so a service
-	// that carries the script but mounts it nowhere cannot run it.
-	if svc.Config == "" {
-		return BackupRun{}, fmt.Errorf(
-			"%s carries %s but declares no config mount, so the script has no path inside the container", name, BackupScript)
-	}
-
 	slot := s.now()
 	run := runID(slot)
 	target := fmt.Sprintf("/tmp/%s_%s.backup", name, slot.UTC().Format("20060102T150405"))
 	// The declaration's own command is replaced by the script's, and nothing
 	// else changes: the data the script needs is where the service's mounts
 	// put it.
-	svc.Args = []string{"/bin/sh", path.Join(svc.Config, BackupScript), target}
+	svc.Args = []string{"/bin/sh", path.Join(service.ConfigDir(name), BackupScript), target}
 
 	limit := defaultBackupLimit
 	if svc.IsJob() {

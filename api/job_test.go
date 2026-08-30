@@ -13,7 +13,7 @@ import (
 // guessing which of several runs is theirs.
 func TestAskingForARunAnswersWithItsID(t *testing.T) {
 	f := newFixture(t)
-	f.sup.statuses = []supervisor.Status{{Name: "backup", Kind: "container", Every: "1h"}}
+	f.sup.statuses = []supervisor.Status{{Name: "backup", Every: "1h"}}
 
 	before := f.store.Generation()
 	resp, err := f.client().Do(context.Background(), Request{Op: OpJobRun, Name: "backup"})

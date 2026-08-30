@@ -24,8 +24,6 @@ import (
 // once and is the runtime's now: it already keeps a container alive through
 // its own restart and the machine's reboot, and two supervisors with different
 // opinions about one process is how a service flaps.
-const KindContainer = "container"
-
 const (
 	StateRunning = "running"
 	StateStopped = "stopped"
@@ -62,7 +60,6 @@ const Extension = ".filo"
 
 type Service struct {
 	Name string `filo:"name"`
-	Kind string `filo:"kind"`
 	// What the image runs, when the file wants something other than what the
 	// image itself says.
 	Args        []string `filo:"args"`
@@ -94,12 +91,8 @@ type Service struct {
 	// Not "ports": that publishes a port to the machine, and a service behind a
 	// proxy usually publishes nothing at all.
 	UpstreamPort float64 `filo:"upstream-port"`
-	// Where the files that travel with this declaration are mounted, read
-	// only. Without it a service directory with artifacts has nowhere to put
-	// them, which is a mistake worth naming rather than ignoring.
-	Config string  `filo:"config"`
-	Memory float64 `filo:"memory-mb"`
-	CPUs   float64 `filo:"cpus"`
+	Memory       float64 `filo:"memory-mb"`
+	CPUs         float64 `filo:"cpus"`
 
 	// A job: run this every so often instead of keeping it up. The cron this
 	// replaces stops at the minute; a duration says what it means and goes
@@ -158,6 +151,13 @@ func (s *Service) normalizeProxy() error {
 	}
 	return nil
 }
+
+// ConfigDir is where the files that travel with a declaration appear inside
+// the container, read only — a convention, not a field (crg, 2026-08-30):
+// both real services already chose /etc/<name> by hand, and the hostd segment
+// is what keeps the convention from colliding with a path the image owns. An
+// image that reads its configuration somewhere else points at this with args.
+func ConfigDir(name string) string { return "/etc/hostd/" + name }
 
 // Where a proxy sends for this service: the container's own alias on the
 // managed network, and the port it listens on. Eighty is the default because it
@@ -354,12 +354,6 @@ func (s *Service) normalize() error {
 	if !ValidName(s.Name) {
 		return invalid("name %q must be 1-64 characters of a-z, 0-9, - and _", s.Name)
 	}
-	if s.Kind == "" {
-		s.Kind = KindContainer
-	}
-	if s.Kind != KindContainer {
-		return invalid("%s: kind %q does not exist; a service is a container, and the runtime keeps it alive", s.Name, s.Kind)
-	}
 	err := s.normalizeContainer()
 	if err != nil {
 		return err
@@ -407,9 +401,6 @@ func (s *Service) normalizeContainer() error {
 	_, err = s.Mounts()
 	if err != nil {
 		return invalid("%s: %v", s.Name, err)
-	}
-	if s.Config != "" && !filepath.IsAbs(s.Config) {
-		return invalid("%s: config %q must be an absolute path inside the container", s.Name, s.Config)
 	}
 	err = s.normalizeProxy()
 	if err != nil {

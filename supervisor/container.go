@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -199,14 +200,19 @@ func (s *Supervisor) prepareMounts(ctx context.Context, svc service.Service) ([]
 }
 
 // What travels with the declaration goes in read only: a container that could
-// rewrite its own configuration would make the tree a lie.
+// rewrite its own configuration would make the tree a lie. The target is the
+// convention, never a field, and the mount exists exactly when the artifacts
+// do — a bind whose source is missing is a container the runtime refuses to
+// create.
 func (s *Supervisor) configMount(svc service.Service) []docker.Mount {
-	if svc.Config == "" {
+	artifacts := filepath.Join(s.services, svc.Name+service.ArtifactSuffix)
+	info, err := os.Stat(artifacts)
+	if err != nil || !info.IsDir() {
 		return nil
 	}
 	return []docker.Mount{{
-		Source:   filepath.Join(s.services, svc.Name+service.ArtifactSuffix),
-		Target:   svc.Config,
+		Source:   artifacts,
+		Target:   service.ConfigDir(svc.Name),
 		ReadOnly: true,
 	}}
 }

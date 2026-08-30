@@ -970,7 +970,7 @@ func TestAPushedDeclarationLandsWithItsArtifacts(t *testing.T) {
 	f := newFixture(t)
 	services := filepath.Join(f.dir, "services")
 
-	source := `(service (tuple "name" "caddy") (tuple "image" "caddy:2") (tuple "config" "/etc/caddy"))`
+	source := `(service (tuple "name" "caddy") (tuple "image" "caddy:2"))`
 	err := call(f.client(), Request{Op: OpServicePut, Body: mustMarshal(Declaration{
 		Name:   "caddy",
 		Source: source,
@@ -1005,7 +1005,7 @@ func TestAPushedDeclarationLandsWithItsArtifacts(t *testing.T) {
 func TestAPushDropsWhatTheTreeNoLongerCarries(t *testing.T) {
 	f := newFixture(t)
 	services := filepath.Join(f.dir, "services")
-	source := `(service (tuple "name" "caddy") (tuple "image" "caddy:2") (tuple "config" "/etc/caddy"))`
+	source := `(service (tuple "name" "caddy") (tuple "image" "caddy:2"))`
 
 	err := call(f.client(), Request{Op: OpServicePut, Body: mustMarshal(Declaration{
 		Name: "caddy", Source: source,

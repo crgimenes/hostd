@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +18,15 @@ import (
 func TestDefaultPathsAreTheRealHost(t *testing.T) {
 	t.Setenv(RootEnv, "")
 	p := Locate()
+	if runtime.GOOS != "linux" {
+		// An operator's own machine: /etc belongs to root and a sandbox
+		// forbids it, so loopback lives under the user's config directory —
+		// hostd-local, never hostd, which is the operator's tree.
+		if !strings.Contains(p.RunDir, "hostd-local") {
+			t.Fatalf("loopback paths are not under the user's own directory: %+v", p)
+		}
+		return
+	}
 	if p.ConfigDir != DefaultConfigDir || p.DataDir != DefaultDataDir || p.RunDir != DefaultRunDir {
 		t.Fatalf("unset %s changed the paths: %+v", RootEnv, p)
 	}

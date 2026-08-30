@@ -45,7 +45,6 @@ func (s *Supervisor) Status() []Status {
 	for name, svc := range declared {
 		status := Status{
 			Name:      name,
-			Kind:      svc.Kind,
 			Desired:   svc.State,
 			Image:     svc.Image,
 			State:     StateStopped,
@@ -88,7 +87,7 @@ func (s *Supervisor) Status() []Status {
 		if declaredStill {
 			continue
 		}
-		status := Status{Name: name, Kind: service.KindContainer, Orphan: true, State: StateStopped}
+		status := Status{Name: name, Orphan: true, State: StateStopped}
 		s.describe(ctx, &status, service.Service{}, container)
 		out = append(out, status)
 	}
@@ -424,7 +423,7 @@ func (s *Supervisor) Apply(declared []service.Service) []Change {
 // The desired state is excluded on purpose: an operator who stopped a service
 // by hand must not have it started again by an unrelated apply.
 func sameDefinition(a, b service.Service) bool {
-	if a.Kind != b.Kind || a.Dir != b.Dir || a.Restart != b.Restart || a.StopTimeout != b.StopTimeout {
+	if a.Dir != b.Dir || a.Restart != b.Restart || a.StopTimeout != b.StopTimeout {
 		return false
 	}
 	// A container that names another image, another port, another volume or
@@ -436,7 +435,7 @@ func sameDefinition(a, b service.Service) bool {
 	// Editing a file that travels with the declaration is editing the service:
 	// without this an apply would say there is nothing to do and the container
 	// would keep the configuration it was built with.
-	if a.Config != b.Config || a.ConfigHash != b.ConfigHash {
+	if a.ConfigHash != b.ConfigHash {
 		return false
 	}
 	// The schedule is part of what a job IS. The apply stores every

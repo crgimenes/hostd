@@ -105,7 +105,7 @@ func addedDetail(svc service.Service) string {
 	if svc.IsJob() {
 		return fmt.Sprintf("declared as a job, every %s, state %s", svc.Every, svc.State)
 	}
-	return fmt.Sprintf("declared as %s, state %s", svc.Kind, svc.State)
+	return fmt.Sprintf("declared, state %s", svc.State)
 }
 
 // So a plan is reviewable without diffing two files by eye.
@@ -131,9 +131,6 @@ func definitionDiff(old, updated service.Service) string {
 	}
 	if old.ConfigHash != updated.ConfigHash {
 		parts = append(parts, "configuration files changed")
-	}
-	if old.Kind != updated.Kind {
-		parts = append(parts, fmt.Sprintf("kind %s -> %s", old.Kind, updated.Kind))
 	}
 	if old.Restart != updated.Restart {
 		parts = append(parts, fmt.Sprintf("restart %s -> %s", old.Restart, updated.Restart))

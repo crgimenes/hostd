@@ -38,7 +38,6 @@ const (
 // whether it is read by hostctl over the wire or by the panel in the window.
 type Status struct {
 	Name    string `filo:"name" json:"name"`
-	Kind    string `filo:"kind" json:"kind"`
 	Desired string `filo:"desired" json:"desired"`
 	State   string `filo:"state" json:"state"`
 	PID     int    `filo:"pid" json:"pid"`

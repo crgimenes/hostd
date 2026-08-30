@@ -182,11 +182,15 @@ be published is whatever answers the internet.
 (service
   (tuple "name" "caddy")
   (tuple "image" "caddy:2-alpine")
+  (tuple "args" (list "caddy" "run" "--config" "/etc/hostd/caddy/Caddyfile" "--adapter" "caddyfile"))
   (tuple "ports" (list "0.0.0.0:80:80" "0.0.0.0:443:443"))
   (tuple "volumes" (list "data:/data"))
-  (tuple "config" "/etc/caddy")
   (tuple "restart" "always"))
 ```
+
+The files beside a declaration reach the container at `/etc/hostd/<name>`,
+read only, by convention — nothing to declare. An image that reads its
+configuration from its own path is pointed at them with `args`, as above.
 
 `volumes` says what outlives the container. A source with no slash is storage
 the runtime keeps, created if absent and named after the service that asked for

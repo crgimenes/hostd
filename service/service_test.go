@@ -19,9 +19,6 @@ func TestParseMinimal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if s.Kind != KindContainer {
-		t.Errorf("kind = %q, want %q", s.Kind, KindContainer)
-	}
 	if s.State != StateRunning {
 		t.Errorf("state = %q, want %q", s.State, StateRunning)
 	}
@@ -39,7 +36,6 @@ func TestParseMinimal(t *testing.T) {
 func TestParseFull(t *testing.T) {
 	src := `(service
 	  (tuple "name" "api")
-	  (tuple "kind" "container")
 	  (tuple "image" "api:1")
 	  (tuple "args" (list "-listen" ":8080"))
 	  (tuple "dir" "/var/lib/api")
@@ -73,7 +69,6 @@ func TestParseRejects(t *testing.T) {
 		{"no name", `(service (tuple "image" "api:1"))`},
 		{"no image", `(service (tuple "name" "api"))`},
 		{"relative dir", `(service (tuple "name" "api") (tuple "image" "api:1") (tuple "dir" "rel"))`},
-		{"a kind that does not exist", `(service (tuple "name" "api") (tuple "image" "api:1") (tuple "kind" "exec"))`},
 		{"unknown state", `(service (tuple "name" "api") (tuple "image" "api:1") (tuple "state" "paused"))`},
 		{"unknown restart", `(service (tuple "name" "api") (tuple "image" "api:1") (tuple "restart" "maybe"))`},
 		{"env without =", `(service (tuple "name" "api") (tuple "image" "api:1") (tuple "env" (list "BROKEN")))`},
@@ -97,7 +92,6 @@ func TestParseRejects(t *testing.T) {
 func TestPublishedPortsAreParsedAndDefaultToLoopback(t *testing.T) {
 	src := `(service
 	  (tuple "name" "site")
-	  (tuple "kind" "container")
 	  (tuple "image" "site@sha256:abc")
 	  (tuple "ports" (list "8080:80" "0.0.0.0:9000:9000/udp")))`
 	svc, err := Parse(context.Background(), "site.filo", src)
@@ -123,7 +117,7 @@ func TestABrokenPortIsRefusedWhereItIsWritten(t *testing.T) {
 	table := []string{"80", "not:80", "8080:0", "8080:80/sctp", "1.2.3:8080:80"}
 	for _, spec := range table {
 		t.Run(spec, func(t *testing.T) {
-			src := `(service (tuple "name" "site") (tuple "kind" "container") (tuple "image" "site:1") (tuple "ports" (list "` + spec + `")))`
+			src := `(service (tuple "name" "site") (tuple "image" "site:1") (tuple "ports" (list "` + spec + `")))`
 			_, err := Parse(context.Background(), "site.filo", src)
 			if err == nil {
 				t.Fatalf("the port %q was accepted", spec)
@@ -235,7 +229,6 @@ func TestLoadDirCannotDuplicateAService(t *testing.T) {
 func TestVolumesSayWhatTheyAre(t *testing.T) {
 	src := `(service
 	  (tuple "name" "site")
-	  (tuple "kind" "container")
 	  (tuple "image" "site:1")
 	  (tuple "volumes" (list "certs:/data" "/srv/www:/srv/www:ro")))`
 	svc, err := Parse(context.Background(), "site.filo", src)
@@ -260,7 +253,7 @@ func TestVolumesSayWhatTheyAre(t *testing.T) {
 // Handing a container the runtime's socket hands it the machine, and it looks
 // like an ordinary line in an ordinary file.
 func TestTheRuntimeSocketCannotBeMounted(t *testing.T) {
-	src := `(service (tuple "name" "site") (tuple "kind" "container") (tuple "image" "site:1")
+	src := `(service (tuple "name" "site") (tuple "image" "site:1")
 	  (tuple "volumes" (list "/var/run/docker.sock:/var/run/docker.sock")))`
 	_, err := Parse(context.Background(), "site.filo", src)
 	if err == nil {
@@ -275,7 +268,7 @@ func TestABrokenVolumeIsRefusedWhereItIsWritten(t *testing.T) {
 	table := []string{"/data", "certs:data", "certs:/data:rx", "srv/www:/srv/www", ":/data"}
 	for _, spec := range table {
 		t.Run(spec, func(t *testing.T) {
-			src := `(service (tuple "name" "site") (tuple "kind" "container") (tuple "image" "site:1") (tuple "volumes" (list "` + spec + `")))`
+			src := `(service (tuple "name" "site") (tuple "image" "site:1") (tuple "volumes" (list "` + spec + `")))`
 			_, err := Parse(context.Background(), "site.filo", src)
 			if err == nil {
 				t.Fatalf("the volume %q was accepted", spec)
