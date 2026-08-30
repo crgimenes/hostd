@@ -103,6 +103,12 @@ type panel struct {
 	filesMu sync.Mutex
 	files   filesState
 
+	// The inventory as of the last time the machines screen was opened — the
+	// same read-on-entry rule the catalog follows.
+	machinesMu      sync.Mutex
+	machinesList    []inventoryEntry
+	machinesProblem string
+
 	// Destructive buttons arm on the first click and act on the second, so a
 	// slip beside the download button deletes nothing. Armed is a moment, not
 	// a mode: it expires by itself.
@@ -334,6 +340,28 @@ func (p *panel) catalog(view viewState) []service.Declaration {
 	p.catalogMu.Lock()
 	defer p.catalogMu.Unlock()
 	return p.catalogList
+}
+
+func (p *panel) inventory(view viewState) ([]inventoryEntry, string) {
+	if view.kind != "machines" {
+		return nil, ""
+	}
+	p.machinesMu.Lock()
+	defer p.machinesMu.Unlock()
+	return p.machinesList, p.machinesProblem
+}
+
+func (p *panel) loadMachines() {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	entries, err := readInventory(ctx, filepath.Join(p.configDir(), service.InventoryFile))
+	p.machinesMu.Lock()
+	p.machinesList = entries
+	p.machinesProblem = ""
+	if err != nil {
+		p.machinesProblem = err.Error()
+	}
+	p.machinesMu.Unlock()
 }
 
 func (p *panel) loadCatalog() {
@@ -569,6 +597,9 @@ func (p *panel) pick(rest []string) {
 	if kind == "services" {
 		// Read on the way in, and not again: see panel.catalog.
 		p.loadCatalog()
+	}
+	if kind == "machines" {
+		p.loadMachines()
 	}
 	if kind == "files" {
 		// Same rule as the catalog: read on the way in and on navigation,

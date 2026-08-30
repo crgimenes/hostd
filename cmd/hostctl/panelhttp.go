@@ -257,7 +257,8 @@ func (p *panel) fragments() []fragment {
 	snap := p.latest()
 	view := p.viewport()
 	tree := treeOf(snap, view)
-	detail := detailOf(snap, view, p.settings(), p.catalog(view), p.hostsNow(), p.filesNow())
+	inventory, inventoryProblem := p.inventory(view)
+	detail := detailOf(snap, view, p.settings(), p.catalog(view), p.hostsNow(), p.filesNow(), inventory, inventoryProblem)
 	// Held-down buttons are rendered from the panel, not remembered by the
 	// page: a fragment the rounds replace would take a class with it.
 	detail.AlertBusy = detail.AlertAct != "" && p.running(detail.AlertAct)
@@ -504,6 +505,13 @@ func treeOf(snap snapshot, view viewState) treeView {
 			Child:    true,
 			Selected: view.kind == "services",
 			Link:     "select/services",
+		}, rowView{
+			Key:      "machines",
+			Label:    "Machines",
+			Icon:     "list",
+			Child:    true,
+			Selected: view.kind == "machines",
+			Link:     "select/machines",
 		})
 	}
 	return out

@@ -621,3 +621,19 @@ func TestTheCatalogLivesUnderSettings(t *testing.T) {
 		t.Fatal("folding settings did not fold the catalog away")
 	}
 }
+
+// The machines screen is the REGISTRY — what the inventory file lists — as
+// opposed to the fleet tree, which is what the machines are doing.
+func TestTheMachinesScreenListsTheInventory(t *testing.T) {
+	view, _, _ := actingPanel(t)
+	screen := get(t, view, "/act/select/machines").Body.String()
+	for _, expected := range []string{"Inventory", "yuki", "selene"} {
+		if !strings.Contains(screen, expected) {
+			t.Fatalf("the machines screen is missing %q: %s", expected, screen)
+		}
+	}
+	tree := get(t, view, "/").Body.String()
+	if !strings.Contains(tree, `data-act="select/machines"`) {
+		t.Fatal("the tree has no way to reach the machines registry")
+	}
+}

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"html/template"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -216,7 +217,7 @@ func statusOf(snap snapshot) statusView {
 	return statusView{Text: fmt.Sprintf("watching %d machine(s)", len(snap.Fleet))}
 }
 
-func detailOf(snap snapshot, view viewState, info settingsInfo, catalog []service.Declaration, machines []string, files filesState) detailView {
+func detailOf(snap snapshot, view viewState, info settingsInfo, catalog []service.Declaration, machines []string, files filesState, inventory []inventoryEntry, inventoryProblem string) detailView {
 	var out detailView
 	switch view.kind {
 	case "host":
@@ -229,6 +230,8 @@ func detailOf(snap snapshot, view viewState, info settingsInfo, catalog []servic
 		out = catalogDetail(catalog, machines, info)
 	case "files":
 		out = filesDetail(view, files)
+	case "machines":
+		out = machinesDetail(snap, inventory, inventoryProblem, info)
 	case "settings":
 		out = settingsDetail(info)
 	default:
@@ -598,6 +601,54 @@ func filesDetail(view viewState, files filesState) detailView {
 	if len(card.Grid) == 0 {
 		out.Empty = view.name + " declares no named volume, so it has no data here"
 		return out
+	}
+	out.Cards = append(out.Cards, card)
+	return out
+}
+
+// machinesDetail is the REGISTRY of machines — what the inventory file lists,
+// which is not the same thing as the fleet tree above it: that one is what the
+// machines are doing, this one is what the operator wrote down. What the
+// rounds already know joins in for free: the daemon each machine answered
+// with, or the fact that it did not.
+func machinesDetail(snap snapshot, inventory []inventoryEntry, problem string, info settingsInfo) detailView {
+	out := detailView{
+		Title:    "Machines",
+		Subtitle: fmt.Sprintf("%d listed in %s", len(inventory), filepath.Join(info.ConfigDir, service.InventoryFile)),
+		Single:   true,
+	}
+	if problem != "" {
+		out.Empty = problem
+		return out
+	}
+	if len(inventory) == 0 {
+		out.Empty = "the inventory lists no machine yet"
+		return out
+	}
+	card := cardView{
+		Key:      "inventory",
+		Heading:  "Inventory",
+		Aside:    "the machines the fleet is made of; tags group them for -tag",
+		GridHead: []string{"machine", "tags", "answers"},
+	}
+	for _, entry := range inventory {
+		answers := "never asked"
+		for _, host := range snap.Fleet {
+			if host.Host != entry.Name {
+				continue
+			}
+			switch {
+			case host.Version != "":
+				answers = "hostd " + host.Version
+			case host.Error != "":
+				answers = "not answering"
+			default:
+				answers = "asking…"
+			}
+		}
+		card.Grid = append(card.Grid, gridRow{
+			Cells: []string{entry.Name, strings.Join(entry.Tags, " "), answers},
+		})
 	}
 	out.Cards = append(out.Cards, card)
 	return out
