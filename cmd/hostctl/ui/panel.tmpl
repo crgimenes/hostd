@@ -93,6 +93,16 @@
   <div id="content" data-from="{{.From}}" data-to="{{.To}}">
     {{- if .Empty}}<p class="empty">{{.Empty}}</p>{{end}}
     <div class="cards{{if .Single}} single{{end}}">
+    {{- if .Editor}}
+      <section class="card editor">
+        <h2><span>declaration</span><span class="headActions">
+          {{- if .Editor.DeleteAct}}<button class="push{{if .Editor.Armed}} armed{{end}}" data-act="{{.Editor.DeleteAct}}">{{icon "trash"}}<span>{{if .Editor.Armed}}delete?{{else}}delete{{end}}</span></button>{{end}}
+          <button class="push" data-save="{{.Editor.Name}}">{{icon "box-arrow-up"}}<span>{{if .Editor.IsNew}}save to the tree{{else}}save {{.Editor.Name}}{{end}}</span></button>
+        </span></h2>
+        {{- if .Editor.Problem}}<p class="problem">{{.Editor.Problem}}</p>{{end}}
+        <textarea id="editor" spellcheck="false" autocapitalize="off" autocomplete="off">{{.Editor.Draft}}</textarea>
+      </section>
+    {{- end}}
     {{- range .Cards}}
       <section class="card{{if .Link}} machineCard{{end}}"{{if .Link}} data-act="{{.Link}}"{{end}}>
         <h2><span>{{.Heading}}</span>{{if .Aside}}{{template "cardAside" .}}{{end}}

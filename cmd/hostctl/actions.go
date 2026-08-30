@@ -11,6 +11,7 @@ import (
 
 	"github.com/crgimenes/hostd/api"
 	"github.com/crgimenes/hostd/logs"
+	"github.com/crgimenes/hostd/service"
 
 	"github.com/crgimenes/glaze"
 )
@@ -58,6 +59,13 @@ func (p *panel) action(parts []string) (func(), error) {
 		return func() { p.prune(host) }, nil
 	case verb == "install":
 		return func() { p.install(host) }, nil
+	case verb == "svcdel" && len(parts) == 2:
+		// host slot carries the SERVICE here: the tree has no machine.
+		act := "do/" + strings.Join(parts, "/")
+		if !p.disarm(act) {
+			return func() { p.arm(act) }, nil
+		}
+		return func() { p.deleteDeclaration(parts[1]) }, nil
 	case verb == "filerm" && len(parts) > 3:
 		wire := strings.Join(parts[2:], "/")
 		act := "do/" + strings.Join(parts, "/")
@@ -75,6 +83,31 @@ func (p *panel) action(parts []string) (func(), error) {
 		return func() { p.uploadFile(host, parts[2], wire) }, nil
 	}
 	return nil, refuse
+}
+
+// deleteDeclaration takes a service out of the CATALOG — the tree, not any
+// machine: what a machine runs, `service remove` takes away. A directory
+// service goes whole, because its files travel with the declaration they
+// belong to; the tree is the operator's and usually versioned, so what git
+// holds, git can bring back.
+func (p *panel) deleteDeclaration(name string) {
+	target := p.declarationFile(name)
+	var err error
+	if filepath.Base(target) == service.InitFile {
+		err = os.RemoveAll(filepath.Dir(target))
+	} else {
+		err = os.Remove(target)
+	}
+	if err != nil {
+		p.problem("tree", name, err)
+		return
+	}
+	p.loadCatalog()
+	p.viewMu.Lock()
+	p.view.kind = "services"
+	p.view.name = ""
+	p.viewMu.Unlock()
+	p.sayLine("tree", name, "removed "+target+" from the tree; machines running it are untouched until a service remove", false)
 }
 
 // How long an armed delete waits for its second click before standing down.

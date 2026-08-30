@@ -109,6 +109,12 @@ type panel struct {
 	machinesList    []inventoryEntry
 	machinesProblem string
 
+	// The service being edited: the file's text as the operator last saw it,
+	// and what parsing thought of their last attempt. The DRAFT lives here so
+	// a save that failed to parse hands the text back instead of eating it.
+	editMu sync.Mutex
+	edit   editState
+
 	// Destructive buttons arm on the first click and act on the second, so a
 	// slip beside the download button deletes nothing. Armed is a moment, not
 	// a mode: it expires by itself.
@@ -364,6 +370,130 @@ func (p *panel) loadMachines() {
 	p.machinesMu.Unlock()
 }
 
+// What the editor screen holds. IsNew is a state, not a name: a new service
+// has no file until its first successful save names one.
+type editState struct {
+	Name    string
+	Draft   string
+	Problem string
+	IsNew   bool
+}
+
+func (p *panel) editorNow(view viewState) editState {
+	if view.kind != "svcedit" {
+		return editState{}
+	}
+	p.editMu.Lock()
+	defer p.editMu.Unlock()
+	return p.edit
+}
+
+// A new declaration starts as a commented example rather than a blank page:
+// the fields teach themselves, and deleting is easier than remembering.
+const serviceSkeleton = `(service
+  (tuple "name" "CHANGE-ME")
+  (tuple "image" "CHANGE-ME:tag")
+  ;; (tuple "args" (list "/bin/app" "-flag"))
+  ;; (tuple "ports" (list "0.0.0.0:80:80"))
+  ;; (tuple "volumes" (list "data:/var/lib/app"))
+  ;; (tuple "memory-mb" 64)
+  ;; jobs: (tuple "every" "30m") with restart never
+  (tuple "restart" "always"))
+`
+
+// loadEditor reads the declaration's text AS WRITTEN — never re-marshalled: a
+// declaration that comes back reformatted is a diff nobody made.
+func (p *panel) loadEditor(name string) {
+	held := editState{Name: name, IsNew: name == ""}
+	if held.IsNew {
+		held.Draft = serviceSkeleton
+	} else {
+		source, err := os.ReadFile(p.declarationFile(name)) // #nosec G304 -- the operator's own tree
+		if err != nil {
+			held.Problem = err.Error()
+		}
+		held.Draft = string(source)
+	}
+	p.editMu.Lock()
+	p.edit = held
+	p.editMu.Unlock()
+}
+
+// Where a service's declaration lives in the tree: its own file, or init.filo
+// inside its directory when files travel with it.
+func (p *panel) declarationFile(name string) string {
+	dir := filepath.Join(p.configDir(), name)
+	info, err := os.Stat(dir)
+	if err == nil && info.IsDir() {
+		return filepath.Join(dir, service.InitFile)
+	}
+	return filepath.Join(p.configDir(), name+service.Extension)
+}
+
+// Save is bound into the window as hostd_save: the editor's text arrives here,
+// is parsed BEFORE anything is written, and lands in the tree atomically. The
+// commit stays the operator's — this writes a file, it does not apply one.
+func (p *panel) Save(name, content string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	fail := func(problem string) (string, error) {
+		p.editMu.Lock()
+		p.edit = editState{Name: name, Draft: content, Problem: problem, IsNew: name == ""}
+		p.editMu.Unlock()
+		return p.pending(false)
+	}
+	parsed, err := service.Parse(ctx, "editor", content)
+	if err != nil {
+		return fail(err.Error())
+	}
+	if name != "" && parsed.Name != name {
+		// The file is the name. A rename here would leave the old file behind
+		// looking like a second service nobody wrote.
+		return fail(fmt.Sprintf("this is %s's file and the text declares %q; to rename, register %s as a new service and delete %s",
+			name, parsed.Name, parsed.Name, name))
+	}
+	target := p.declarationFile(parsed.Name)
+	if name == "" {
+		_, err = os.Stat(target)
+		if err == nil {
+			return fail(fmt.Sprintf("%s already exists in the tree; edit it instead of registering it twice", parsed.Name))
+		}
+	}
+	err = writeTreeFile(target, []byte(content))
+	if err != nil {
+		return fail(err.Error())
+	}
+	p.editMu.Lock()
+	p.edit = editState{}
+	p.editMu.Unlock()
+	p.loadCatalog()
+	p.viewMu.Lock()
+	p.view.kind = "services"
+	p.view.name = ""
+	p.viewMu.Unlock()
+	p.sayLine("tree", parsed.Name, "wrote "+target+"; deploy puts it on a machine, and the commit is yours", false)
+	return p.pending(false)
+}
+
+// The tree is the operator's own files, and half a declaration must never be
+// readable under the name: temp beside it, then rename.
+func writeTreeFile(target string, content []byte) error {
+	temporary, err := os.CreateTemp(filepath.Dir(target), filepath.Base(target)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := temporary.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+	_, err = temporary.Write(content)
+	if closeErr := temporary.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	return os.Rename(tmpName, target)
+}
+
 func (p *panel) loadCatalog() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -600,6 +730,9 @@ func (p *panel) pick(rest []string) {
 	}
 	if kind == "machines" {
 		p.loadMachines()
+	}
+	if kind == "svcedit" {
+		p.loadEditor(name)
 	}
 	if kind == "files" {
 		// Same rule as the catalog: read on the way in and on navigation,

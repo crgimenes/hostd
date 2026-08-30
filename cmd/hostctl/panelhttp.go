@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io"
 	"maps"
 	"net/http"
 	"os"
@@ -57,6 +58,21 @@ func (p *panel) routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", p.page)
 	mux.HandleFunc("GET /asset/{name}", p.asset)
+	mux.HandleFunc("POST /save/{name...}", func(w http.ResponseWriter, r *http.Request) {
+		content, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		body, err := p.Save(r.PathValue("name"), string(content))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		// #nosec G705 -- body came out of html/template
+		_, _ = w.Write([]byte(body))
+	})
 	mux.HandleFunc("GET /act/{action...}", func(w http.ResponseWriter, r *http.Request) {
 		body, err := p.Act(r.PathValue("action"))
 		if err != nil {
@@ -258,10 +274,13 @@ func (p *panel) fragments() []fragment {
 	view := p.viewport()
 	tree := treeOf(snap, view)
 	inventory, inventoryProblem := p.inventory(view)
-	detail := detailOf(snap, view, p.settings(), p.catalog(view), p.hostsNow(), p.filesNow(), inventory, inventoryProblem)
+	detail := detailOf(snap, view, p.settings(), p.catalog(view), p.hostsNow(), p.filesNow(), inventory, inventoryProblem, p.editorNow(view))
 	// Held-down buttons are rendered from the panel, not remembered by the
 	// page: a fragment the rounds replace would take a class with it.
 	detail.AlertBusy = detail.AlertAct != "" && p.running(detail.AlertAct)
+	if detail.Editor != nil && detail.Editor.DeleteAct != "" {
+		detail.Editor.Armed = p.isArmed(detail.Editor.DeleteAct)
+	}
 	for card := range detail.Cards {
 		for at, button := range detail.Cards[card].Buttons {
 			if button.Act != "" {

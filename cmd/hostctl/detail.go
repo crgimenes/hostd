@@ -23,6 +23,7 @@ type detailView struct {
 	Single   bool
 	Empty    string
 	Cards    []cardView
+	Editor   *editorView
 	// Whether this view is about the fleet. The window buttons and the log
 	// belong to the machines; a page about the panel itself has no use for
 	// either, and showing them would offer a control that governs nothing on
@@ -41,6 +42,18 @@ type detailView struct {
 	Alert     string
 	AlertAct  string
 	AlertBusy bool
+}
+
+// The declaration editor: the file's text, exactly as written, and what
+// parsing thought of the last attempt.
+type editorView struct {
+	Name    string
+	Draft   string
+	Problem string
+	// The delete waiting for its second click.
+	DeleteAct string
+	Armed     bool
+	IsNew     bool
 }
 
 type cardView struct {
@@ -147,6 +160,12 @@ func (d detailView) StructureKey() string {
 	var key strings.Builder
 	fmt.Fprintf(&key, "%s|%s|%v|%s|%d|%v|%v|%s|%s|%s\n", d.Title, d.Subtitle, d.Single, d.Empty,
 		d.Window, d.Watching, d.Frozen, d.RangeText, d.Alert, d.AlertAct+onOff(d.AlertBusy))
+	if d.Editor != nil {
+		// The DRAFT stays out on purpose: what is being typed lives in the
+		// page, and a repaint per keystroke would eat the caret. Problem and
+		// the armed delete are what change the screen.
+		fmt.Fprintf(&key, "e:%s|%s|%v|%v\n", d.Editor.Name, d.Editor.Problem, d.Editor.Armed, d.Editor.IsNew)
+	}
 	for _, card := range d.Cards {
 		fmt.Fprintf(&key, "%s|%s|%s|%s|%d|%d|%v\n", card.Key, card.Heading, card.Link, card.Problem, len(card.Charts), len(card.Numbers), card.Machines)
 		for _, row := range card.Rows {
@@ -217,7 +236,7 @@ func statusOf(snap snapshot) statusView {
 	return statusView{Text: fmt.Sprintf("watching %d machine(s)", len(snap.Fleet))}
 }
 
-func detailOf(snap snapshot, view viewState, info settingsInfo, catalog []service.Declaration, machines []string, files filesState, inventory []inventoryEntry, inventoryProblem string) detailView {
+func detailOf(snap snapshot, view viewState, info settingsInfo, catalog []service.Declaration, machines []string, files filesState, inventory []inventoryEntry, inventoryProblem string, editor editState) detailView {
 	var out detailView
 	switch view.kind {
 	case "host":
@@ -230,6 +249,8 @@ func detailOf(snap snapshot, view viewState, info settingsInfo, catalog []servic
 		out = catalogDetail(catalog, machines, info)
 	case "files":
 		out = filesDetail(view, files)
+	case "svcedit":
+		out = editorDetail(editor)
 	case "machines":
 		out = machinesDetail(snap, inventory, inventoryProblem, info)
 	case "settings":
@@ -432,6 +453,16 @@ func catalogDetail(catalog []service.Declaration, machines []string, info settin
 		Title:    "Services",
 		Subtitle: fmt.Sprintf("%d described in %s", len(catalog), info.ConfigDir),
 	}
+	out.Cards = append(out.Cards, cardView{
+		Key:     "register",
+		Heading: "Register",
+		Aside:   "a service is a .filo in the tree; describing is not deploying",
+		Buttons: []buttonView{{
+			Label: "new service",
+			Icon:  "stack",
+			Act:   "select/svcedit",
+		}},
+	})
 	if len(catalog) == 0 {
 		out.Empty = "this tree describes no services yet: a service is a .filo file, or a directory with an init.filo and the files that travel with it"
 		return out
@@ -451,10 +482,40 @@ func catalogDetail(catalog []service.Declaration, machines []string, info settin
 				Label:  "deploy",
 				Icon:   "box-arrow-up",
 				Deploy: name,
+			}, {
+				Label: "edit",
+				Icon:  "gear",
+				Act:   "select/svcedit/" + name,
 			}},
 		})
 	}
 	return out
+}
+
+// editorDetail is the declaration as text, which is the interface on purpose:
+// the tree is versioned files, and what this screen writes is exactly what a
+// hand would have written — never re-marshalled, verified by parse before a
+// byte lands. Deleting lives here, armed, because deletion is an edit.
+func editorDetail(editor editState) detailView {
+	title := editor.Name
+	if editor.IsNew {
+		title = "New service"
+	}
+	held := editorView{
+		Name:    editor.Name,
+		Draft:   editor.Draft,
+		Problem: editor.Problem,
+		IsNew:   editor.IsNew,
+	}
+	if !editor.IsNew {
+		held.DeleteAct = "do/svcdel/" + editor.Name
+	}
+	return detailView{
+		Title:    title,
+		Subtitle: "the declaration, as the tree holds it; saving writes the file — deploy and commit stay yours",
+		Single:   true,
+		Editor:   &held,
+	}
 }
 
 func hostDetail(snap snapshot, view viewState) detailView {

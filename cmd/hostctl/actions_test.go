@@ -637,3 +637,60 @@ func TestTheMachinesScreenListsTheInventory(t *testing.T) {
 		t.Fatal("the tree has no way to reach the machines registry")
 	}
 }
+
+// The whole editor loop over the HTTP mirror: register a new service, see it
+// in the catalog, save an edit that does not parse (the text comes back, the
+// error names the problem, nothing is written), then delete with the armed
+// two-step. The tree is the operator's files; nothing here talks to a machine.
+func TestTheEditorRegistersEditsAndDeletes(t *testing.T) {
+	view, _, _ := actingPanel(t)
+
+	// Register.
+	get(t, view, "/act/select/svcedit")
+	source := "(service (tuple \"name\" \"probe\") (tuple \"image\" \"probe:1\"))\n"
+	resp := post(t, view, "/save/", source)
+	if resp.Code != 200 {
+		t.Fatalf("save answered %d: %s", resp.Code, resp.Body.String())
+	}
+	written, err := os.ReadFile(filepath.Join(view.configDir(), "probe.filo"))
+	if err != nil || string(written) != source {
+		t.Fatalf("the tree does not hold what was saved: %v %q", err, written)
+	}
+	// Saving lands back on the catalog, with the new service on it.
+	if !strings.Contains(resp.Body.String(), "probe") {
+		t.Fatalf("the catalog after the save does not show the new service: %s", resp.Body.String())
+	}
+
+	// A save that does not parse writes nothing and hands the text back.
+	get(t, view, "/act/select/svcedit/probe")
+	broken := "(service (tuple \"name\" \"probe\") (tuple \"image\" \"probe:1\") (tuple \"every\" \"soon\"))"
+	body := post(t, view, "/save/probe", broken).Body.String()
+	if !strings.Contains(body, "soon") {
+		t.Fatalf("the parse error is not on screen: %s", body)
+	}
+	if !strings.Contains(body, "every") {
+		t.Fatalf("the error does not name the field: %s", body)
+	}
+	kept, _ := os.ReadFile(filepath.Join(view.configDir(), "probe.filo"))
+	if string(kept) != source {
+		t.Fatalf("a save that failed to parse still wrote: %q", kept)
+	}
+
+	// A rename is refused: the file is the name.
+	renamed := "(service (tuple \"name\" \"other\") (tuple \"image\" \"probe:1\"))"
+	body = post(t, view, "/save/probe", renamed).Body.String()
+	if !strings.Contains(body, "rename") {
+		t.Fatalf("a silent rename was not refused: %s", body)
+	}
+
+	// Delete: first click arms, second removes the file.
+	get(t, view, "/act/do/svcdel/probe")
+	if _, err = os.Stat(filepath.Join(view.configDir(), "probe.filo")); err != nil {
+		t.Fatal("the first click deleted; it must only arm")
+	}
+	get(t, view, "/act/do/svcdel/probe")
+	waitFor(t, "the armed delete to remove the file", func() bool {
+		_, err = os.Stat(filepath.Join(view.configDir(), "probe.filo"))
+		return os.IsNotExist(err)
+	})
+}

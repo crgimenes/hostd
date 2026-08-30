@@ -951,3 +951,24 @@ button.push.armed {
 	color: #fff;
 	border-color: transparent;
 }
+
+/* The declaration, as text: the tree is files, and this is one of them. */
+.card.editor textarea {
+	width: 100%;
+	min-height: 340px;
+	resize: vertical;
+	font-family: var(--mono);
+	font-size: 12px;
+	line-height: 1.5;
+	color: var(--label);
+	background: var(--canvas);
+	border: 1px solid var(--hairline);
+	border-radius: 6px;
+	padding: 10px;
+	box-sizing: border-box;
+	tab-size: 2;
+}
+.card.editor textarea:focus {
+	outline: none;
+	border-color: var(--accent);
+}

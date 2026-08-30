@@ -52,6 +52,17 @@ function hostdApply(html) {
 // same kind of channel the pushes ride, so nothing on the way can lose its
 // parameters. Outside the window (the test harness, a browser) the binding
 // does not exist and the same action travels over HTTP instead.
+function save(name, content) {
+	if (window.hostd_save) {
+		window.hostd_save(name, content).then(hostdApply).catch((err) => say("save failed: " + err, true));
+		return;
+	}
+	fetch("/save/" + name, { method: "POST", body: content })
+		.then((response) => response.text())
+		.then(hostdApply)
+		.catch((err) => say(String(err), true));
+}
+
 function act(action) {
 	if (window.hostd_act) {
 		window.hostd_act(action).then(hostdApply).catch((err) => say("action failed: " + err, true));
@@ -99,6 +110,14 @@ document.body.addEventListener("click", (event) => {
 		const where = deploy.closest(".headActions").querySelector(".where");
 		if (where && where.value) {
 			act(`do/deploy/${where.value}/${deploy.dataset.deploy}`);
+		}
+		return;
+	}
+	const saver = event.target.closest("[data-save]");
+	if (saver) {
+		const editor = document.getElementById("editor");
+		if (editor) {
+			save(saver.dataset.save, editor.value);
 		}
 		return;
 	}

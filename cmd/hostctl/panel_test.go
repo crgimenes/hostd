@@ -58,6 +58,13 @@ func probePanel(t *testing.T) *panel {
 	return view
 }
 
+func post(t *testing.T, view *panel, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	view.routes().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, path, strings.NewReader(body)))
+	return recorder
+}
+
 func get(t *testing.T, view *panel, path string) *httptest.ResponseRecorder {
 	t.Helper()
 	recorder := httptest.NewRecorder()
