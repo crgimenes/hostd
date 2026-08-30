@@ -477,21 +477,35 @@ func treeOf(snap snapshot, view viewState) treeView {
 		Key:    "head-panel",
 		Label:  "Panel",
 		Header: true,
-	}, rowView{
-		// The second inventory. The machines above are where things run; this
-		// is what there is to run — two lists, each easy to find and to keep.
-		Key:      "services",
-		Label:    "Services",
-		Icon:     "stack",
-		Selected: view.kind == "services",
-		Link:     "select/services",
-	}, rowView{
+	})
+	// Settings is where things are REGISTERED — the catalog of services, and
+	// one day the machines — while the tree above is where they run
+	// (crg, 2026-08-30). Open by default: a registry nobody can find is not a
+	// registry.
+	settingsOpen := !view.closed["settings-branch"]
+	settings := rowView{
 		Key:      "settings",
 		Label:    "Settings",
 		Icon:     "gear",
 		Selected: view.kind == "settings",
 		Link:     "select/settings",
-	})
+		Twist:    "closed",
+		Toggle:   "toggle/settings-branch",
+	}
+	if settingsOpen {
+		settings.Twist = "open"
+	}
+	out.Rows = append(out.Rows, settings)
+	if settingsOpen {
+		out.Rows = append(out.Rows, rowView{
+			Key:      "services",
+			Label:    "Services",
+			Icon:     "stack",
+			Child:    true,
+			Selected: view.kind == "services",
+			Link:     "select/services",
+		})
+	}
 	return out
 }
 

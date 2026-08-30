@@ -600,3 +600,24 @@ func TestADeleteArmsOnTheFirstClickAndActsOnTheSecond(t *testing.T) {
 		t.Fatal("an expired arming still spends as a confirmation")
 	}
 }
+
+// Settings is where things are REGISTERED — the services catalog under it, and
+// one day the machines — while the tree above is where they run. The branch
+// opens by default (a registry nobody can find is not one) and folds away.
+func TestTheCatalogLivesUnderSettings(t *testing.T) {
+	view, _, _ := actingPanel(t)
+	tree := get(t, view, "/").Body.String()
+	settingsAt := strings.Index(tree, `data-act="select/settings"`)
+	servicesAt := strings.Index(tree, `data-act="select/services"`)
+	if settingsAt < 0 || servicesAt < 0 {
+		t.Fatalf("settings or services missing from the tree: %s", tree)
+	}
+	if servicesAt < settingsAt {
+		t.Fatal("services renders before settings, so it is not under the branch")
+	}
+	get(t, view, "/act/toggle/settings-branch")
+	folded := get(t, view, "/").Body.String()
+	if strings.Contains(folded, `data-act="select/services"`) {
+		t.Fatal("folding settings did not fold the catalog away")
+	}
+}
