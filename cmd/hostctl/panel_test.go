@@ -874,3 +874,17 @@ func TestReloadDropsTheMachineFromThePicture(t *testing.T) {
 		t.Fatalf("a machine the inventory stopped listing is still drawn: %s", page)
 	}
 }
+
+// The Filo editor is glaze's, served by the panel itself: one binary, no
+// network. The page can only instantiate what this route answers.
+func TestTheEditorAssetsServeThemselves(t *testing.T) {
+	view, _, _ := actingPanel(t)
+	js := get(t, view, "/editor.js").Body.String()
+	if !strings.Contains(js, "GlazeEditor") || !strings.Contains(js, "filo") {
+		t.Fatalf("the editor script is missing the core or the language: %d bytes", len(js))
+	}
+	css := get(t, view, "/editor.css").Body.String()
+	if !strings.Contains(css, ".ge") {
+		t.Fatalf("the editor stylesheet is not the editor's: %q", css[:min(80, len(css))])
+	}
+}

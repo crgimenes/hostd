@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -59,6 +61,8 @@ func (p *panel) action(parts []string) (func(), error) {
 		return func() { p.prune(host) }, nil
 	case verb == "install":
 		return func() { p.install(host) }, nil
+	case verb == "opentree":
+		return func() { p.openTree() }, nil
 	case verb == "svcdel" && len(parts) == 2:
 		// host slot carries the SERVICE here: the tree has no machine.
 		act := "do/" + strings.Join(parts, "/")
@@ -83,6 +87,21 @@ func (p *panel) action(parts []string) (func(), error) {
 		return func() { p.uploadFile(host, parts[2], wire) }, nil
 	}
 	return nil, refuse
+}
+
+// openTree hands the registry's directory to the system's own file manager:
+// the tree is the operator's files, and sometimes a hand is the right tool.
+func (p *panel) openTree() {
+	opener := "xdg-open"
+	if runtime.GOOS == "darwin" {
+		opener = "open"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	err := exec.CommandContext(ctx, opener, p.configDir()).Run() // #nosec G204 -- the operator's own tree directory
+	if err != nil {
+		p.problem("tree", "hostctl", fmt.Errorf("cannot open %s: %w", p.configDir(), err))
+	}
 }
 
 // deleteDeclaration takes a service out of the CATALOG — the tree, not any

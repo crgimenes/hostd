@@ -20,6 +20,7 @@ import (
 	"github.com/crgimenes/glaze"
 	"github.com/crgimenes/glaze/menu"
 	"github.com/crgimenes/hostd/api"
+	"github.com/crgimenes/hostd/filoconf"
 	"github.com/crgimenes/hostd/metrics"
 	"github.com/crgimenes/hostd/service"
 	"github.com/crgimenes/hostd/supervisor"
@@ -370,23 +371,34 @@ func (p *panel) loadMachines() {
 	p.machinesMu.Unlock()
 }
 
-// What the editor screen holds. IsNew is a state, not a name: a new service
-// has no file until its first successful save names one.
+// What the editor screen holds — a service's declaration or the inventory,
+// same screen, same words: whoever learned one learned the other. IsNew is a
+// state, not a name: a new service has no file until its first save names one.
 type editState struct {
-	Name    string
+	// What Save receives back: "svc:<name>", "svc:" for a new service, "inv"
+	// for the inventory.
+	Token   string
+	Title   string
 	Draft   string
 	Problem string
 	IsNew   bool
+	// Where cancel goes and where delete points; empty hides the button.
+	CancelAct string
+	DeleteAct string
 }
 
 func (p *panel) editorNow(view viewState) editState {
-	if view.kind != "svcedit" {
+	if view.kind != "svcedit" && view.kind != "invedit" {
 		return editState{}
 	}
 	p.editMu.Lock()
 	defer p.editMu.Unlock()
 	return p.edit
 }
+
+const inventorySkeleton = `(inventory
+  (host (tuple "name" "machine.local") (tuple "tags" (list "amd64" "docker"))))
+`
 
 // A new declaration starts as a commented example rather than a blank page:
 // the fields teach themselves, and deleting is easier than remembering.
@@ -401,18 +413,38 @@ const serviceSkeleton = `(service
   (tuple "restart" "always"))
 `
 
-// loadEditor reads the declaration's text AS WRITTEN — never re-marshalled: a
-// declaration that comes back reformatted is a diff nobody made.
-func (p *panel) loadEditor(name string) {
-	held := editState{Name: name, IsNew: name == ""}
+// loadServiceEditor reads the declaration's text AS WRITTEN — never
+// re-marshalled: a declaration that comes back reformatted is a diff nobody
+// made.
+func (p *panel) loadServiceEditor(name string) {
+	held := editState{Token: "svc:" + name, Title: name, IsNew: name == "", CancelAct: "select/services"}
 	if held.IsNew {
+		held.Title = "New service"
 		held.Draft = serviceSkeleton
 	} else {
+		held.DeleteAct = "do/svcdel/" + name
 		source, err := os.ReadFile(p.declarationFile(name)) // #nosec G304 -- the operator's own tree
 		if err != nil {
 			held.Problem = err.Error()
 		}
 		held.Draft = string(source)
+	}
+	p.editMu.Lock()
+	p.edit = held
+	p.editMu.Unlock()
+}
+
+// The inventory is ONE file for all machines, so add, edit and delete are all
+// the same act: editing it.
+func (p *panel) loadInventoryEditor() {
+	held := editState{Token: "inv", Title: "Machines", CancelAct: "select/machines"}
+	source, err := os.ReadFile(filepath.Join(p.configDir(), service.InventoryFile)) // #nosec G304 -- the operator's own tree
+	if err != nil && !os.IsNotExist(err) {
+		held.Problem = err.Error()
+	}
+	held.Draft = string(source)
+	if held.Draft == "" {
+		held.Draft = inventorySkeleton
 	}
 	p.editMu.Lock()
 	p.edit = held
@@ -430,15 +462,26 @@ func (p *panel) declarationFile(name string) string {
 	return filepath.Join(p.configDir(), name+service.Extension)
 }
 
-// Save is bound into the window as hostd_save: the editor's text arrives here,
-// is parsed BEFORE anything is written, and lands in the tree atomically. The
-// commit stays the operator's — this writes a file, it does not apply one.
-func (p *panel) Save(name, content string) (string, error) {
+// Save is bound into the window as hostd_save: the editor's text arrives
+// here, is parsed BEFORE anything is written, and lands in the tree
+// atomically. The commit stays the operator's — this writes a file, it does
+// not apply one. The token says whose text this is: "svc:<name>", "svc:" for
+// a new service, "inv" for the inventory.
+func (p *panel) Save(token, content string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	if token == "inv" {
+		return p.saveInventory(ctx, content)
+	}
+	name := strings.TrimPrefix(token, "svc:")
+	return p.saveService(ctx, name, content)
+}
+
+func (p *panel) saveService(ctx context.Context, name, content string) (string, error) {
 	fail := func(problem string) (string, error) {
 		p.editMu.Lock()
-		p.edit = editState{Name: name, Draft: content, Problem: problem, IsNew: name == ""}
+		p.edit.Draft = content
+		p.edit.Problem = problem
 		p.editMu.Unlock()
 		return p.pending(false)
 	}
@@ -463,16 +506,48 @@ func (p *panel) Save(name, content string) (string, error) {
 	if err != nil {
 		return fail(err.Error())
 	}
+	p.loadCatalog()
+	p.closeEditor("services")
+	p.sayLine("tree", parsed.Name, "wrote "+target+"; deploy puts it on a machine, and the commit is yours", false)
+	return p.pending(false)
+}
+
+func (p *panel) saveInventory(ctx context.Context, content string) (string, error) {
+	var entries []inventoryEntry
+	err := filoconf.Decode(ctx, service.InventoryFile, content, &entries)
+	if err != nil {
+		p.editMu.Lock()
+		p.edit.Draft = content
+		p.edit.Problem = err.Error()
+		p.editMu.Unlock()
+		return p.pending(false)
+	}
+	target := filepath.Join(p.configDir(), service.InventoryFile)
+	err = writeTreeFile(target, []byte(content))
+	if err != nil {
+		p.editMu.Lock()
+		p.edit.Draft = content
+		p.edit.Problem = err.Error()
+		p.editMu.Unlock()
+		return p.pending(false)
+	}
+	p.loadMachines()
+	p.closeEditor("machines")
+	p.sayLine("tree", "inventory", fmt.Sprintf("wrote %s with %d machine(s); the fleet tree follows it, and the commit is yours", target, len(entries)), false)
+	// The window watches what the file now says.
+	p.reloadFleet()
+	return p.pending(false)
+}
+
+// closeEditor leaves the editor for the screen it belongs to.
+func (p *panel) closeEditor(kind string) {
 	p.editMu.Lock()
 	p.edit = editState{}
 	p.editMu.Unlock()
-	p.loadCatalog()
 	p.viewMu.Lock()
-	p.view.kind = "services"
+	p.view.kind = kind
 	p.view.name = ""
 	p.viewMu.Unlock()
-	p.sayLine("tree", parsed.Name, "wrote "+target+"; deploy puts it on a machine, and the commit is yours", false)
-	return p.pending(false)
 }
 
 // The tree is the operator's own files, and half a declaration must never be
@@ -712,6 +787,12 @@ func (p *panel) pick(rest []string) {
 		// The rest is a path inside the service's data, slashes and all.
 		p.view.path = strings.Join(rest[3:], "/")
 	}
+	// The editors are about the TREE, not a machine: their one argument is a
+	// name, and reading it as a host put the skeleton where caddy's file
+	// should have been (crg, 2026-08-31).
+	if p.view.kind == "svcedit" {
+		p.view.name, p.view.host = p.view.host, ""
+	}
 	if p.view.host != "" {
 		// Asking about a machine is asking what is on it. Leaving it shut
 		// would answer with the name of the machine the operator just named.
@@ -732,7 +813,10 @@ func (p *panel) pick(rest []string) {
 		p.loadMachines()
 	}
 	if kind == "svcedit" {
-		p.loadEditor(name)
+		p.loadServiceEditor(name)
+	}
+	if kind == "invedit" {
+		p.loadInventoryEditor()
 	}
 	if kind == "files" {
 		// Same rule as the catalog: read on the way in and on navigation,

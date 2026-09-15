@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/crgimenes/glaze/editor"
+
 	"github.com/crgimenes/hostd/supervisor"
 )
 
@@ -58,6 +60,21 @@ func (p *panel) routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", p.page)
 	mux.HandleFunc("GET /asset/{name}", p.asset)
+	// The Filo editor glaze ships: core plus the language, one script, no
+	// network — the panel stays a single binary that serves itself.
+	mux.HandleFunc("GET /editor.js", func(w http.ResponseWriter, r *http.Request) {
+		body, err := editor.JS("filo")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+		_, _ = w.Write(body)
+	})
+	mux.HandleFunc("GET /editor.css", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/css; charset=utf-8")
+		_, _ = w.Write(editor.CSS())
+	})
 	mux.HandleFunc("POST /save/{name...}", func(w http.ResponseWriter, r *http.Request) {
 		content, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 		if err != nil {

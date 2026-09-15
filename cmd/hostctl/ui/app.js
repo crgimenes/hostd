@@ -46,6 +46,39 @@ function hostdApply(html) {
 		}
 	}
 	settle(following);
+	enhanceEditor();
+}
+
+// The declaration vocabulary, offered by the completion besides Filo's own.
+const TUPLE_KEYS = ["service", "inventory", "host", "tuple", "list",
+	"name", "image", "args", "env", "dir", "state", "restart", "stop-timeout",
+	"ports", "volumes", "domain", "upstream-port", "memory-mb", "cpus", "tags",
+	"every", "overlap", "max-parallel", "run-timeout"];
+
+let editorAt = null;
+
+// A fragment swap replaces the editor's host div, so the instance is rebuilt
+// from the data-draft the server rendered. Typing does not repaint (the draft
+// stays out of the digest), so the instance survives the rounds.
+function enhanceEditor() {
+	const host = document.getElementById("editor");
+	if (!host) {
+		editorAt = null;
+		return;
+	}
+	if (editorAt && editorAt.host === host) {
+		return;
+	}
+	if (!window.GlazeEditor) {
+		return;
+	}
+	const ed = new GlazeEditor(host, {
+		language: "filo",
+		value: host.dataset.draft || "",
+		completions: TUPLE_KEYS,
+	});
+	editorAt = { host: host, ed: ed };
+	ed.focus();
 }
 
 // act carries one operator action to the panel over the glaze binding — the
@@ -115,9 +148,8 @@ document.body.addEventListener("click", (event) => {
 	}
 	const saver = event.target.closest("[data-save]");
 	if (saver) {
-		const editor = document.getElementById("editor");
-		if (editor) {
-			save(saver.dataset.save, editor.value);
+		if (editorAt) {
+			save(saver.dataset.save, editorAt.ed.getValue());
 		}
 		return;
 	}

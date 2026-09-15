@@ -952,23 +952,23 @@ button.push.armed {
 	border-color: transparent;
 }
 
-/* The declaration, as text: the tree is files, and this is one of them. */
-.card.editor textarea {
-	width: 100%;
-	min-height: 340px;
-	resize: vertical;
-	font-family: var(--mono);
-	font-size: 12px;
-	line-height: 1.5;
-	color: var(--label);
-	background: var(--canvas);
-	border: 1px solid var(--hairline);
-	border-radius: 6px;
-	padding: 10px;
-	box-sizing: border-box;
-	tab-size: 2;
+/* The file, in glaze's own Filo editor: highlighting, completion, brackets.
+   Themed with the panel's palette so the two read as one application. */
+.card.editor #editor {
+	height: 380px;
 }
-.card.editor textarea:focus {
-	outline: none;
-	border-color: var(--accent);
+.card.editor .ge {
+	--ge-bg: var(--canvas);
+	--ge-fg: var(--label);
+	--ge-gutter-bg: var(--sidebar);
+	--ge-gutter-fg: var(--tertiary);
+	--ge-caret: var(--accent);
+	--ge-sel: rgba(0, 122, 255, 0.18);
+	--ge-match-bg: rgba(0, 122, 255, 0.28);
+	--ge-err: var(--failed);
+	--ge-comp-bg: var(--card);
+	--ge-comp-sel: var(--hover);
+	--ge-border: var(--hairline);
+	border-radius: 6px;
+	font-size: 12px;
 }

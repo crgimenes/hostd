@@ -44,16 +44,17 @@ type detailView struct {
 	AlertBusy bool
 }
 
-// The declaration editor: the file's text, exactly as written, and what
-// parsing thought of the last attempt.
+// The editor: a file's text, exactly as written, and what parsing thought of
+// the last attempt. One shape for the declaration and the inventory, so
+// whoever learned one screen learned the other.
 type editorView struct {
-	Name    string
+	Token   string
 	Draft   string
 	Problem string
-	// The delete waiting for its second click.
+	// The delete waiting for its second click; empty hides the button.
 	DeleteAct string
 	Armed     bool
-	IsNew     bool
+	CancelAct string
 }
 
 type cardView struct {
@@ -164,7 +165,7 @@ func (d detailView) StructureKey() string {
 		// The DRAFT stays out on purpose: what is being typed lives in the
 		// page, and a repaint per keystroke would eat the caret. Problem and
 		// the armed delete are what change the screen.
-		fmt.Fprintf(&key, "e:%s|%s|%v|%v\n", d.Editor.Name, d.Editor.Problem, d.Editor.Armed, d.Editor.IsNew)
+		fmt.Fprintf(&key, "e:%s|%s|%v\n", d.Editor.Token, d.Editor.Problem, d.Editor.Armed)
 	}
 	for _, card := range d.Cards {
 		fmt.Fprintf(&key, "%s|%s|%s|%s|%d|%d|%v\n", card.Key, card.Heading, card.Link, card.Problem, len(card.Charts), len(card.Numbers), card.Machines)
@@ -249,7 +250,7 @@ func detailOf(snap snapshot, view viewState, info settingsInfo, catalog []servic
 		out = catalogDetail(catalog, machines, info)
 	case "files":
 		out = filesDetail(view, files)
-	case "svcedit":
+	case "svcedit", "invedit":
 		out = editorDetail(editor)
 	case "machines":
 		out = machinesDetail(snap, inventory, inventoryProblem, info)
@@ -492,29 +493,22 @@ func catalogDetail(catalog []service.Declaration, machines []string, info settin
 	return out
 }
 
-// editorDetail is the declaration as text, which is the interface on purpose:
-// the tree is versioned files, and what this screen writes is exactly what a
-// hand would have written — never re-marshalled, verified by parse before a
-// byte lands. Deleting lives here, armed, because deletion is an edit.
+// editorDetail is the file as text, which is the interface on purpose: the
+// tree is versioned files, and what this screen writes is exactly what a hand
+// would have written — never re-marshalled, verified by parse before a byte
+// lands. Deleting lives here, armed, because deletion is an edit.
 func editorDetail(editor editState) detailView {
-	title := editor.Name
-	if editor.IsNew {
-		title = "New service"
-	}
-	held := editorView{
-		Name:    editor.Name,
-		Draft:   editor.Draft,
-		Problem: editor.Problem,
-		IsNew:   editor.IsNew,
-	}
-	if !editor.IsNew {
-		held.DeleteAct = "do/svcdel/" + editor.Name
-	}
 	return detailView{
-		Title:    title,
-		Subtitle: "the declaration, as the tree holds it; saving writes the file — deploy and commit stay yours",
+		Title:    editor.Title,
+		Subtitle: "as the tree holds it; saving writes the file — deploy and commit stay yours",
 		Single:   true,
-		Editor:   &held,
+		Editor: &editorView{
+			Token:     editor.Token,
+			Draft:     editor.Draft,
+			Problem:   editor.Problem,
+			DeleteAct: editor.DeleteAct,
+			CancelAct: editor.CancelAct,
+		},
 	}
 }
 
@@ -684,13 +678,19 @@ func machinesDetail(snap snapshot, inventory []inventoryEntry, problem string, i
 	}
 	if len(inventory) == 0 {
 		out.Empty = "the inventory lists no machine yet"
-		return out
 	}
 	card := cardView{
 		Key:      "inventory",
 		Heading:  "Inventory",
 		Aside:    "the machines the fleet is made of; tags group them for -tag",
 		GridHead: []string{"machine", "tags", "answers"},
+		// One file holds every machine, so add, edit and delete are all the
+		// same act: editing it.
+		Buttons: []buttonView{{
+			Label: "edit",
+			Icon:  "gear",
+			Act:   "select/invedit",
+		}},
 	}
 	for _, entry := range inventory {
 		answers := "never asked"

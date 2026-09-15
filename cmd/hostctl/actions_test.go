@@ -694,3 +694,53 @@ func TestTheEditorRegistersEditsAndDeletes(t *testing.T) {
 		return os.IsNotExist(err)
 	})
 }
+
+// Editing opens the SERVICE'S file, not the skeleton — the bug the first user
+// hit: the editor's argument was being read as a machine name, so the file
+// never loaded and the delete button never rendered (crg, 2026-08-31).
+func TestEditingOpensTheServicesOwnFile(t *testing.T) {
+	view, _, _ := actingPanel(t)
+	source := "(service (tuple \"name\" \"probe\") (tuple \"image\" \"probe:9\"))\n"
+	post(t, view, "/save/", source)
+
+	screen := get(t, view, "/act/select/svcedit/probe").Body.String()
+	if !strings.Contains(screen, "probe:9") {
+		t.Fatalf("the editor does not hold the service's own text: %s", screen)
+	}
+	if strings.Contains(screen, "CHANGE-ME") {
+		t.Fatal("the editor shows the skeleton instead of the file")
+	}
+	for _, control := range []string{"do/svcdel/probe", "do/opentree/here", "select/services", `data-save="svc:probe"`} {
+		if !strings.Contains(screen, control) {
+			t.Fatalf("the editor is missing %q: %s", control, screen)
+		}
+	}
+}
+
+// The machines registry edits the same way the services do — one language,
+// both screens. The inventory is one file, so add, edit and delete are all
+// the same act, and a save that does not parse writes nothing.
+func TestTheInventoryEditsLikeAService(t *testing.T) {
+	view, _, _ := actingPanel(t)
+	screen := get(t, view, "/act/select/invedit").Body.String()
+	for _, control := range []string{"yuki", "do/opentree/here", "select/machines", `data-save="inv"`} {
+		if !strings.Contains(screen, control) {
+			t.Fatalf("the inventory editor is missing %q: %s", control, screen)
+		}
+	}
+
+	body := post(t, view, "/save/inv", "(inventory (host (tuple").Body.String()
+	if !strings.Contains(body, "problem") {
+		t.Fatalf("a broken inventory did not come back with the problem: %s", body)
+	}
+	held, err := os.ReadFile(filepath.Join(view.configDir(), "inventory.filo"))
+	if err != nil || !strings.Contains(string(held), "yuki") {
+		t.Fatalf("a save that failed to parse still wrote: %v %q", err, held)
+	}
+
+	updated := `(inventory (host (tuple "name" "yuki")) (host (tuple "name" "nova.local") (tuple "tags" (list "arm64"))))`
+	body = post(t, view, "/save/inv", updated).Body.String()
+	if !strings.Contains(body, "nova.local") {
+		t.Fatalf("the machines screen after the save does not show the new machine: %s", body)
+	}
+}
