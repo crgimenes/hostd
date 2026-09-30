@@ -459,6 +459,12 @@ func (b *boundNames) Window() unsafe.Pointer                                { re
 func (b *boundNames) SetTitle(string)                                       {}
 func (b *boundNames) SetSize(int, int, glaze.Hint)                          {}
 func (b *boundNames) Navigate(string)                                       {}
+func (b *boundNames) GoBack()                                               {}
+func (b *boundNames) GoForward()                                            {}
+func (b *boundNames) Reload()                                               {}
+func (b *boundNames) Stop()                                                 {}
+func (b *boundNames) Find(string, bool, func(bool))                         {}
+func (b *boundNames) SetZoom(float64)                                       {}
 func (b *boundNames) SetHtml(string)                                        {}
 func (b *boundNames) Init(string)                                           {}
 func (b *boundNames) Eval(string)                                           {}
