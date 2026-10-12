@@ -119,7 +119,7 @@ func runFileGet(ctx context.Context, client *api.Client, opt options, svc, wire 
 }
 
 func runFilePut(ctx context.Context, client *api.Client, opt options, svc, local, wire string) (int, error) {
-	file, err := os.Open(local) // #nosec G304 -- the operator's own file, named on their command line
+	file, err := os.Open(local) // #nosec G304 G703 -- the operator's own file, named on their command line
 	if err != nil {
 		return exitFailed, err
 	}

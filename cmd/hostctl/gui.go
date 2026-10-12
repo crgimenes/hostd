@@ -455,7 +455,7 @@ func (p *panel) loadInventoryEditor() {
 // inside its directory when files travel with it.
 func (p *panel) declarationFile(name string) string {
 	dir := filepath.Join(p.configDir(), name)
-	info, err := os.Stat(dir)
+	info, err := os.Stat(dir) // #nosec G703 -- the operator's own tree
 	if err == nil && info.IsDir() {
 		return filepath.Join(dir, service.InitFile)
 	}

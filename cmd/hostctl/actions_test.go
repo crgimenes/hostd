@@ -486,6 +486,9 @@ func TestUpdatingAMachineForgetsItsOldVersion(t *testing.T) {
 	if version != "" {
 		t.Fatal("the old version survived the update, so the dot would stay amber")
 	}
+	if daemon.Version() == "" {
+		t.Skip("this build carries no daemon, so there is no warning to say again")
+	}
 	// And the same warning can be said again if it turns out to still be true.
 	said := strings.Count(view.logText(), "v0.0.1 here")
 	view.sayAlert(fleetHost{Host: "yuki", Version: "v0.0.1"})
