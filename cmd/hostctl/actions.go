@@ -110,6 +110,11 @@ func (p *panel) openTree() {
 // belong to; the tree is the operator's and usually versioned, so what git
 // holds, git can bring back.
 func (p *panel) deleteDeclaration(name string) {
+	// ".." would make the tree's parent the directory removed whole
+	if !service.ValidName(name) {
+		p.problem("tree", name, fmt.Errorf("invalid service name %q", name))
+		return
+	}
 	target := p.declarationFile(name)
 	var err error
 	if filepath.Base(target) == service.InitFile {

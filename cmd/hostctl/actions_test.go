@@ -696,6 +696,12 @@ func TestTheEditorRegistersEditsAndDeletes(t *testing.T) {
 		_, err = os.Stat(filepath.Join(view.configDir(), "probe.filo"))
 		return os.IsNotExist(err)
 	})
+
+	// A name that is not a service's deletes nothing, ".." least of all.
+	view.deleteDeclaration("..")
+	if _, err = os.Stat(view.configDir()); err != nil {
+		t.Fatalf("a delete named .. reached past the tree: %v", err)
+	}
 }
 
 // Editing opens the SERVICE'S file, not the skeleton — the bug the first user
