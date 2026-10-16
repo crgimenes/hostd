@@ -69,6 +69,7 @@ jobs:
       - run: gofmt -l . | tee /dev/stderr | (! read)
       - uses: golangci/golangci-lint-action@v9
         with:
+          version: v2.15.0
           args: --timeout 5m
       - name: staticcheck
         run: |
