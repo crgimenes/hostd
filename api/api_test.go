@@ -213,7 +213,7 @@ func newFixture(t *testing.T) *fixture {
 	t.Cleanup(func() {
 		cancel()
 		select {
-		case <-f.served:
+		case <-f.served: //nolint:errcheck // the cleanup waits for Serve to return; its error is not the subject here
 		case <-time.After(10 * time.Second):
 			t.Error("server did not stop")
 		}
