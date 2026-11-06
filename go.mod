@@ -4,7 +4,7 @@ go 1.27.1
 
 require (
 	github.com/crgimenes/filo v0.1.1
-	github.com/crgimenes/glaze v0.0.82
+	github.com/crgimenes/glaze v0.0.83
 	modernc.org/sqlite v1.61.1
 )
 
