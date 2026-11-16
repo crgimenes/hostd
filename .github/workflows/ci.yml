@@ -77,5 +77,5 @@ jobs:
           staticcheck ./...
       - name: gosec
         run: |
-          go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.30.0
           gosec ./...
