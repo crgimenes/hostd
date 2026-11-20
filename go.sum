@@ -1,7 +1,7 @@
 github.com/crgimenes/filo v0.1.4 h1:/v+6qTs3i48z5sQWAdvVvJWdQQTb3NwVWMNIX9ther8=
 github.com/crgimenes/filo v0.1.4/go.mod h1:at6YbdrYygETZYeRNlqb5MwDHudvAnCHRIlMnfhaM14=
-github.com/crgimenes/glaze v0.0.85 h1:92CqRfLXChYLoPjzFjV1oHb4+k2tMJzsr4gp4+Sj7PA=
-github.com/crgimenes/glaze v0.0.85/go.mod h1:41rd4sKUekbjd2w9vUSKO4JBf0WKdR1wd+gud5S/agk=
+github.com/crgimenes/glaze v0.0.86 h1:+z2YIIb0jzrfN6e4a2Pn2EfGV87Ep/W3Zbup4cebfPk=
+github.com/crgimenes/glaze v0.0.86/go.mod h1:41rd4sKUekbjd2w9vUSKO4JBf0WKdR1wd+gud5S/agk=
 github.com/dustin/go-humanize v1.1.0 h1:dbKTrvD0klcbBV/h4AWJdMuZogJACoMlvWIWZ5b2xWg=
 github.com/dustin/go-humanize v1.1.0/go.mod h1:hc1CvRkJMsgxqjmjMQF3QNRAZBwY8AXBAzKYoSX9sFI=
 github.com/ebitengine/purego v0.11.3 h1:OB+JLpdm7ioymhyA+6s5kbb/uOuYycAgL8NNTFc5MLg=
